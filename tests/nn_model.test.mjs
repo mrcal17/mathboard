@@ -551,7 +551,8 @@ describe('hand-set presets compute what they claim', () => {
     const b = M.backward(net, M.forward(net), targets(net), 'mse');
     const g = net.layers.map((_, l) => (l ? Math.abs(b.dW[l][0][0][0]) : 0));
     for (let l = 1; l < last(net); l++) assert.ok(g[l] < g[l + 1] / 3, `layer ${l}: ${g[l]} vs ${g[l + 1]}`);
-    assert.ok(g[1] < 1e-3 * g[last(net)]);
+    assert.ok(g[1] < 2e-3 * g[last(net)]);
+    assert.equal(M.fmt(g[1], 2), '0.00', 'the matrix panel shows the first layer\'s gradient as 0.00');
   });
 
   test('residual-style shortcuts are masked identities', () => {

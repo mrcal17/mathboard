@@ -482,23 +482,85 @@ back, and ▾ folds it (the folded header still shows the epoch, the loss and a 
 
 <a name="presets"></a>
 <details>
-<summary>Presets</summary>
+<summary>Presets (37, in 7 groups)</summary>
 
-| Preset | Net | Dataset |
-|---|---|---|
-| Perceptron | 2 → 1 sigmoid | two blobs |
-| XOR | 2 → 4 tanh → 1 sigmoid | XOR |
-| MLP | 2 → 6 ReLU → 4 ReLU → 1 sigmoid | circles |
-| Deep | 2 → four layers of 6 tanh → 1 sigmoid | spiral |
-| Autoencoder | 4 → 2 tanh → 4 sigmoid, targets = inputs, MSE | none |
-| Residual block | 2 → 3 ReLU → 2 identity, plus skip edges from the inputs that start at weight 1, → 1 sigmoid | moons |
-| Linear | 2 → 3 → 2, all identity, MSE: try **Collapse** | none |
-| Classifier | 2 → 4 tanh → 3 softmax | three classes |
+**Basics**
 
-These presets come with an input and targets, so the backward pass shows at once, and always
-build the same weights. **Randomize** (or **↻** in the Train panel) gives new ones. The
-classifiers use cross-entropy. Autoencoder and Linear have no dataset, so the Train panel offers
-**Adapt network** instead of Play.
+| Preset | Net | Dataset | What to notice |
+|---|---|---|---|
+| Logic gates: AND, OR, NAND (hand-set) (`gates`) | 2 → 3 Sigmoid | none | Each row of W is one gate. Weights (20, 20) with bias −30 make AND, with −10 OR; flipping every sign gives NAND. The bias sets how many inputs must be on. |
+| XOR by hand: OR + NAND, then AND (`xor_gates`) | 2 → 2 Sigmoid → 1 Sigmoid | none | Row 1 of W⁽¹⁾ is OR and row 2 is NAND; W⁽²⁾ ANDs them. That is XOR with no training: try all four 0/1 inputs. |
+| XOR by hand: two ReLUs (exact) (`xor_relu`) | 2 → 2 ReLU → 1 | none | Both rows of W⁽¹⁾ are (1, 1); only the biases differ (0, −1). ReLU sends (0,1) and (1,0) to the same hidden point, so the linear output h₁ − 2h₂ is exactly XOR. |
+| XOR (2-4-1) (`xor`) | 2 → 4 tanh → 1 Sigmoid | XOR | No single line separates XOR, so W⁽¹⁾ first maps the plane to 4 tanh features, where one row of W⁽²⁾ is enough. Train it and watch the boundary bend. |
+| Perceptron (`perceptron`) | 2 → 1 Sigmoid | Two blobs | One neuron is one row of W: σ(w·x + b). The boundary is the line w·x + b = 0, with w as its normal. The same model as logistic regression. |
+| Logistic regression (from w = 0) (`logreg`) | 2 → 1 Sigmoid | Two blobs | p = σ(w·x + b), starting at w = 0 (p = ½ everywhere). The loss is convex, so zero is a fine start: train and watch w turn to point from blob 0 to blob 1. |
+| Linear regression (1 → 1) (`linreg`) | 1 → 1 | Line | W is 1×1: ŷ = w x + b. From w = b = 0, gradient descent walks to the least-squares line, slope 0.7 and intercept 0.2. |
+| Softmax regression (2 → 3) (`softmax_reg`) | 2 → 3 Softmax | Three classes | W is 3×2, one row per class: z_k = w_k·x + b_k, and softmax turns the scores into probabilities. The class boundaries are where two rows tie. Starts at W = 0. |
+| Linear (collapses to one matrix) (`linear`) | 2 → 3 → 2 | none | No activations, so the layers collapse: W⁽²⁾W⁽¹⁾ is a single 2×2 matrix (Collapse in the matrix panel). Depth adds nothing without a nonlinearity. |
+
+**MLPs**
+
+| Preset | Net | Dataset | What to notice |
+|---|---|---|---|
+| MLP (2-6-4-1, ReLU) (`mlp`) | 2 → 6 ReLU → 4 ReLU → 1 Sigmoid | Circles | W⁽¹⁾ is 6×2, W⁽²⁾ 4×6, W⁽³⁾ 1×4. Each first-layer ReLU creases the plane along a line; together the creases can enclose the inner circle. |
+| Deep (4 hidden layers) (`deep`) | 2 → 6 tanh → 6 tanh → 6 tanh → 6 tanh → 1 Sigmoid | Spiral | Four tanh layers of 6, so the middle W's are 6×6. Each layer warps what the one before produced; the spiral takes many warps to untangle. |
+| Classifier (2-4-3 softmax) (`classifier`) | 2 → 4 tanh → 3 Softmax | Three classes | The output W is 3×4, one row per class, and softmax turns the three scores into a distribution. With cross-entropy the output δ is just ŷ − y. |
+| Wide & shallow (2-12-1) (`wide`) | 2 → 12 tanh → 1 Sigmoid | Circles | One hidden layer: W⁽¹⁾ is 12×2 and W⁽²⁾ 1×12, 49 parameters in all. Narrow & deep has exactly as many; train both on Circles and compare. |
+| Narrow & deep (2-3-3-3-3-1) (`narrow_deep`) | 2 → 3 tanh → 3 tanh → 3 tanh → 3 tanh → 1 Sigmoid | Circles | Four hidden layers of 3: W is 3×2, then three 3×3, then 1×3, 49 parameters like Wide & shallow. Depth composes functions instead of adding more of them. |
+| Funnel classifier (2-8-6-4-3) (`funnel`) | 2 → 8 ReLU → 6 ReLU → 4 ReLU → 3 Softmax | Three classes | W shrinks down the chain, 8×2, 6×8, 4×6, 3×4: each layer maps into a smaller space, ending in the 3 class scores. |
+| Universal approximation (1-10-1, hand-built) (`uat`) | 1 → 10 ReLU → 1 | Sine | Built by hand: unit i is ReLU(x − kᵢ) with knots kᵢ = −1, −0.8, …, 0.8 (W⁽¹⁾ all 1s, b⁽¹⁾ = −k). W⁽²⁾ holds the slope changes, so ŷ joins the sine's values at the knots. |
+
+**Skip connections**
+
+| Preset | Net | Dataset | What to notice |
+|---|---|---|---|
+| Residual block (skip edges) (`residual`) | 2 → 3 ReLU → 2 → 1 Sigmoid | Moons | The x + F(x) layer has two terms: W⁽²⁾a⁽¹⁾ plus the identity shortcut from x (off-diagonal masked). The gradient reaches x through that identity unchanged. |
+| ResNet bottleneck block (`bottleneck`) | 2 → 4 ReLU → 2 ReLU → 2 ReLU → 4 ReLU → 1 Sigmoid | Moons | Reduce 4 → 2, transform 2 → 2, expand 2 → 4, then add the stem a⁽¹⁾ through an identity term before the ReLU: a⁽⁴⁾ = ReLU(W⁽⁴⁾a⁽³⁾ + a⁽¹⁾ + b). |
+| Transformer FFN block (d → 4d → d) (`ffn`) | 2 → 8 ReLU → 2 → 1 Sigmoid | Circles | W⁽¹⁾ is 8×2 (d → 4d) and W⁽²⁾ 2×8 (4d → d); layer 2 also adds x through an identity term, so it holds x + FFN(x), the residual stream. A sigmoid head reads it. |
+| DenseNet-style (every layer to every later one) (`densenet`) | 2 → 3 ReLU → 3 ReLU → 1 Sigmoid | Moons | Every layer has a term from every earlier layer: z⁽³⁾ = W⁽³⁾a⁽²⁾ + W a⁽¹⁾ + W x + b. That is DenseNet's concatenation [x; a⁽¹⁾; a⁽²⁾] times one wide matrix, split into blocks. |
+| U-Net-style encoder-decoder skips (`unet`) | 4 → 3 ReLU → 2 ReLU → 3 ReLU → 4 | none | Mirror-image skips, encoder to decoder and input to output, each a masked identity, so detail can bypass the 2-unit bottleneck. U-Net concatenates instead, which would make them full blocks. |
+| Wide & deep (linear + MLP) (`wide_deep`) | 2 → 4 ReLU → 4 ReLU → 1 Sigmoid | Moons | The output adds two terms before one sigmoid: W⁽³⁾a⁽²⁾ from the deep MLP and W x straight from the inputs, a plain linear model (the wide part). |
+
+**Structure in W**
+
+| Preset | Net | Dataset | What to notice |
+|---|---|---|---|
+| 1D convolution (banded W) (`conv1d`) | 8 → 6 | none | W is banded Toeplitz: every row is the kernel (−1, 2, −1) moved one column right, and everything off the band is masked. The box input lights up only at its two edges. |
+| 1D convolution, stride 2 (`conv1d_s2`) | 9 → 4 | none | Stride 2: every row is the kernel (¼, ½, ¼) moved two columns right, so W is 4×9 and the signal comes out half as long. |
+| Average pooling (fixed weights) (`avgpool`) | 8 → 4 | none | Each row of W is ½, ½ over its own pair of inputs, masked elsewhere: pooling is a fixed linear map. |
+| Max pooling from ReLUs (exact) (`maxpool`) | 4 → 2 ReLU → 2 | none | max(a, b) = b + ReLU(a − b): the rows of W⁽¹⁾ take differences (1, −1), and the output adds b back through a skip term. Exact, with no max anywhere in the model. |
+| Tiny LeNet: conv, pool, dense, softmax (`lenet`) | 8 → 6 ReLU → 3 → 3 Softmax | none | Three kinds of W in one net: the conv is banded (kernel ½, 1, ½), the pool is fixed ½ pairs, the last is dense. A bump in the middle of the 8 pixels comes out as mid. |
+| Graph convolution (W = adjacency) (`gnn`) | 5 → 5 ReLU → 5 ReLU | none | W is the graph: row i averages node i and its neighbours (A + I, each row divided by its count) and every non-edge is masked. Two layers are two hops: node 1's signal reaches node 4, not 5. |
+| Two towers (block-diagonal W) (`towers`) | 2 → 6 tanh → 4 tanh → 1 Sigmoid | Circles | W⁽¹⁾ and W⁽²⁾ are block-diagonal: tower A sees only x₁, tower B only x₂, and the output adds them. f(x₁) + g(x₂) can still fit Circles, since x₁² + x₂² is a sum too. |
+| Multi-task: shared trunk, 3 heads (`multitask`) | 2 → 4 tanh → 6 tanh → 3 Sigmoid | Three classes | W⁽¹⁾ is the trunk every task shares; W⁽³⁾ is block-diagonal, so each sigmoid reads only its own head. Three yes/no tasks (is it class k?) train on one summed loss. |
+
+**Sequences**
+
+| Preset | Net | Dataset | What to notice |
+|---|---|---|---|
+| RNN unrolled over 4 steps (`rnn`) | 4 → 2 tanh → 2 tanh → 2 tanh → 2 tanh → 1 | none | Step t computes tanh(W_hh h⁽ᵗ⁻¹⁾ + w_x x_t + b), with x_t on a skip edge. Every step starts with the same W_hh and w_x, but there is no weight tying: training would move each copy on its own. |
+| Dilated causal conv (WaveNet-style) (`wavenet`) | 8 → 8 → 8 → 8 | none | Each W is lower-triangular with ½ on the diagonal and ½ at offset 1, 2, then 4: no row reads the future, and the receptive field doubles per layer. The last output is the mean of all 8 inputs. |
+
+**Embeddings & autoencoders**
+
+| Preset | Net | Dataset | What to notice |
+|---|---|---|---|
+| Autoencoder (4-2-4) (`autoencoder`) | 4 → 2 tanh → 4 Sigmoid | none | W⁽¹⁾ (2×4) squeezes the 4 inputs into a 2-number code and W⁽²⁾ (4×2) rebuilds them. The target is the input itself. |
+| Word embedding (one-hot lookup) (`embedding`) | 5 → 2 → 5 Softmax | none | x is one-hot, so W⁽¹⁾x is just the cat column of W⁽¹⁾: an embedding is a table lookup. W⁽²⁾ starts as W⁽¹⁾ᵀ, so each score is a dot product with the cat vector. |
+| Linear autoencoder = PCA (3-2-3) (`pca_ae`) | 3 → 2 → 3 | Flat cloud (3-D) | All linear, so x̂ = W⁽²⁾W⁽¹⁾x + b has rank 2. Train on the flat cloud: the two columns of W⁽²⁾ come to span its plane, the span of the top two principal components. |
+
+**Teaching demos**
+
+| Preset | Net | Dataset | What to notice |
+|---|---|---|---|
+| Vanishing gradients (sigmoid chain) (`vanishing`) | 1 → 1 Sigmoid → 1 Sigmoid → 1 Sigmoid → 1 Sigmoid → 1 Sigmoid → 1 | Line | Turn on Backward: each sigmoid multiplies δ by w·σ′(z) ≤ ¼, so ∂L/∂W shrinks about 4× per layer toward the input. Train on Line: the early layers barely move. |
+| GAN as one net: D(G(z)) (`gan`) | 2 → 4 ReLU → 2 → 4 ReLU → 1 Sigmoid | none | Only the composition D(G(z)). With target 1 the backward pass is G's update (fool D); a real GAN also shows D real data and trains D and G in turns. |
+
+Every preset comes with an input and targets, so the backward pass shows at once, and always
+builds the same weights. **Randomize** (or **↻** in the Train panel) gives new ones. The
+New net menu groups them the same way, shows each note as a tooltip, and flashes it when the
+preset loads. A preset marked "none" has no dataset of its own: the Train panel picks one
+that fits its shape, or offers **Adapt network**.
 
 </details>
 

@@ -1303,7 +1303,7 @@ export const PRESETS = {
     note: 'One hidden layer: W⁽¹⁾ is 12×2 and W⁽²⁾ 1×12, 49 parameters in all. Narrow & deep has exactly as many; train both on Circles and compare.',
   }, seed => layout(stack('Wide & shallow', 'xent',
     [IN(2), { name: 'Hidden', act: 'tanh', size: 12 }, { name: 'Output', act: 'sigmoid', size: 1 }],
-    { seed, inputs: [0.2, -0.3], targets: [1] }), 900, 940)),
+    { seed, inputs: [0.2, -0.3], targets: [1] }), 700, 940)),
   narrow_deep: preset({
     group: MLPS, label: 'Narrow & deep (2-3-3-3-3-1)', dataset: 'circles',
     note: 'Four hidden layers of 3: W is 3×2, then three 3×3, then 1×3, 49 parameters like Wide & shallow. Depth composes functions instead of adding more of them.',
@@ -1331,7 +1331,7 @@ export const PRESETS = {
     setBias(net, 1, i => r3(-knot(i)));
     wire(net, 1, 2, (i, j) => r3(j ? slope(j) - slope(j - 1) : slope(0)));
     setBias(net, 2, r3(f(-1)));
-    return layout(io(net, [0.5], [0.8]), 900, 790);
+    return layout(io(net, [0.5], [0.8]), 700, 790);
   }),
 
   // ---------------------------------------------------------------- skip connections
@@ -1354,12 +1354,12 @@ export const PRESETS = {
     const r = rng(seed);
     const net = blank('ResNet bottleneck', 'xent', [IN(2), { name: 'Stem', act: 'relu', size: 4 },
       { name: 'Reduce', act: 'relu', size: 2 }, { name: 'Transform', act: 'relu', size: 2 },
-      { name: 'Expand + stem', act: 'relu', size: 4 }, { name: 'Output', act: 'sigmoid', size: 1 }]);
+      { name: 'Expand', act: 'relu', size: 4 }, { name: 'Output', act: 'sigmoid', size: 1 }]);
     for (let l = 1; l <= 4; l++) wireRandom(net, l - 1, l, r, { scheme: 'he' });
     wireRandom(net, 4, 5, r);
     wire(net, 1, 4, eye);
     smallBiases(net, r);
-    return layout(io(net, [0.6, -0.3], [1]));
+    return layout(io(net, [0.6, -0.3], [1]), 1000);
   }),
   ffn: preset({
     group: SKIPS, label: 'Transformer FFN block (d → 4d → d)', dataset: 'circles',
@@ -1381,9 +1381,9 @@ export const PRESETS = {
   }, seed => {
     const r = rng(seed);
     const net = blank('DenseNet-style', 'xent', [IN(2),
-      ...[1, 2, 3].map(i => ({ name: `Layer ${i}`, act: 'relu', size: 3 })), { name: 'Output', act: 'sigmoid', size: 1 }]);
-    for (let b = 1; b <= 4; b++) {
-      for (let a = b - 1; a >= 0; a--) wireRandom(net, a, b, r, { scheme: b < 4 ? 'he' : 'xavier', fanIn: 2 + 3 * (b - 1) });
+      ...[1, 2].map(i => ({ name: `Layer ${i}`, act: 'relu', size: 3 })), { name: 'Output', act: 'sigmoid', size: 1 }]);
+    for (let b = 1; b <= 3; b++) {
+      for (let a = b - 1; a >= 0; a--) wireRandom(net, a, b, r, { scheme: b < 3 ? 'he' : 'xavier', fanIn: 2 + 3 * (b - 1) });
     }
     smallBiases(net, r);
     return layout(io(net, [0.6, -0.3], [1]));
@@ -1394,8 +1394,8 @@ export const PRESETS = {
   }, seed => {
     const r = rng(seed);
     const net = blank('U-Net-style', 'mse', [IN(4), { name: 'Encoder', act: 'relu', size: 3 },
-      { name: 'Bottleneck', act: 'relu', size: 2 }, { name: 'Decoder + skip', act: 'relu', size: 3 },
-      { name: 'Output + skip', act: 'identity', size: 4 }]);
+      { name: 'Bottleneck', act: 'relu', size: 2 }, { name: 'Decoder', act: 'relu', size: 3 },
+      { name: 'Output', act: 'identity', size: 4 }]);
     ['he', 'he', 'he', 'xavier'].forEach((scheme, l) => wireRandom(net, l, l + 1, r, { scheme }));
     wire(net, 1, 3, eye);
     wire(net, 0, 4, eye);
@@ -1425,7 +1425,7 @@ export const PRESETS = {
   }, () => {
     const net = blank('1D convolution', 'mse', [IN(8), { name: 'Conv, kernel 3', act: 'identity', size: 6 }]);
     wire(net, 0, 1, band([-1, 2, -1]));
-    layout(io(net, [0, 0, 1, 1, 1, 1, 0, 0], 'self'), 900, 640);
+    layout(io(net, [0, 0, 1, 1, 1, 1, 0, 0], 'self'), 600, 640);
     return alignTo(net, 1, 0, i => [i + 1]);
   }),
   conv1d_s2: preset({
@@ -1434,7 +1434,7 @@ export const PRESETS = {
   }, () => {
     const net = blank('1D convolution, stride 2', 'mse', [IN(9), { name: 'Conv, stride 2', act: 'identity', size: 4 }]);
     wire(net, 0, 1, band([0.25, 0.5, 0.25], 2));
-    layout(io(net, [0, 1, 0, 1, 0, 1, 1, 1, 1], 'self'), 900, 720);
+    layout(io(net, [0, 1, 0, 1, 0, 1, 1, 1, 1], 'self'), 600, 720);
     return alignTo(net, 1, 0, i => [2 * i + 1]);
   }),
   avgpool: preset({
@@ -1443,7 +1443,7 @@ export const PRESETS = {
   }, () => {
     const net = blank('Average pooling', 'mse', [IN(8), { name: 'Avg pool, size 2', act: 'identity', size: 4 }]);
     wire(net, 0, 1, pairs(0.5));
-    layout(io(net, [0.2, 0.8, 1, 0.4, -0.6, -0.2, 0.9, 0.1], 'self'), 900, 640);
+    layout(io(net, [0.2, 0.8, 1, 0.4, -0.6, -0.2, 0.9, 0.1], 'self'), 600, 640);
     return alignTo(net, 1, 0, i => [2 * i, 2 * i + 1]);
   }),
   maxpool: preset({
@@ -1470,7 +1470,7 @@ export const PRESETS = {
     setBias(net, 1, -0.5);
     wire(net, 1, 2, pairs(0.5));
     wire(net, 2, 3, (i, j) => (i === j ? 2 : -1));
-    layout(io(net, [0, 0, 0, 1, 1, 0, 0, 0], [0, 1, 0]), 900, 640);
+    layout(io(net, [0, 0, 0, 1, 1, 0, 0, 0], [0, 1, 0]), 780, 640);
     alignTo(net, 1, 0, i => [i + 1]);
     alignTo(net, 2, 1, i => [2 * i, 2 * i + 1]);
     return alignTo(net, 3, 2, i => [i]);
@@ -1545,7 +1545,7 @@ export const PRESETS = {
     const net = blank('Dilated causal conv', 'mse', [{ name: 'Input over time', act: 'identity', size: 8 },
       ...D.map(d => ({ name: `Dilation ${d}`, act: 'identity', size: 8 }))]);
     D.forEach((d, l) => wire(net, l, l + 1, (i, j) => (j === i || j === i - d ? 0.5 : null)));
-    return layout(io(net, [0.8, -0.2, 0.5, 0.1, -0.4, 0.9, 0.3, -0.6], 'self'), 900, 640);
+    return layout(io(net, [0.8, -0.2, 0.5, 0.1, -0.4, 0.9, 0.3, -0.6], 'self'), 780, 640);
   }),
 
   // ---------------------------------------------------------------- embeddings and autoencoders
@@ -1587,7 +1587,7 @@ export const PRESETS = {
     note: 'Turn on Backward: each sigmoid multiplies δ by w·σ′(z) ≤ ¼, so ∂L/∂W shrinks about 4× per layer toward the input. Train on Line: the early layers barely move.',
   }, () => {
     const net = blank('Vanishing gradients', 'mse', [IN(1),
-      ...[1, 2, 3, 4, 5, 6].map(i => ({ name: `σ ${i}`, act: 'sigmoid', size: 1 })),
+      ...[1, 2, 3, 4, 5].map(i => ({ name: `σ ${i}`, act: 'sigmoid', size: 1 })),
       { name: 'Output', act: 'identity', size: 1 }]);
     for (let l = 1; l < net.layers.length; l++) wire(net, l - 1, l, [[1]]);
     return layout(io(net, [1], [0.9]), 1100);

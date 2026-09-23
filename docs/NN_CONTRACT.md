@@ -111,7 +111,7 @@ PRESETS         // { key: { label, group, note, dataset: DATASETS key | null, bu
                 //   records the dataset in meta.train.dataset. Listed in menu order: the shell's New net picker has
                 //   one <optgroup> per group (in first-seen order), shows note as the option's tooltip and toasts
                 //   it for 5 s when the preset loads from the picker (not on a #nn= preload). note is one line on
-                //   what to notice, matrix panel first. Hand-wired presets ignore the seed. meta.title is unique per preset.
+                //   what to notice, matrix panel first. Presets with hand-set weights ignore the seed. meta.title is unique per preset.
                 //   Basics: gates, xor_gates, xor_relu (hand-set), xor, perceptron, logreg, linreg, softmax_reg
                 //     (the last three start at W = 0), linear (all identity: demo of collapse)
                 //   MLPs: mlp, deep, classifier (2-4-3 softmax), wide, narrow_deep (49 parameters each), funnel,
