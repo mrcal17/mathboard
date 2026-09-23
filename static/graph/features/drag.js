@@ -77,7 +77,8 @@ export function snapValue(x, threshold, step) {
 
 // Both scale with the size of a screen pixel (in world units) at the tip.
 export const snapThreshold = px => Math.min(0.3, 10 * px);
-export const roundStep = px => 10 ** Math.max(-4, Math.min(0, Math.floor(Math.log10(3 * px))));
+// Parsed from '1e<k>' because 10 ** -3 is not exactly 0.001 on every V8 build.
+export const roundStep = px => Number(`1e${Math.max(-4, Math.min(0, Math.floor(Math.log10(3 * px))))}`);
 
 // New components of v after moving the tip (origin + v) to `tip` along `axes` (clamped to +-limit).
 export function moveComponents(v, o, tip, axes, threshold, step, limit = Infinity) {
