@@ -1,0 +1,28 @@
+# Recognition debug captures written by server.py: your own handwriting. Never commit.
+debug/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.env
+
+# Logs and scratch
+*.log
+tmp/
+temp/
+
+# Node (the tests need no packages, but keep installs out)
+node_modules/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini

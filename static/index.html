@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>Mathboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="vendor/katex/katex.min.css">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="nn/nn.css">
+</head>
+<body>
+<div id="typeset"></div>
+<canvas id="ink"></canvas>
+<canvas id="fx"></canvas>
+
+<div id="toolbar">
+  <div class="group" id="tools">
+    <button data-tool="math" title="Math pen: converts to LaTeX (M)"><b>&Sigma;</b> Math</button>
+    <button data-tool="draw" title="Draw pen: stays as ink (D)">&#9998; Draw</button>
+    <button data-tool="erase" title="Eraser (E). Also: right-drag, or the pen's eraser end">&#9003; Erase</button>
+    <button data-tool="select" title="Select (S): tap an expression to edit, drag to move">&#11034; Select</button>
+    <button data-tool="laser" title="Laser pointer (L)">&#9673; Laser</button>
+  </div>
+  <div class="group" id="swatches"></div>
+  <div class="group">
+    <button id="undo" title="Undo (Ctrl+Z)">&#8630;</button>
+    <button id="redo" title="Redo (Ctrl+Y)">&#8631;</button>
+  </div>
+  <div class="group">
+    <button id="prev" title="Previous page (&larr;)">&lsaquo;</button>
+    <span id="pageno">1 / 1</span>
+    <button id="next" title="Next page (&rarr;)">&rsaquo;</button>
+    <button id="addpage" title="New page (N)">+</button>
+  </div>
+  <div class="group">
+    <button id="clear" title="Clear this page (undoable)">Clear</button>
+    <button id="export" title="Download all pages as Markdown + LaTeX">Export</button>
+    <button id="gear" title="Settings">&#9881;</button>
+  </div>
+</div>
+
+<div id="status"><span class="dot"></span><span id="status-text">connecting&hellip;</span></div>
+
+<div id="editor" class="panel" hidden>
+  <textarea id="ed-src" rows="3" spellcheck="false" placeholder="LaTeX"></textarea>
+  <div id="ed-preview"></div>
+  <div class="row">
+    <button id="ed-apply" class="primary" title="Enter">Apply</button>
+    <button id="ed-rerun">Re-recognize</button>
+    <button id="ed-copy">Copy</button>
+    <button id="ed-ink" title="Turn this back into plain ink that is never converted">Keep as ink</button>
+    <button id="ed-del">Delete</button>
+  </div>
+</div>
+
+<div id="settings" class="panel" hidden>
+  <h3>Settings</h3>
+  <label>Model <select id="set-model"></select></label>
+  <label>Convert after <input type="range" id="set-delay" min="250" max="2500" step="50"><output for="set-delay"></output></label>
+  <label>Grouping reach <input type="range" id="set-reach" min="0.5" max="2.5" step="0.1"><output for="set-reach"></output></label>
+  <label>Max typeset size <input type="range" id="set-font" min="20" max="120" step="2"><output for="set-font"></output></label>
+  <label>Handwriting after conversion
+    <select id="set-ink"><option value="hide">Hidden</option><option value="faint">Faint</option></select>
+  </label>
+  <label>Theme
+    <select id="set-theme"><option value="dark">Chalkboard</option><option value="light">Whiteboard</option></select>
+  </label>
+  <div class="row"><button id="set-wipe">Erase all pages&hellip;</button></div>
+  <p class="hint">
+    <b>M</b> math &middot; <b>D</b> draw &middot; <b>E</b> erase &middot; <b>S</b> select &middot; <b>L</b> laser<br>
+    <b>H</b> hide UI &middot; <b>T</b> theme &middot; <b>N</b> new page &middot; <b>&larr; &rarr;</b> pages &middot; <b>Ctrl+Z / Ctrl+Y</b> undo / redo<br>
+    Leave a gap between separate expressions; strokes that touch or sit close together are read as one.
+  </p>
+</div>
+
+<nav id="tabs">
+  <button data-view="board" class="on" title="Handwriting board (Alt+1)">&#9998; Board</button>
+  <button data-view="graph" title="3D vector grapher (Alt+2)">&#11041; 3D</button>
+  <button data-view="nn" title="Neural-network visualizer (Alt+3)">&#8757; Net</button>
+</nav>
+
+<section id="graph" hidden>
+  <aside id="g-panel">
+    <header>
+      <button id="g-add" title="New expression">+ Add</button>
+      <button id="g-fit" title="Rescale axes and zoom to fit everything">Fit</button>
+      <button id="g-reset" title="Reset the camera">Reset view</button>
+      <button id="g-help-btn" title="Syntax">?</button>
+      <span class="spacer"></span>
+      <button id="g-collapse" title="Hide the expression list">&laquo;</button>
+    </header>
+    <div id="g-tools" hidden></div>
+    <div id="g-help" hidden>
+      <p><code>u = (1, 2, 3)</code> vector, drawn from the origin</p>
+      <p><code>v @ u</code> draw v starting at u (tip-to-tail); <code>@ (1,0,0)</code> any start point</p>
+      <p><code>a = 2</code> makes a slider &middot; <code>a u + b v</code> implicit multiplication</p>
+      <p><code>dot(u,v)</code> <code>cross(u,v)</code> <code>u &middot; v</code> <code>u &times; v</code> <code>|u|</code> <code>unit(u)</code> <code>proj(u,v)</code> <code>angle(u,v)</code> <code>deg(x)</code> <code>u.x</code></p>
+      <p><code>span(u, v)</code> line / plane with the grid of integer combinations &middot; <code>plane(n)</code></p>
+      <p><code>parallelogram(u,v)</code> <code>parallelepiped(u,v,w)</code> <code>point(1,2,3)</code></p>
+      <p><code>[1 2 3]</code> row &middot; <code>[1 2; 3 4]</code> matrix &middot; <code>u^T</code> transpose &middot; <code>u^T v</code>, <code>u^T A u</code> numbers</p>
+      <p><code>A = [[1,0,0],[0,2,0],[0,0,1]]</code> rows &middot; <code>matrix(u,v,w)</code> columns &middot; <code>A u</code> <code>det(A)</code> <code>inv(A)</code> <code>transpose(A)</code></p>
+      <p><code>i j k</code> basis vectors &middot; <code>pi</code> &middot; <code># comment</code></p>
+      <p>Mouse: left-drag rotate, right-drag pan, wheel zoom. Enter adds a row.</p>
+    </div>
+    <ol id="g-rows"></ol>
+  </aside>
+  <div id="g-view"></div>
+  <button id="g-expand" title="Show the expression list" hidden>&raquo;</button>
+</section>
+
+<section id="nn" hidden>
+  <header id="nn-bar"></header>
+  <div id="nn-main">
+    <div id="nn-stage"></div>
+    <div id="nn-split" title="Drag to resize the matrix panel; double-click to hide or show it"></div>
+    <aside id="nn-matrix"></aside>
+  </div>
+</section>
+
+<div id="toast" hidden></div>
+
+<script src="vendor/katex/katex.min.js"></script>
+<script src="app.js"></script>
+<script type="importmap">
+  { "imports": { "three": "./vendor/three/three.module.js", "three/addons/": "./vendor/three/addons/" } }
+</script>
+<script type="module" src="graph/grapher.js"></script>
+<script type="module" src="nn/nn.js"></script>
+</body>
+</html>

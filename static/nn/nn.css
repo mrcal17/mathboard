@@ -1,0 +1,83 @@
+/* Net tab shell (static/nn/nn.js): section layout, toolbar, splitter, cheat sheet.
+   Each module styles its own content in nn/<module>.css. */
+#nn {
+  position: fixed; inset: 0; z-index: 5;
+  display: grid; grid-template-rows: auto minmax(0, 1fr);
+  background: var(--bg); color: var(--fg);
+}
+#nn[hidden] { display: none; }
+
+/* ---------------------------------------------------------------- toolbar */
+#nn-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 0;
+  min-height: 58px; padding: 8px 12px 8px var(--nn-bar-left, 250px);
+  background: var(--ui-bg); color: var(--ui-fg);
+  border-bottom: 1px solid var(--ui-line);
+}
+#nn-bar .nn-group { display: flex; gap: 2px; align-items: center; padding: 0 6px; }
+#nn-bar .nn-group + .nn-group { border-left: 1px solid var(--ui-line); }
+#nn-bar .nn-spacer { flex: 1; }
+#nn-bar button { font-size: 13.5px; padding: 4px 9px; }
+#nn-bar button:disabled { opacity: 0.35; cursor: default; background: transparent; }
+#nn-bar .nn-tail button:last-child { min-width: 30px; font-weight: 600; }
+#nn-bar select {
+  font: inherit; font-size: 13.5px; color: var(--ui-fg); cursor: pointer;
+  background: rgba(127, 127, 127, 0.12); border: 1px solid var(--ui-line); border-radius: 8px;
+  width: 118px; padding: 4px 6px; margin-right: 4px; /* always shows "New net…"; the list opens wider */
+}
+#nn-bar select option { background: var(--bg); color: var(--fg); }
+
+/* ---------------------------------------------------------------- stage | splitter | matrix */
+#nn-main { grid-row: 2; display: flex; min-width: 0; min-height: 0; }   /* row 2 even when H / audience hide the bar */
+#nn-stage { position: relative; flex: 1 1 0; min-width: 0; min-height: 0; overflow: hidden; }
+#nn-split {
+  position: relative; z-index: 3; flex: none;
+  width: 9px; margin: 0 -4px; cursor: col-resize; touch-action: none;
+}
+#nn-split::after {
+  content: ''; position: absolute; top: 0; bottom: 0; left: 4px; width: 1px;
+  background: var(--ui-line); transition: background 0.12s;
+}
+#nn-split:hover::after, #nn.nn-resizing #nn-split::after { left: 3px; width: 3px; background: var(--accent); }
+#nn-matrix {
+  position: relative; flex: 0 0 calc(var(--nn-split, 0.4) * 100%);
+  min-width: 220px; max-width: calc(100% - 280px); min-height: 0; overflow: auto;
+  user-select: text; -webkit-user-select: text;
+}
+#nn-main.matrix-hidden #nn-matrix { display: none; }
+#nn-main.matrix-hidden #nn-split { margin: 0 0 0 -9px; } /* the grip stays at the right edge */
+#nn.nn-resizing, #nn.nn-resizing * { cursor: col-resize !important; user-select: none !important; }
+#nn.nn-resizing #nn-stage, #nn.nn-resizing #nn-matrix { pointer-events: none; }
+
+.nn-fail { margin: 90px auto; max-width: 560px; color: var(--ui-muted); text-align: center; }
+
+/* ---------------------------------------------------------------- cheat sheet */
+#nn-help { top: 66px; right: 14px; width: 420px; max-height: calc(100% - 90px); overflow-y: auto; font-size: 13px; }
+#nn-help h3 { margin: 0 0 6px; font-size: 15px; }
+#nn-help h4 { margin: 12px 0 4px; font-size: 11.5px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--ui-muted); }
+#nn-help p { margin: 6px 0; color: var(--ui-muted); }
+#nn-help p b { color: var(--ui-fg); font-weight: 600; }
+#nn-help table { width: 100%; border-collapse: collapse; }
+#nn-help td { padding: 2px 4px; vertical-align: top; }
+#nn-help td:first-child { width: 42%; white-space: nowrap; }
+#nn-help td:last-child { color: var(--ui-muted); }
+#nn-help kbd {
+  font: 12px Consolas, "Cascadia Mono", monospace; padding: 0 4px;
+  border: 1px solid var(--ui-line); border-radius: 4px; background: rgba(127, 127, 127, 0.12);
+}
+
+/* ---------------------------------------------------------------- H (clean) and the audience mirror */
+/* H shows what the audience window shows: no toolbars, but inspector cards and the train panel's
+   readouts and plots stay (they are demo content) without their chrome. Cards keep working. */
+body.clean #nn-bar, body.clean #nn-help { display: none; }
+body.clean #nn .nn-insp-btn, body.clean #nn .nn-insp .nn-add { display: none; }
+body.clean #nn .nn-insp-head { cursor: default; }
+body.clean #nn .nn-insp.pinned { box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35); }
+body.clean #nn .nn-train:not([hidden]) { display: flex; }
+body.clean #nn .nn-train .nt-head { cursor: default; }
+body.clean #nn .nn-train .nt-ctl, body.clean #nn .nn-train .nt-warn button, body.clean #nn .nn-train .nt-go-mini,
+body.clean #nn .nn-train .nt-grid, body.clean #nn .nn-train .nt-hint { display: none; }
+body.clean #nn .nnv-handle, body.clean #nn .nnv-hint { display: none; }
+body.clean #nn-split, #nn.nn-audience #nn-split { pointer-events: none; }
+body.clean #nn-split::after, #nn.nn-audience #nn-split::after { left: 4px; width: 1px; background: var(--ui-line); }
+#nn.nn-audience #nn-bar, #nn.nn-audience #nn-help { display: none !important; }

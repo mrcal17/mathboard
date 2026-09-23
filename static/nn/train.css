@@ -1,0 +1,89 @@
+/* Training panel (static/nn/train.js): floats over #nn-stage. */
+
+.nn-train {
+  position: absolute; z-index: 6; top: 10px; right: 10px;
+  width: 292px; max-height: calc(100% - 20px);
+  display: flex; flex-direction: column;
+  background: var(--ui-bg); color: var(--ui-fg);
+  border: 1px solid var(--ui-line); border-radius: 12px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.25);
+  font-size: 12px; line-height: 1.3;
+}
+.nn-train[hidden] { display: none; }
+body.clean .nn-train { display: none; }
+
+.nt-head {
+  display: flex; align-items: center; gap: 4px;
+  padding: 3px 4px 3px 2px; cursor: move; touch-action: none;
+  border-bottom: 1px solid var(--ui-line);
+}
+.nn-train.folded .nt-head { border-bottom: 0; }
+.nn-train.folded .nt-body { display: none; }
+.nt-head button { padding: 2px 7px; }
+.nt-title { font-size: 13px; }
+.nt-mini {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--ui-muted); font-variant-numeric: tabular-nums; text-align: right;
+}
+.nt-go-mini { min-width: 30px; }
+.nn-train.running .nt-go-mini { color: var(--accent); }
+
+.nt-body {
+  overflow-y: auto; overflow-x: hidden; min-height: 0;
+  padding: 8px 10px 10px; display: flex; flex-direction: column; gap: 7px;
+}
+
+.nt-grid { display: grid; gap: 5px 6px; align-items: end; }
+.nt-g3 { grid-template-columns: repeat(3, 1fr); }
+.nt-g4 { grid-template-columns: 1.55fr 1fr 1fr 1fr; }
+.nt-g2b { grid-template-columns: 1fr auto; }
+.nt-span3 { grid-column: 1 / -1; }
+.nn-train label { display: flex; flex-direction: column; gap: 2px; color: var(--ui-muted); min-width: 0; }
+.nn-train label.nt-check { flex-direction: row; align-items: center; gap: 4px; padding-bottom: 4px; white-space: nowrap; }
+.nn-train select, .nn-train input[type="number"] {
+  width: 100%; min-width: 0; font: inherit; color: var(--ui-fg);
+  background: rgba(127, 127, 127, 0.12);
+  border: 1px solid var(--ui-line); border-radius: 6px; padding: 3px 4px;
+}
+.nn-train select option { background: var(--ui-bg); color: var(--ui-fg); }
+.nn-train input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
+.nn-train input:disabled, .nn-train select:disabled { opacity: 0.7; }
+
+.nt-warn {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  padding: 6px 8px; border-radius: 8px;
+  background: color-mix(in srgb, #ffd54a 14%, transparent);
+  border: 1px solid color-mix(in srgb, #ffd54a 45%, transparent);
+}
+.nt-warn[hidden], .nt-hint[hidden] { display: none; }
+.nt-warn span { flex: 1 1 100%; }
+.nt-warn button { border-color: var(--accent); }
+.nt-hint { color: var(--ui-muted); font-style: italic; }
+
+.nt-ctl { display: flex; align-items: end; gap: 4px; }
+.nt-ctl button { border-color: var(--ui-line); padding: 4px 8px; }
+.nt-ctl .nt-go { min-width: 70px; background: var(--accent); color: #fff; border-color: transparent; }
+.nt-ctl .nt-go:disabled { opacity: 0.45; cursor: default; }
+.nt-ctl label { flex-direction: row; align-items: center; gap: 3px; margin-left: auto; }
+.nt-ctl label input { width: 52px; }
+.nn-train button:disabled { opacity: 0.45; cursor: default; }
+
+.nt-read { display: flex; gap: 10px; color: var(--ui-muted); font-variant-numeric: tabular-nums; flex-wrap: wrap; }
+.nt-read b { color: var(--ui-fg); font-weight: 600; }
+.nt-read [hidden] { display: none; }
+
+.nt-chart, .nt-plot {
+  display: block; width: 100%;
+  border: 1px solid var(--ui-line); border-radius: 6px;
+}
+.nt-chart { height: 56px; }
+.nt-plot { aspect-ratio: 1 / 1; }
+
+.nt-cap { display: flex; flex-direction: column; gap: 2px; min-height: 30px; color: var(--ui-muted); }
+.nt-axes { font-size: 13px; color: var(--ui-fg); }
+.nt-axes .katex { font-size: 1em; }
+.nt-info { font-variant-numeric: tabular-nums; }
+
+/* Audience mirror: read-only, so only what the presenter is showing. */
+.nn-train.ro .nt-ctl, .nn-train.ro .nt-warn button, .nn-train.ro .nt-go-mini,
+.nn-train.ro .nt-grid, .nn-train.ro .nt-hint { display: none; }
