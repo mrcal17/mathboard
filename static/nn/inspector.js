@@ -526,7 +526,7 @@ export function install(ctx) {
     const cr = v?.contentRect?.();
     if (cr && cr.w > 0 && cr.h > 0) soft.push([cr, 3]);
     const sr = stage.getBoundingClientRect();
-    for (const el of stage.querySelectorAll('.nn-train')) {
+    for (const el of stage.querySelectorAll('.nn-train, .nn-attnviz, .nn-s3d')) {
       if (el.hidden || !el.offsetWidth) continue;
       const tr = el.getBoundingClientRect();
       soft.push([{ x: tr.left - sr.left, y: tr.top - sr.top, w: tr.width, h: tr.height }, 3]);

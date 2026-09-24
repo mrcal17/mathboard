@@ -55,7 +55,7 @@ const DIM = 0.1, NUM_MIN = 0.25;
 const NAME_MAX = 8, NAME_CH = 7.2 * TEXT_MAX;
 // Fit: the panels floating over the stage that the net fits beside (px of air around each), the
 // smallest free area worth fitting into, and how much scale a larger free area may cost.
-const FLOATS = '.nn-train, .nn-attnviz', FLOAT_GAP = 6, FREE_MIN = 160, FIT_SLACK = 0.9;
+const FLOATS = '.nn-train, .nn-attnviz, .nn-s3d', FLOAT_GAP = 6, FREE_MIN = 160, FIT_SLACK = 0.9;
 
 const r1 = v => Math.round(v * 10) / 10;
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));

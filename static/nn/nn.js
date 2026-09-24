@@ -506,6 +506,12 @@ async function start({ model, createStore }) {
       ${row('<kbd>&rarr;</kbd> <kbd>&larr;</kbd>', 'Explain: next / previous step (also <kbd>PageDown</kbd> <kbd>PageUp</kbd>)')}
       ${row('<kbd>Esc</kbd>', 'end Explain (before anything else)')}
     </table>
+    <h4>3D</h4>
+    <table>
+      ${row('<kbd>D</kbd> <kbd>Shift+D</kbd>', '3D view on / off; next 3D view: stack, heads, tensor')}
+      ${row('<kbd>&larr;</kbd> <kbd>&rarr;</kbd>', '3D tensor view: previous / next reshape step (when Explain is not running)')}
+      ${row('<kbd>P</kbd> <kbd>Shift+P</kbd>', 'open / close the 3D plots panel; next plot: surface, landscape, space, simplex')}
+    </table>
     <h4>Toolbar</h4>
     <table>
       ${row('New net', 'start from a preset (or blank); Ctrl+Z goes back')}
@@ -517,6 +523,8 @@ async function start({ model, createStore }) {
       ${row('Lens', 'focus one stage, follow a token or a head, hide weak edges; the rest dims')}
       ${row('Attention', 'one attention layer as arcs, dot products, the weighted sum or heatmaps')}
       ${row('Explain', 'a guided walkthrough of this net, one caption per step; it sets the lens and panels as it goes')}
+      ${row('3D', 'the net in 3D: layers in depth, an attention layer as one slab per head, or the multi-head reshape as moving cubes')}
+      ${row('3D plots', 'a neuron as a surface over the inputs, the loss landscape with the training path, the data morphing through the layers, the softmax simplex')}
       ${row('Weights', 'numbers on the edges (W)')}
       ${row('Train', 'the Train panel: datasets, training and plots')}
       ${row('Audience', 'a window without UI that mirrors this one live, for the projector')}
@@ -524,6 +532,7 @@ async function start({ model, createStore }) {
     <h4>Mouse</h4>
     <table>
       ${row('Click', 'inspect and edit a neuron, edge or layer')}
+      ${row('3D: drag, right-drag, wheel', 'orbit, pan, zoom; click a neuron or edge to inspect it')}
       ${row('Drag a neuron / header', 'move it (Alt: no snapping to the column)')}
       ${row('Drag from a neuron&rsquo;s dot', 'connect it to another neuron')}
       ${row('Double-click empty space', 'add a neuron to the nearest layer, or a layer between / beyond the columns')}

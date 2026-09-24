@@ -1,0 +1,99 @@
+/* 3D plots panel (static/nn/surf3d.js, docs/NN_3D_PLOTS.md): floats over #nn-stage like the
+   Train and Attention panels. The view is a WebGL canvas with a CSS2D layer for the axis labels. */
+
+.nn-s3d {
+  position: absolute; z-index: 6; top: 10px; left: 10px;
+  width: 460px; max-width: calc(100% - 20px);
+  display: flex; flex-direction: column;
+  /* the UI tint over the page colour: opaque, so the canvas never shows through */
+  background: linear-gradient(var(--ui-bg), var(--ui-bg)), var(--bg); color: var(--ui-fg);
+  border: 1px solid var(--ui-line); border-radius: 12px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.25);
+  font-size: 12px; line-height: 1.3;
+}
+.nn-s3d[hidden] { display: none; }
+
+.s3-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 4px 4px 10px; cursor: move; touch-action: none;
+  border-bottom: 1px solid var(--ui-line);
+}
+.s3-title { font-size: 13px; white-space: nowrap; }
+.s3-flex { flex: 1; }
+.s3-modes { display: flex; border: 1px solid var(--ui-line); border-radius: 7px; overflow: hidden; }
+.s3-modes button { border: 0; border-radius: 0; padding: 3px 8px; font-size: 12px; }
+.s3-modes button + button { border-left: 1px solid var(--ui-line); }
+.s3-modes button.on { background: var(--accent); color: #fff; }
+.s3-modes button.na:not(.on) { opacity: 0.45; }
+.s3-home, .s3-close { padding: 1px 8px; font-size: 15px; line-height: 1; }
+
+/* ---------------------------------------------------------------- controls */
+.s3-ctl { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 10px; padding: 6px 10px 2px; }
+.s3-ctl:empty { display: none; }
+.s3-ctl label { display: flex; align-items: center; gap: 5px; color: var(--ui-muted); white-space: nowrap; }
+.s3-ctl label[hidden], .s3-ctl button[hidden] { display: none; }
+.s3-ctl select {
+  font: inherit; color: var(--ui-fg); max-width: 170px;
+  background: rgba(127, 127, 127, 0.12); border: 1px solid var(--ui-line); border-radius: 6px; padding: 2px 4px;
+}
+.s3-ctl select option { background: var(--ui-bg); color: var(--ui-fg); }
+.s3-ctl input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
+.s3-ctl button { padding: 2px 9px; border: 1px solid var(--ui-line); }
+.s3-ctl button:disabled { opacity: 0.4; cursor: default; }
+.s3-seg { display: flex; border: 1px solid var(--ui-line); border-radius: 6px; overflow: hidden; }
+.s3-seg button { border: 0; border-radius: 0; padding: 2px 9px; }
+.s3-seg button + button { border-left: 1px solid var(--ui-line); }
+.s3-seg button.on { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--ui-fg); font-weight: 600; }
+.s3-play { min-width: 34px; }
+.s3-play.on { border-color: var(--accent) !important; color: var(--accent); }
+.s3-track { flex: 1 1 200px; min-width: 160px; display: flex; flex-direction: column; gap: 1px; }
+.s3-track input[type="range"] { width: 100%; margin: 2px 0 0; accent-color: var(--accent); }
+.s3-stops { display: flex; justify-content: space-between; margin: 0 -2px; }
+.s3-stops button {
+  border: 0 !important; padding: 0 3px; font-size: 13px; color: var(--ui-muted); background: none; border-radius: 5px;
+}
+.s3-stops button.on { color: var(--ui-fg); background: color-mix(in srgb, var(--accent) 22%, transparent); }
+
+/* ---------------------------------------------------------------- the 3D view */
+.s3-view {
+  position: relative; margin: 6px 8px 0; height: 340px; min-height: 120px;
+  border-radius: 8px; overflow: hidden; background: var(--bg); border: 1px solid var(--ui-line);
+}
+.s3-canvas { display: block; outline: none; touch-action: none; cursor: grab; }
+.s3-canvas:active { cursor: grabbing; }
+.nn-s3d.ro .s3-canvas { cursor: default; }
+.s3-labels { position: absolute; left: 0; top: 0; pointer-events: none; }
+.s3-lab {
+  font: 12px system-ui, "Segoe UI", sans-serif; color: var(--ui-muted); white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 2px var(--bg), 0 0 4px var(--bg), 0 0 7px var(--bg);
+}
+.s3-lab.ttl { font-size: 15px; color: var(--ui-fg); }
+.s3-lab.ttl .katex { font-size: 1.05em; }
+.s3-lab.th { font-size: 13px; color: var(--ui-fg); }
+.s3-msg {
+  position: absolute; inset: 0; z-index: 2; display: flex; align-items: center; justify-content: center;
+  padding: 24px; text-align: center; color: var(--ui-muted); font-style: italic; font-size: 13px; background: var(--bg);
+}
+.s3-msg[hidden] { display: none; }
+
+.s3-cap { padding: 6px 10px 10px; }
+.s3-tex { font-size: 14px; line-height: 1.45; overflow-x: auto; overflow-y: hidden; }
+.s3-tex .katex { font-size: 1.04em; }
+.s3-note { color: var(--ui-muted); font-size: 12px; font-style: italic; margin-top: 3px; }
+.s3-note[hidden] { display: none; }
+.s3-grip {
+  position: absolute; right: 1px; bottom: 1px; width: 14px; height: 14px; cursor: nwse-resize; touch-action: none;
+  background: linear-gradient(135deg, transparent 50%, var(--ui-muted) 50%, var(--ui-muted) 58%, transparent 58%, transparent 70%, var(--ui-muted) 70%, var(--ui-muted) 78%, transparent 78%);
+  opacity: 0.55; border-bottom-right-radius: 11px;
+}
+
+/* ---------------------------------------------------------------- audience mirror and clean view (H)
+   Read-only: the plot and its caption as the presenter shows them, without the chrome. */
+.nn-s3d.ro .s3-head, body.clean #nn .nn-s3d .s3-head { cursor: default; }
+.nn-s3d.ro .s3-close, .nn-s3d.ro .s3-home, .nn-s3d.ro .s3-grip, .nn-s3d.ro .s3-ctl,
+body.clean #nn .nn-s3d .s3-close, body.clean #nn .nn-s3d .s3-home, body.clean #nn .nn-s3d .s3-grip,
+body.clean #nn .nn-s3d .s3-ctl { display: none; }
+.nn-s3d.ro .s3-modes button:not(.on), body.clean #nn .nn-s3d .s3-modes button:not(.on) { display: none; }
+.nn-s3d.ro .s3-modes, body.clean #nn .nn-s3d .s3-modes { border: 0; }
+.nn-s3d.ro .s3-modes button.on, body.clean #nn .nn-s3d .s3-modes button.on { border-radius: 6px; }

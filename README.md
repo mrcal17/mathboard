@@ -140,6 +140,42 @@ its output from the value of "cat".
 with attention, opening the matching Attention view as it goes. The captions quote the live
 numbers, so they keep up with training. ← → step through it and Esc ends it.
 
+#### 3D view
+
+<p>
+<img src="docs/media/net-3d-heads.png" width="49%" alt="The 3D view's Heads mode on the two-heads preset after training: Q, K and V split by columns into one slab per head, each with its own attention A as bars and Z = AV, merging into Z = [Z1 Z2]; token 1's row is lit in every matrix and in the matrix panel">
+<img src="docs/media/net-3d-reshape.png" width="49%" alt="The 3D view's Tensor mode on a 4 × 6 example with 3 heads, cubes coloured by token: after view and transpose every head holds a chunk of every token (left); with the bug, view(h, T, d/h) without the transpose, head 1 holds pieces of tokens 1 and 2 only (right)">
+</p>
+
+**3D** (D) draws the net in 3D in place of the canvas, still linked to the matrix panel, the cards,
+the lens and Explain. **Stack** stands every layer up as a sheet, features down and tokens in depth,
+so a tied layer stays inside each token's plane and only the violet attention edges cross between
+them. **Heads** takes one attention layer apart: Q, K and V split by columns into one slab per head,
+each slab computing its own A_h (bars) and Z_h = A_h V_h with the real numbers, then the slabs merge
+through the concat and W_O. **Tensor** animates the reshape multi-head attention needs, [T, d] →
+[T, h, d/h] → [h, T, d/h] and back, one cube per number, with the PyTorch line for each step; **the
+bug** shows what `view(h, T, d/h)` without the transpose does instead. On the left, the two-heads
+preset after training: head 1 has learned to read token 2 and head 2 token 3. On the right, a 4 × 6
+example with 3 heads, coloured by token: done right, every head holds a chunk of every token; with
+the bug, "head 1" is just the first 8 numbers, pieces of tokens 1 and 2.
+
+#### 3D plots
+
+<p>
+<img src="docs/media/net-3d-landscape.png" width="49%" alt="The 3D plots panel in Landscape mode: the loss of a 2-6-4-1 ReLU net trained on circles, on the plane of its training path's top two principal directions, with the path running down into the basin at θ₀">
+<img src="docs/media/net-3d-space.png" width="49%" alt="The 3D plots panel in Space mode on a 2-3-3-3-3-1 tanh net trained on circles, halfway from z⁽¹⁾ to h⁽¹⁾: the points and the input grid bend as tanh squashes each axis">
+</p>
+
+**3D plots** (P) opens a panel you can orbit. *Surface* shows one neuron of a 2-input net over
+the input plane: the output, or the neuron you click, as its input sum z or its activation, so you
+can watch each layer tilt and bend the plane while training runs. *Landscape* shows the loss over a
+plane through the current weights, spanned by two random filter-normalised directions (Li et al.,
+2018), the top two principal directions of the training path, or two weights you pick, with the path
+drawn at its true loss. *Space* scatters the dataset in each layer's activation space and morphs it
+from the inputs through every z = W a + b and f(z); a wider layer shows its top three principal
+components. *Simplex* puts a 3-class softmax's predictions on the triangle ŷ₁ + ŷ₂ + ŷ₃ = 1.
+Shift+P switches plots, and the audience window follows the plot and the camera.
+
 ## Quick start
 
 1. Install Ollama: <https://ollama.com/download>.
@@ -255,7 +291,9 @@ all three.
 | A | Attention panel |
 | M / Shift+M | Next / previous Attention view |
 | E | Explain |
-| ← → | Explain steps (also PageUp / PageDown) |
+| ← → | Explain steps (also PageUp / PageDown); reshape steps in the 3D tensor view |
+| D / Shift+D | 3D view / next 3D view |
+| P / Shift+P | 3D plots panel / next plot |
 | Delete | Remove the selection |
 | Esc | End Explain, else close the cheat sheet, else deselect |
 | ? | Cheat sheet |
@@ -878,7 +916,8 @@ and colours. `nn.js` is the shell (layout, toolbar, keys, persistence, module lo
 mirror API that `graph/features/lecture.js` carries to the audience window). It loads `view.js`
 (the canvas), `inspector.js` (the cards), `matrix.js` (the matrix panel and step-through),
 `train.js` (datasets, training and plots), `lens.js` (the lens bar), `attnviz.js` (the Attention
-panel) and `tour.js` (Explain), each with its own CSS and isolated so a broken one doesn't take
+panel), `tour.js` (Explain), `view3d.js` (the 3D view) and `surf3d.js` (the 3D plots panel),
+each with its own CSS and isolated so a broken one doesn't take
 the others down. `focus.js` holds the lens's rules as pure functions (how strongly each neuron,
 edge and attention edge belongs to the lens, and what it hides), so the canvas, the matrix panel,
 the cards and the Attention panel agree on what to dim. Explain's steps are built from the
@@ -886,7 +925,8 @@ net's structure by a pure function in `tour.js`. Each step sets the lens, the At
 step-through and the caption in the shared state, which the audience window mirrors. Token
 layers, shared weights and attention are specified in
 [docs/NN_ATTENTION.md](docs/NN_ATTENTION.md); the lens, the Attention panel, Explain and token
-names in [docs/NN_LENS.md](docs/NN_LENS.md).
+names in [docs/NN_LENS.md](docs/NN_LENS.md); the 3D view in [docs/NN_3D.md](docs/NN_3D.md) and the
+3D plots in [docs/NN_3D_PLOTS.md](docs/NN_3D_PLOTS.md). Both load three.js only when first opened.
 
 ## Project layout
 
@@ -899,7 +939,7 @@ static/
   graph/               3D tab: lang.js, linalg.js, scene.js, grapher.js
     features/          transform, fields, combos, systems, dual, lecture, present, bridge, drag
   nn/                  Net tab: model.js, store.js, nn.js, view.js, inspector.js, matrix.js, train.js,
-                       lens.js, focus.js, attnviz.js, tour.js
+                       lens.js, focus.js, attnviz.js, tour.js, view3d.js, surf3d.js
   vendor/              KaTeX 0.16.47 and three.js r186, with their licenses
 tests/                 node:test suites, plus draw_test.js (see Testing)
 docs/

@@ -26,6 +26,8 @@ Modules talk through the store, `ctx` and the handles listed below.
 | `lens.js`, `lens.css` | the lens bar at the bottom of `#nn-stage`; owns `state.lens` (docs/NN_LENS.md) |
 | `attnviz.js`, `attnviz.css` | the floating attention panel (arcs, dots, mix, heat); owns `state.viz` (docs/NN_LENS.md) |
 | `tour.js`, `tour.css` | Explain, the guided walkthrough and its caption card; owns `state.tour` (docs/NN_LENS.md) |
+| `view3d.js`, `view3d.css` | the 3D net view over `#nn-stage` (stack, heads, tensor); owns `state.v3d` (docs/NN_3D.md) |
+| `surf3d.js`, `surf3d.css` | the floating 3D plots panel (surface, landscape, space, simplex); owns `state.s3d` (docs/NN_3D_PLOTS.md) |
 
 ## Network JSON (`model.js`)
 
@@ -496,6 +498,8 @@ ctx.matrix = { step(±1), toggle(key), opt, render(), update(), reveal(layer, pa
 | lens | 1–9 / 0: follow token n / every token, `[` / `]`: previous / next stage, L: lens bar |
 | attnviz | A: attention panel, M / Shift+M: next / previous mode |
 | tour | E: Explain; while it runs → / PageDown, ← / PageUp, Esc (caught first) |
+| view3d | D: 3D view, Shift+D: next view, ← / → in the tensor view (Explain catches them first) |
+| surf3d | P: 3D plots panel, Shift+P: next plot |
 
 Details for the last three: docs/NN_LENS.md.
 
