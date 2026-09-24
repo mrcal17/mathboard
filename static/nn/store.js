@@ -31,7 +31,8 @@ const signature = net => [
 export function createStore(net, { undoLimit = 200 } = {}) {
   const handlers = new Map();
   // lens / viz / tour: see docs/NN_LENS.md (null lens = the default: everything shown).
-  const state = { sel: null, hover: null, anim: null, fwd: null, bwd: null, lens: null, viz: null, tour: null };
+  // v3d / s3d: the 3D net view and the 3D plots panel (docs/NN_3D.md).
+  const state = { sel: null, hover: null, anim: null, fwd: null, bwd: null, lens: null, viz: null, tour: null, v3d: null, s3d: null };
   let undoStack = [], redoStack = [];
   let saved = JSON.stringify(net);   // the net as of the last commit: what undo returns to
   let sig = signature(net);

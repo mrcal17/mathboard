@@ -127,12 +127,45 @@ Differences from the spec above:
   causal, tokens `(c, cos θ, sin θ)`), `seq_minmax` (two heads: `(max x₁, min x₁)`), and
   `seq_addmax` (the transformer's task, 2 tokens × 2: `y_i = ReLU(x_i + x_max)`). All are
   `kind: 'seq'` with `tokens`, and all use mse.
-- **Presets** (group Attention, after Sequences): `attention`, `causal`, `multihead` and
-  `transformer`.
+- **Word datasets:** `nl_pronoun` and `nl_agree`, 3-word sentences over a 10-word vocabulary
+  whose fixed 2-D vectors are the export `WORDS`. The first coordinate is the kind of word (dog 1.2,
+  cat 0.6, itself 0, sees −0.6, chases −1.2), the second the number (0.6 singular, −0.6 plural:
+  dogs, cats, themselves, see, chase). Articles are left out. Each token's target is the vector of a
+  word in its sentence, so an attention layer whose values are the words can copy it, and every
+  position has a target. No positions are needed, and none are in the input.
+  - `nl_pronoun`, "dog sees itself": noun, verb, reflexive, agreeing in number (8 sentences). The
+    reflexive outputs the noun it refers to; the noun and the verb output themselves. It uses the
+    reflexive because a plain pronoun, as in "dog chases it", can't refer to the subject of its
+    own clause.
+  - `nl_agree`, "dog chases cats": subject, verb agreeing with it, object (16 sentences). The verb
+    outputs its subject; the nouns output themselves. The object always has the other number, so
+    the verb can find its subject by number alone (without word positions it has no other way).
+  - Besides `X` and `Y`, `make()` returns `words` and `targetWords` (a sentence per sample), and the
+    dataset has `vocab` (its words and vectors) and `decode(y)` (each token's nearest word). Noise
+    is drawn from its own random stream, so a seed gives the same sentences at any noise level.
+  - A causal next-word task was left out on purpose: with mse on word vectors, positions whose next
+    word the grammar leaves open would need "don't care" targets (and so no backward pass for any
+    sample), a softmax over the vocabulary doesn't fit the 40-node limit, and a grammar that fixes
+    every next word has only a handful of sentences.
+- **Presets** (group Attention, after Sequences): `words` (hand-set), `pronouns`, `agreement`,
+  `attention`, `causal`, `causal_rot`, `multihead` and `transformer`.
   - The **transformer has 2 tokens**, because 3 tokens would need 54 nodes against the menu's
     40-node limit. Its `W_O` and `W_2` start small, so the block starts near `Y = X`.
-  - Each attention preset records an `lr` in `meta.train.lr` (`PRESETS[k].lr`): 0.3, 0.3, 1 and
-    0.3. At the panel's batch 10 they learn their pattern in 3000 steps.
+  - Each attention preset records an `lr` in `meta.train.lr` (`PRESETS[k].lr`): 0.3 for
+    `attention`, `causal` and `transformer`, 1 for `multihead`. At the panel's batch 10 they learn
+    their pattern in 3000 steps.
+  - **`pronouns` and `agreement`** are `attention`'s net (30 nodes) on the word datasets, with
+    `Z` as the output, lr 0.3 and noise 0 (`PRESETS[k].noise`). `W_V` starts as the identity and
+    `b_V` at 0, so each value is its word's own vector, and `W_Q`, `W_K` start small (the `small`
+    scheme), so every word first reads all three about evenly. `meta.train.init` records that
+    recipe (`{ W_Q: 'small', W_K: 'small', W_V: 'identity' }`, `randomize`'s `init` option), and
+    the Train panel's Reset uses it, so a new init seed trains like the preset (init seeds 1 to 40
+    all reached 100% in a trial run). From a fully random start many runs lock into a swap instead:
+    rows read the wrong word and `W_V` learns to map it back (a local minimum;
+    `tests/nn_model.test.mjs` has one). Trained from seed 1 for 3000 steps, both reach 100% word
+    accuracy on held-out sentences. In `pronouns` the reflexive's row of A peaks on its noun in
+    every sentence (mean weight 0.95) and the other rows on themselves; in `agreement` the verb's
+    row peaks on its subject in every sentence (mean 0.96, about 0.01 on the object).
 - **Retrofits:**
   - `conv1d`, `conv1d_s2` and `lenet`: kernel ties `k:1,<tap>` and one bias `b:1`.
   - `wavenet`: `k^{(l)}:1,1` (reads `x_{t-d}`) and `k^{(l)}:1,2` (reads `x_t`), plus `b^{(l)}:1`.
@@ -215,3 +248,9 @@ Everything above is in place. Differences and additions:
 - **Train.** The plot picks the attention layer and head (`meta.train.space = '<layer id>#<head>'`).
   **Adapt network** resizes a token net token by token and refuses (with the reason) what it can't
   rewire.
+- **Word datasets in the Train panel.** The stepper reads `sample 3 of 200: “cat sees itself”`, and
+  loading a sample (◀ ▶, `loadSample`) sets `meta.tokenNames` to its words in the same commit, so
+  the canvas, the matrix panel, the lens bar and the attention panel name the tokens. The plot's
+  output column, **ŷ → word**, names each token's output by its nearest word, marks it ✓ or ✗
+  against the target word, and shows the target below it; hovering it gives the numbers. The
+  readout adds **words**, the word accuracy over the whole dataset (`wordAccuracy`).

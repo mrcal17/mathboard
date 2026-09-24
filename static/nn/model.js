@@ -1053,7 +1053,10 @@ export function connectDense(net, fromLayerId, toLayerId, { seed, scheme = 'xavi
 }
 
 // Fixed edges keep their w; a tie group (edges or biases) draws one value; attention biases stay 0.
-export function randomize(net, { seed, scheme = 'xavier', biases = 'zero' } = {}) {
+// init: { <shared matrix name>: scheme } overrides the scheme for the edges tied as '<name>:<i>,<j>'.
+// Schemes: INIT_SCHEMES; 'identity' is 1 where i = j and 0 elsewhere, 'zero' is 0.
+export const INIT_SCHEMES = ['xavier', 'he', 'small', 'identity', 'zero'];
+export function randomize(net, { seed, scheme = 'xavier', biases = 'zero', init = null } = {}) {
   const r = rng(seed);
   const fanIn = new Map(), fanOut = new Map();
   for (const e of net.edges) {
@@ -1064,7 +1067,9 @@ export function randomize(net, { seed, scheme = 'xavier', biases = 'zero' } = {}
   for (const e of net.edges) {
     if (e.fixed === true) continue;
     if (isTie(e.tie) && drawn.has(e.tie)) { e.w = drawn.get(e.tie); continue; }
-    e.w = sampleW(r, scheme, fanIn.get(e.to), fanOut.get(e.from));
+    const m = isObj(init) && isTie(e.tie) ? TIE_ID.exec(e.tie) : null;
+    const s = m && INIT_SCHEMES.includes(init[m[1]]) ? init[m[1]] : scheme;
+    e.w = s === 'identity' ? (m[2] === m[3] ? 1 : 0) : s === 'zero' ? 0 : sampleW(r, s, fanIn.get(e.to), fanOut.get(e.from));
     if (isTie(e.tie)) drawn.set(e.tie, e.w);
   }
   if (biases !== 'keep') {
@@ -1614,6 +1619,56 @@ const POS3 = [[1, 0], [-0.5, Math.sqrt(3) / 2], [-0.5, -Math.sqrt(3) / 2]];
 // Orthonormal axes of the 'cloud' dataset, widest spread first.
 const CLOUD_AXES =[[2, 1, 2], [1, 2, -2], [2, -2, -1]].map(v => v.map(c => c / 3));
 
+// ---- word datasets: 3-word sentences, each word a fixed 2-D vector (docs/NN_ATTENTION.md)
+
+// The ten words form a 5 x 2 grid. The first coordinate is the kind of word: nouns on the right
+// (dog 1.2, cat 0.6), the reflexive pronoun in the middle (0), verbs on the left (sees -0.6,
+// chases -1.2). The second is the number: 0.6 for the singular form, -0.6 for the plural.
+const FORMS = [['dog', 'dogs', 1.2], ['cat', 'cats', 0.6], ['itself', 'themselves', 0],
+  ['sees', 'see', -0.6], ['chases', 'chase', -1.2]];
+export const WORDS = Object.freeze(Object.fromEntries(FORMS.flatMap(([sg, pl, x]) =>
+  [[sg, Object.freeze([x, 0.6])], [pl, Object.freeze([x, -0.6])]])));
+const NOUNS = ['dog', 'cat', 'dogs', 'cats'];
+const plural = w => WORDS[w][1] < 0;
+const agree = (sg, pl) => noun => (plural(noun) ? pl : sg);   // the form that agrees with a noun
+const VERBS = [agree('sees', 'see'), agree('chases', 'chase')];
+const REFLEXIVE = agree('itself', 'themselves');
+const pickOf = (r, list) => list[Math.floor(r() * list.length)];
+
+// A word task: pick(r) -> { words: 3 words, src: for each position, the position whose word is its
+// target }. X is the words' vectors, Y the vectors of the words at src (targets follow the noisy
+// tokens, as in the other sequence tasks). make() also returns the sentences: words and targetWords.
+// The noise has its own random stream, so a seed gives the same sentences at any noise level.
+// decode(y) names each token of an output row by its nearest word in the task's vocabulary.
+function wordData(label, used, pick) {
+  const vocab = Object.freeze(Object.fromEntries(used.map(w => [w, WORDS[w]])));
+  const list = Object.entries(vocab);
+  const nearest = (a, b) => {
+    let best = null, bd = Infinity;
+    for (const [w, [x, y]] of list) {
+      const dd = (a - x) ** 2 + (b - y) ** 2;
+      if (dd < bd) { bd = dd; best = w; }
+    }
+    return best;
+  };
+  return {
+    label, inputs: 6, outputs: 6, kind: 'seq', tokens: 3, vocab,
+    decode: y => [0, 1, 2].map(t => (isNum(y?.[2 * t]) && isNum(y?.[2 * t + 1]) ? nearest(y[2 * t], y[2 * t + 1]) : null)),
+    make: (n = 200, seed = 1, noise = 0) => {
+      const r = rng(seed ?? 1), rn = rng(`${seedInt(seed ?? 1)}:noise`);
+      const count = clampInt(n, 0, 1e6, 200), s = num(noise, 0);
+      const X = [], Y = [], words = [], targetWords = [];
+      for (let i = 0; i < count; i++) {
+        const { words: w, src } = pick(r);
+        const T = w.map(v => WORDS[v].map(c => (s ? c + s * gauss(rn) : c)));
+        X.push(T.flat()); Y.push(src.flatMap(j => T[j]));
+        words.push(w); targetWords.push(src.map(j => w[j]));
+      }
+      return { X, Y, words, targetWords };
+    },
+  };
+}
+
 export const DATASETS = {
   xor: dataset('XOR', 2, 1, 'class', (r, i) => {
     const sx = i & 1 ? 1 : -1, sy = i & 2 ? 1 : -1;
@@ -1680,6 +1735,22 @@ export const DATASETS = {
     const T = ladder(r, 2, s), top = T[argmax(T)];
     return [T.flat(), T.flatMap(t => t.map((v, f) => Math.max(0, v + top[f])))];
   }),
+
+  // Word tasks (WORDS): every word outputs the vector of a word in its sentence.
+  // Pronouns: "dog sees itself". The reflexive outputs the noun it refers to; the noun and the verb
+  // output themselves. The noun, the verb and the reflexive agree in number.
+  nl_pronoun: wordData('Words: pronouns (dog sees itself)',
+    [...NOUNS, 'sees', 'see', 'chases', 'chase', 'itself', 'themselves'], r => {
+      const n = pickOf(r, NOUNS), v = pickOf(r, VERBS)(n);
+      return { words: [n, v, REFLEXIVE(n)], src: [0, 1, 0] };
+    }),
+  // Agreement: "dog chases cats". The verb outputs its subject, the noun it agrees with; the nouns
+  // output themselves. The object always has the other number, so number alone tells the subject.
+  nl_agree: wordData('Words: agreement (dog chases cats)',
+    [...NOUNS, 'sees', 'see', 'chases', 'chase'], r => {
+      const s = pickOf(r, NOUNS), v = pickOf(r, VERBS)(s), o = pickOf(r, NOUNS.filter(w => plural(w) !== plural(s)));
+      return { words: [s, v, o], src: [0, 0, 2] };
+    }),
 };
 
 // ------------------------------------------------------------------ presets
@@ -1876,10 +1947,33 @@ function gridLayout(net) {
   });
   return net;
 }
-// Input values and targets from sample 0 of a dataset (seed 1, no noise).
+// Input values and targets from sample 0 of a dataset (seed 1, no noise). A word dataset's sentence
+// also names the tokens (meta.tokenNames, docs/NN_LENS.md).
 function seqIO(net, key) {
-  const { X, Y } = DATASETS[key].make(1, 1, 0);
+  const { X, Y, words } = DATASETS[key].make(1, 1, 0);
+  if (words) net.meta.tokenNames = words[0].slice();
   return io(net, X[0].map(r3), Y[0].map(r3));
+}
+// The word presets: X (3 words, their 2-D vectors) -> tied Q, K, V -> Z, whose output is compared
+// with the target word's vector. Laid out as the other 3-token presets.
+// W_V starts as the identity, so each value is its word's own vector; W_Q and W_K start small, so
+// every word first reads all three about evenly; the biases start at 0. From a random W_V, or large
+// random W_Q and W_K, many runs lock into a swap instead: rows read the wrong word and W_V learns
+// to map it back (a local minimum: see the tests). meta.train.init keeps this recipe, so the Train
+// panel's Reset draws the same way (with init seed 1 it gives back these exact weights).
+const WORD_INIT = Object.freeze({ W_Q: 'small', W_K: 'small', W_V: 'identity' });
+function wordNet(title, key, seed) {
+  const net = seqBlank(title, 'mse', [
+    { name: 'Words X (2-D vectors)', tokens: 3, d: 2, label: tokLabel('x') },
+    { name: 'Q, K, V', tokens: 3, d: 2, groups: QKV, label: qkvLabel },
+    { name: 'Attention Z = output', tokens: 3, d: 2, attention: { heads: 1 }, label: tokLabel('z') }]);
+  for (const g of QKV) {
+    wireTied(net, 0, 1, `W_${g}`, [[0, 0], [0, 0]], { to: g });
+    tieBias(net, 1, `b_${g}`, [0, 0], g);
+  }
+  net.meta.train.init = { ...WORD_INIT };
+  randomize(net, { seed, init: WORD_INIT });
+  return gridLayout(seqIO(net, key));
 }
 const tokLabel = sym => (t, f) => `${sym}_{${t},${f}}`;
 const qkvLabel = (t, f, g) => `${g.toLowerCase()}_{${t},${f}}`;
@@ -1897,13 +1991,15 @@ const GRAPH = [[0, 1, 1, 0, 0], [1, 0, 1, 0, 0], [1, 1, 0, 1, 0], [0, 0, 1, 0, 1
 // so the net carries it through saves and exports. Presets without a dataset leave meta.train empty.
 // group: its section of the New net menu. note: one line on what to notice (matrix panel first).
 // lr: a learning rate that suits the preset (one the Train panel lists), recorded as meta.train.lr.
-function preset({ group, label, dataset = null, note, lr = null }, make) {
+// noise: the same for the dataset's noise (the word presets train on the exact word vectors).
+function preset({ group, label, dataset = null, note, lr = null, noise = null }, make) {
   return {
-    label, group, note, dataset, lr,
+    label, group, note, dataset, lr, noise,
     build: (seed = 1) => {
       const net = make(seed);
       if (dataset) net.meta.train = { ...net.meta.train, dataset };
       if (lr) net.meta.train = { ...net.meta.train, lr };
+      if (isNum(noise)) net.meta.train = { ...net.meta.train, noise };
       return net;
     },
   };
@@ -2295,6 +2391,14 @@ export const PRESETS = {
     net.meta.tokenNames = ['the', 'cat', 'sat'];
     return gridLayout(io(net, [1, 0, 0, 0, 1, 0, 0, 0, 1], 'self'));
   }),
+  pronouns: preset({
+    group: ATT, label: 'Pronouns: dog sees itself (train it)', dataset: 'nl_pronoun', lr: 0.3, noise: 0,
+    note: 'Words come in as fixed 2-D vectors. Train, then step through the samples: itself and themselves learn to read the noun they refer to (row 3 of A), while the noun and the verb read themselves.',
+  }, seed => wordNet('Pronouns', 'nl_pronoun', seed)),
+  agreement: preset({
+    group: ATT, label: 'Agreement: dog chases cats (train it)', dataset: 'nl_agree', lr: 0.3, noise: 0,
+    note: 'The verb outputs its subject. The object always has the other number, so after training the verb finds its subject by number alone: row 2 of A points at dog and skips cats.',
+  }, seed => wordNet('Agreement', 'nl_agree', seed)),
   attention: preset({
     group: ATT, label: 'Self-attention (3 tokens × 2)', dataset: 'seq_max', lr: 0.3,
     note: 'Q = XW_Q, K = XW_K, V = XW_V, each one tied 2×2 matrix shared by all 3 tokens. Z = softmax(QKᵀ/√2)V; row i of A is where token i looks. Train: every token learns to look at the largest x₁.',

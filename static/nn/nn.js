@@ -9,7 +9,7 @@
 // Audience windows (?audience) are read-only mirrors. graph/features/lecture.js carries the
 // presenter's state over its BroadcastChannel using window.mathboardNet (see the end of start()).
 
-const MODULES = ['view', 'inspector', 'matrix', 'train', 'lens', 'attnviz', 'tour'];
+const MODULES = ['view', 'inspector', 'matrix', 'train', 'lens', 'attnviz', 'tour', 'view3d', 'surf3d'];
 const STORE_KEY = 'mathboard.nn';
 const DEFAULT_PRESET = 'xor';
 const PRESET_SEED = 1;                     // presets always build the same weights; Randomize reshuffles
@@ -385,7 +385,9 @@ async function start({ model, createStore }) {
   function randomize(e) {
     const relu = store.net.layers.some((l, i) => i > 0 && (l.act === 'relu' || l.act === 'leaky'));
     const scheme = e?.shiftKey ? 'small' : relu ? 'he' : 'xavier';
-    if (attempt('randomize the weights', net => model.randomize(net, { seed: randomSeed(), scheme }))) {
+    // A preset's init recipe (meta.train.init, e.g. the word presets' W_V = I) keeps it out of known bad minima.
+    const init = store.net.meta?.train?.init || null;
+    if (attempt('randomize the weights', net => model.randomize(net, { seed: randomSeed(), scheme, init }))) {
       toast(`New random weights (${{ he: 'He', xavier: 'Xavier', small: 'small' }[scheme]})`, 1600);
     }
   }
@@ -657,7 +659,7 @@ async function start({ model, createStore }) {
   // The matrix panel's toggles (ctx.matrix.opt) and the view's weight labels are UI state with no
   // store event: a click in the toolbars or the matrix panel, or a key, re-posts after it has run.
   function mirrorChanged() { for (const fn of mirrorFns) safe(fn); }
-  for (const evt of ['net', 'layout', 'sel', 'hover', 'anim', 'lens', 'viz', 'tour']) store.on(evt, mirrorChanged);
+  for (const evt of ['net', 'layout', 'sel', 'hover', 'anim', 'lens', 'viz', 'tour', 'v3d', 's3d']) store.on(evt, mirrorChanged);
   if (!audience) {
     const later = () => { if (mirrorFns.size) requestAnimationFrame(mirrorChanged); };
     el.bar.addEventListener('click', later);
@@ -670,7 +672,7 @@ async function start({ model, createStore }) {
     store, ctx, audience, ready: false,
     mirrorState: () => ({
       net: store.net, sel: store.state.sel, hover: store.state.hover, anim: store.state.anim, split, matrixHidden,
-      lens: store.state.lens, viz: store.state.viz, tour: store.state.tour,
+      lens: store.state.lens, viz: store.state.viz, tour: store.state.tour, v3d: store.state.v3d, s3d: store.state.s3d,
       matrix: ctx.matrix?.opt ? { ...ctx.matrix.opt } : null, weights: !!ctx.view?.weights,
     }),
     applyMirror(m) {
@@ -688,7 +690,7 @@ async function start({ model, createStore }) {
         safe(() => ctx.matrix.render?.());
       }
       if ('weights' in m && ctx.view && ctx.view.weights !== !!m.weights) ctx.view.weights = !!m.weights;
-      for (const k of ['sel', 'hover', 'anim', 'lens', 'viz', 'tour']) if (k in m && !same(m[k], store.state[k])) store.set(k, m[k] ?? null);
+      for (const k of ['sel', 'hover', 'anim', 'lens', 'viz', 'tour', 'v3d', 's3d']) if (k in m && !same(m[k], store.state[k])) store.set(k, m[k] ?? null);
       if (Number.isFinite(m.split)) setSplit(m.split, !!m.matrixHidden);
     },
     onMirror(fn) { mirrorFns.add(fn); return () => mirrorFns.delete(fn); },

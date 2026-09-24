@@ -18,7 +18,9 @@ Toolbar buttons: **Lens** (group `view`), **Attention** (group `attnviz`) and **
 
 `net.meta.tokenNames: (string | number)[] | undefined` holds one plain-text name per token (slot
 i = token i, 0-based), used for that token in every token layer, e.g. `['the', 'cat', 'sat']` in
-the `words` preset. `normalize` keeps it, as it keeps any unknown meta field.
+the `words` preset. `normalize` keeps it, as it keeps any unknown meta field. The `pronouns` and
+`agreement` presets start with their first sentence's words, and the Train panel's Load sample
+sets them from a word dataset's sentence (docs/NN_CONTRACT.md, the train.js handle).
 
 - **One source.** focus.js's `tokenNames(net)` returns one entry per slot: the trimmed name, or
   `null` for an unnamed slot (`[]` when the field is not an array). A slot is named when it holds
@@ -29,7 +31,7 @@ the `words` preset. `normalize` keeps it, as it keeps any unknown meta field.
   name in the tooltip), the matrix panel's headers and trace card, the inspector cards, the Train
   plot's row labels, the attention panel, the lens bar's token chips and the Explain captions.
   In KaTeX a name is `\text{…}`; an unnamed token stays `t_{i}`.
-- **Renaming** happens in the attention panel only. `ctx.attnviz.rename(i, name)` collapses
+- **Renaming** by hand happens in the attention panel only. `ctx.attnviz.rename(i, name)` collapses
   whitespace, trims, keeps at most 16 characters, and treats an empty name as unnamed. It fills
   the unnamed slots with their defaults `t{k+1}`, so the stored list never has a blank before a
   named slot, and deletes `meta.tokenNames` when no slot is named. Each rename is one

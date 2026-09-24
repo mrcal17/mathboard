@@ -82,8 +82,9 @@ The left image above is `transform(A, t)` with `eigen(A)`; the right one is
 An editable network for teaching. The canvas on the left and the matrix panel on the right show
 the same numbers: each layer is written out as `z = W a + b`, and hovering a weight anywhere
 lights it everywhere. Click a neuron, edge or layer for a card with its arithmetic and its
-gradients. The Train panel fits the net to a toy dataset while you watch. The 43 presets run
-from logic gates and MLPs to convolutions, an unrolled RNN and attention.
+gradients. The Train panel fits the net to a toy dataset while you watch. The 45 presets run
+from logic gates and MLPs to convolutions, an unrolled RNN and attention, including attention
+trained on three-word sentences.
 
 ![Training a 2-6-4-1 ReLU network on the circles dataset: the decision region forms, the edges change colour and the matrices update](docs/media/net-train.gif)
 
@@ -100,6 +101,21 @@ Step-through goes one token at a time: the scores, the softmax, then the weighte
 token lights it on the canvas, in the matrix panel and in the cards. Above is the transformer
 block after training on "ReLU(own + max token)": both tokens attend to token 1, the one with the
 larger x₁.
+
+#### Attention on words
+
+![The Agreement preset after training, on the sentence "dog chases cats": the Attention panel's arcs show chases reading dog with weight 0.99 and cats with 0.01; the canvas follows chases, whose output takes the value of dog; the Train panel names every output by its nearest word, all three right, with word accuracy 100%](docs/media/net-words.png)
+
+Two presets train attention on tiny sentences. Each word is a fixed 2-D vector: the first
+coordinate is the kind of word (nouns on the right, verbs on the left, the reflexive pronoun in
+the middle) and the second its number (singular above the axis, plural below). Each word's
+target is the vector of a word in its own sentence, and the Train panel names each output by
+its nearest word and counts the right ones. In **Pronouns** ("dog sees itself") the reflexive learns
+to output the noun it refers to, while the other words output themselves. In **Agreement** ("dog
+chases cats") the verb outputs its subject; the object always has the other number, so the verb
+finds its subject by matching number. Stepping through the samples puts each sentence's words on
+the canvas, in the matrix panel, the lens bar and the Attention panel. Above is Agreement after
+3000 steps: chases puts 0.99 of its attention on dog and 0.01 on cats.
 
 #### Lens, Attention panel and Explain
 
@@ -524,19 +540,21 @@ Hover any cell, header or vector entry to light it on the canvas; click it to op
 back, and ▾ folds it (the folded header still shows the epoch, the loss and a play button).
 
 - **Data:** XOR, circles, spiral, two blobs, moons (2 inputs → 1 class), three classes (2 → 3,
-  one-hot), line and sine (1 → 1, regression), a flat 3-D cloud (3 → 3, for the PCA preset) and
-  four token sequences for the attention presets, with **points**, **noise** and **seed**. A
-  preset picks the dataset that suits it. If the net's inputs and outputs don't match the
+  one-hot), line and sine (1 → 1, regression), a flat 3-D cloud (3 → 3, for the PCA preset),
+  four token sequences and two datasets of three-word sentences for the attention presets, with
+  **points**, **noise** and **seed**. A preset picks the dataset that suits it (and, for the word
+  presets, noise 0). If the net's inputs and outputs don't match the
   dataset, **Adapt network** resizes the input and output layers (hidden layers are kept; a token
   net changes its features per token, or says why it can't) and sets a matching output
   activation and loss; until then Play and Step are disabled.
 - **Settings:** **loss** (MSE / x-entropy), **rate**, **batch** (1 to 128, or all) and
   **speed** (training steps per frame).
 - **Play** (Space) trains live, **Step** (T) does one mini-batch step, **Reset** re-draws the
-  weights from the **init** seed (biases back to 0) and **↻** picks a new seed first. A training
-  run is one undo step. If the loss blows up, training pauses.
-- **Readout:** epoch, step, the loss over the whole dataset, accuracy for classification, and a
-  loss-per-epoch chart.
+  weights from the **init** seed (biases back to 0) and **↻** picks a new seed first. A preset
+  that starts some shared matrices its own way (the word presets' W_V = I) keeps that on Reset. A
+  training run is one undo step. If the loss blows up, training pauses.
+- **Readout:** epoch, step, the loss over the whole dataset, accuracy for classification, word
+  accuracy for the [word datasets](#attention-reference), and a loss-per-epoch chart.
 - **Plot:** with 2 inputs, the data over the network's decision regions; with 1 input, the data
   and the fitted curve. **plot** can instead pick a hidden layer with exactly 2 neurons: the data
   in that layer's activation space, with the input grid bent by the net. The yellow ring is the
@@ -583,6 +601,26 @@ The Attention presets add three things to the plain `z = W a + b` layers. The fu
   block. The plot then shows the current sample's tokens, its attention matrix (pick the layer
   and head under **plot**) and ŷ against y per token, with ◀ ▶ to step through the samples.
   Neuron maps are off for these datasets.
+- **Word datasets.** Two more go with the Pronouns and Agreement presets. They use ten words, each
+  a fixed 2-D vector (x is the kind of word, y the number; articles are left out):
+
+  | | x = 1.2 | x = 0.6 | x = 0 | x = −0.6 | x = −1.2 |
+  |---|---|---|---|---|---|
+  | **y = 0.6** (singular) | dog | cat | itself | sees | chases |
+  | **y = −0.6** (plural) | dogs | cats | themselves | see | chase |
+
+  **Words: pronouns** has the 8 sentences "noun verb reflexive", such as "dog sees itself" and
+  "cats chase themselves", all agreeing in number; the reflexive's target is its noun and the
+  other targets are the words themselves. (A reflexive, because in "dog chases it" the pronoun
+  can't be the dog.) **Words: agreement** has the 16 sentences "subject verb object" with the
+  object of the other number, such as "dog chases cats"; the verb's target is its subject. For
+  these the stepper shows the sentence, loading a sample names the tokens after its words, the
+  plot's **ŷ → word** column names each output by its nearest word (✓ or ✗ against the target
+  word, shown below it), and the readout adds **words**, the word accuracy over the dataset. The
+  two presets train on the exact vectors (noise 0) and start with W_V = I and small W_Q and W_K;
+  Reset keeps that recipe, since from a fully random start many runs settle on a wrong,
+  swapped pattern. There is no next-word task: with a squared-error loss on word vectors, the
+  positions where the grammar allows several next words would need "don't care" targets.
 
 </details>
 
@@ -651,7 +689,8 @@ last:
 - **Token names:** click the followed token's chip again, or double-click any token chip, and type
   a name (up to 16 characters; an empty name goes back to t_i). The name replaces t_i on the
   canvas, in the matrix panel, the cards, the Train plot, the lens bar and the Explain captions.
-  It is saved in the net (`net.meta.tokenNames`), so export and undo keep it.
+  It is saved in the net (`net.meta.tokenNames`), so export and undo keep it. Loading a sample of
+  a word dataset in the Train panel names the tokens after its words.
 - A caption under each view gives its formula, with the numbers of the query shown where there is
   one.
 
@@ -687,7 +726,7 @@ what its caption says, and the end puts all three back as they were.
 
 <a name="presets"></a>
 <details>
-<summary>Presets (43, in 8 groups)</summary>
+<summary>Presets (45, in 8 groups)</summary>
 
 **Basics**
 
@@ -751,6 +790,8 @@ what its caption says, and the end puts all three back as they were.
 | Preset | Net | Dataset | What to notice |
 |---|---|---|---|
 | Word attention: the cat sat (hand-set) (`words`) | 3×3 → 3×2 Q, K, V → 3×2 attention | none | Hand-set. Words come in one-hot (det, noun, verb). W_Q asks and W_K answers: sat's query points at the noun cat, cat's at the determiner the. The asks nothing (q = 0), so its row of A is even. |
+| Pronouns: dog sees itself (train it) (`pronouns`) | 3×2 → 3×2 Q, K, V → 3×2 attention | Words: pronouns (dog sees itself) | Words come in as fixed 2-D vectors. Train, then step through the samples: itself and themselves learn to read the noun they refer to (row 3 of A), while the noun and the verb read themselves. |
+| Agreement: dog chases cats (train it) (`agreement`) | 3×2 → 3×2 Q, K, V → 3×2 attention | Words: agreement (dog chases cats) | The verb outputs its subject. The object always has the other number, so after training the verb finds its subject by number alone: row 2 of A points at dog and skips cats. |
 | Self-attention (3 tokens × 2) (`attention`) | 3×2 → 3×2 Q, K, V → 3×2 attention | Copy the max token (3 tokens × 2) | Q = XW_Q, K = XW_K, V = XW_V, each one tied 2×2 matrix shared by all 3 tokens. Z = softmax(QKᵀ/√2)V; row i of A is where token i looks. Train: every token learns to look at the largest x₁. |
 | Causal attention: the previous token (`causal`) | 3×3 → 3×2 Q, K, V → 3×2 causal attention → 3×1 | Previous token, causal (3 tokens, c + position) | The mask sets S_ij = −∞ for j > i, so token i reads only tokens up to i. Positions come in as (cos θ, sin θ); to copy the previous token, W_Q W_Kᵀ has to learn a rotation by one position. |
 | Previous token by rotation (hand-set) (`causal_rot`) | 3×3 → 3×2 Q, K, V → 3×2 causal attention → 3×1 | Previous token, causal (3 tokens, c + position) | Hand-set causal attention. Positions come in as (cos θ, sin θ) and W_Q turns them back by 120°, so q_i points at k_(i−1) and token i copies c_(i−1). The loss starts near 0. |

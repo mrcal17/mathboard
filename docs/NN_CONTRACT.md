@@ -104,12 +104,15 @@ adapt or play frame.
 | `every` | int >= 1 | 1 | epochs per `hist` entry; past 400 entries `hist` is halved and `every` doubled |
 | `maps` | bool | true | per-neuron maps on (always off with a `seq` dataset; the setting comes back with a plain one) |
 | `space` | string | `''` | plot: `''` = input space, or the id of a hidden layer with exactly 2 neurons. With a `seq` dataset: `'<attention layer id>#<head>'`, the attention matrix of that layer and head (0-based; `''` or an unknown value picks the first) |
+| `init` | `{ name: scheme }` | absent | optional: how Reset draws the shared matrices with that name (`model.randomize`'s `init`, schemes `INIT_SCHEMES`); entries with an unknown scheme are dropped. The word presets record `{ W_Q: 'small', W_K: 'small', W_V: 'identity' }` |
 
 - Default `dataset`: the preset's `PRESETS[k].dataset` (a net is matched to its preset by
   `meta.title`) if its shape fits, else the first dataset whose inputs and outputs match the net,
   else `xor`.
 - A preset may also record `lr` (`PRESETS[k].lr`, one of the listed rates): the attention presets
-  need more than the default 0.1 to learn their pattern in a few thousand steps.
+  need more than the default 0.1 to learn their pattern in a few thousand steps. It may record
+  `noise` the same way (`PRESETS[k].noise`): the word presets train on the exact word vectors
+  (noise 0).
 - Changing `dataset`, `n`, `noise` or `seed` resets `seen`, `steps`, `hist` and `every`.
 - The loss choice stays in `meta.loss`.
 - The panel's own UI state is not in the net: localStorage `mathboard.nn.train` =
@@ -130,8 +133,9 @@ emptyNet(), clone(net), validate(net) -> string[], normalize(net) -> net   // no
                 //   fixed beats tie, edges into an attention layer dropped and its biases zeroed, a layer whose size
                 //   doesn't split into tokens x groups made plain, a broken attention layer made dense
 relabel(net, { onlyEmpty }), defaultLabel(net, nodeId)
-PRESETS         // { key: { label, group, note, dataset: DATASETS key | null, lr: number | null, build(seed = 1) -> net } };
-                //   build() also records the dataset in meta.train.dataset, and lr (when set) in meta.train.lr.
+PRESETS         // { key: { label, group, note, dataset: DATASETS key | null, lr: number | null, noise: number | null,
+                //   build(seed = 1) -> net } };
+                //   build() also records the dataset in meta.train.dataset, and lr and noise (when set) in meta.train.
                 //   Listed in menu order: the shell's New net picker has
                 //   one <optgroup> per group (in first-seen order), shows note as the option's tooltip and toasts
                 //   it for 5 s when the preset loads from the picker (not on a #nn= preload). note is one line on
@@ -147,6 +151,9 @@ PRESETS         // { key: { label, group, note, dataset: DATASETS key | null, lr
                 //   Sequences: rnn (unrolled; tied W_{hh}, w_x, b_h), wavenet (dilated causal conv, a tied kernel k^{(l)} per layer)
                 //   Attention (token nets, mse, see docs/NN_ATTENTION.md): words (hand-set "the cat sat": one-hot
                 //     det / noun / verb -> tied QKV -> Z, no dataset, sets meta.tokenNames, see docs/NN_LENS.md),
+                //     pronouns and agreement (3 words x 2, their WORDS vectors -> tied QKV -> Z = the output; nl_pronoun
+                //     and nl_agree, lr 0.3, noise 0; W_V starts as I and b_V at 0, W_Q and W_K small, recorded as
+                //     meta.train.init; the first sentence names the tokens),
                 //     attention (3 tokens x 2 -> tied QKV -> Z, seq_max, lr 0.3), causal (seq_prev, lr 0.3), causal_rot
                 //     (hand-set solution of causal's task: W_Q turns the positions back 120°; seq_prev), multihead
                 //     (2 heads, seq_minmax, lr 1), transformer (2 tokens: QKV, Z, H = X + Z W_O, ReLU FFN d -> 2d,
@@ -181,8 +188,11 @@ connect(net, from, to, w?) -> id | null         // reuses an existing edge, swap
                                                 //   w on an existing tied edge sets its group; a fixed edge keeps its w
 disconnect(net, edgeId), setWeight(net, edgeId, w) -> bool   // setWeight: a tied edge sets its group; false on a fixed edge
 connectDense(net, fromLayer, toLayer, { seed, scheme = 'xavier', w }) -> edgeId[]   // existing edges keep their w
-randomize(net, { seed, scheme: 'xavier' | 'he' | 'small', biases: 'zero' | 'small' | 'keep' })   // biases default 'zero'.
-                                                //   Fixed edges kept, one draw per tie group, attention biases stay 0
+randomize(net, { seed, scheme: 'xavier' | 'he' | 'small', biases: 'zero' | 'small' | 'keep', init })   // biases default 'zero'.
+                                                //   Fixed edges kept, one draw per tie group, attention biases stay 0.
+                                                //   init: { <name>: scheme } for the edges tied as '<name>:<i>,<j>', a scheme of
+                                                //   INIT_SCHEMES = ['xavier', 'he', 'small', 'identity', 'zero'] ('identity': 1 where
+                                                //   i = j, else 0); other names and unknown schemes use scheme
 autoLayout(net, { width, height })              // nodes in evenly spaced columns, centred; token layers leave an
                                                 //   extra quarter row between tokens and another between groups
 
@@ -221,7 +231,8 @@ trainStep(net, { X, Y }, { lr = 0.1, loss }) -> mean loss   // one step over the
 predict(net, X, { layer }) -> number[][]       // outputs; layer = index | id (that layer's a) | 'all' (every layer per sample)
 collapse(net) -> { W, b, rows, cols } | null   // the affine map y = W x + b when every non-input layer is identity
                                                //   (null with an attention layer)
-DATASETS        // { key: { label, inputs, outputs, kind: 'class' | 'reg' | 'seq', tokens?, make(n = 200, seed = 1, noise = 0) -> { X, Y } } }
+DATASETS        // { key: { label, inputs, outputs, kind: 'class' | 'reg' | 'seq', tokens?, vocab?, decode?,
+                //   make(n = 200, seed = 1, noise = 0) -> { X, Y, words?, targetWords? } } }
                 //   xor, circles, spiral, blobs, moons (2 -> 1), three (2 -> 3 one-hot), line, sine (1 -> 1),
                 //   cloud (3 -> 3 regression, target = input: a flat 3-D cloud, for pca_ae).
                 //   noise is Gaussian, on the inputs (class) or the targets (reg).
@@ -232,6 +243,20 @@ DATASETS        // { key: { label, inputs, outputs, kind: 'class' | 'reg' | 'seq
                 //     seq_prev (3 x 3 -> 3 x 1): tokens (c, cos θ, sin θ), θ = 0, 120°, 240°; y_i = c_{i-1} (y_1 = c_1)
                 //     seq_addmax (2 x 2 -> 2 x 2): y_i = ReLU(x_i + the token with the largest x₁)
                 //   In seq_max / seq_minmax / seq_addmax the x₁ are uniform on [-0.9, 0.9], at least 0.3 apart
+                //   Word tasks (kind 'seq', 3 tokens x 2 -> 3 x 2, mse): each token is a word's WORDS vector, and each
+                //   target the vector of a word in the same sentence (a noisy copy when noise > 0). They add
+                //     vocab: { word: [x, y] }, the WORDS entries the task uses;
+                //     decode(y) -> (string | null)[]: each token of an output row named by its nearest vocab word
+                //       (null where a coordinate is not a finite number);
+                //     make() also returns words (per sample, the 3 words) and targetWords (the word each token
+                //       should output). The noise has its own random stream: a seed gives the same sentences at any noise.
+                //     nl_pronoun: "dog sees itself": noun, verb, reflexive, all agreeing in number (8 sentences).
+                //       Targets: the noun, the verb, the noun (the reflexive outputs the noun it refers to)
+                //     nl_agree: "dog chases cats": subject, verb agreeing with it, an object of the other number
+                //       (16 sentences). Targets: the subject, the subject (the verb outputs its subject), the object
+WORDS           // frozen { word: [x, y] }: dog (1.2, 0.6), cat (0.6, 0.6), itself (0, 0.6), sees (-0.6, 0.6),
+                //   chases (-1.2, 0.6), and the plurals dogs, cats, themselves, see, chase at y = -0.6.
+                //   x is the kind of word (nouns right, verbs left), y the number
 rng(seed) -> () => [0, 1)                      // mulberry32; no seed = a random one
 fmt(x, digits = 2) -> string                   // ASCII minus, never -0.00, 'NaN' / 'inf' / '-inf'. KaTeX-safe
 fmtg(x, digits = 2) -> string                  // for gradients: fmt from |x| >= 0.01; below, two significant figures:
@@ -439,8 +464,10 @@ ctx.matrix = { step(±1), toggle(key), opt, render(), update(), reveal(layer, pa
   Toolbar buttons never take focus, so Space stays with training.
 - train.js sets `ctx.train` (its test handle, below). Its named exports are
   `readSettings(net, model)`, `netShape`, `defaultDataset`, `forwardMany(net, model, X, n, from, M)`,
-  `datasetLoss(P, Y, n, K, loss, outAct, segments = 1)` and `adaptNet(net, model, ds, { seed })`;
-  matrix.js and inspector.js import `readSettings`. `datasetLoss`'s `segments` is the number of
+  `datasetLoss(P, Y, n, K, loss, outAct, segments = 1)`, `wordAccuracy(P, targetWords, n, K, ds)` and
+  `adaptNet(net, model, ds, { seed })`; matrix.js and inspector.js import `readSettings`.
+  `wordAccuracy` is the share of output tokens whose nearest word (`ds.decode`) is the target word;
+  the readout shows it as **words** (classification shows **acc**). `datasetLoss`'s `segments` is the number of
   softmax blocks of a token output layer (tokens × groups): its cross-entropy is their mean, as in
   `backward`. `adaptNet` returns a sentence saying what it did, or throws an `Error` whose message
   says why it can't (a token net on a plain dataset, another token count, an attention output of
@@ -448,7 +475,9 @@ ctx.matrix = { step(±1), toggle(key), opt, render(), update(), reveal(layer, pa
   Test handle: `ctx.train` = `document.querySelector('.nn-train').nnTrain` =
   `{ play, pause, step, reset, adapt, loadSample(i), stepSample(±1), fold(on?), running, eval, open,
   folded, point(i) }`. `stepSample` loads the next or previous dataset sample (from the one the
-  inputs hold, else the first or last), as the ◀ ▶ buttons under a sequence plot do. `fold(on)`
+  inputs hold, else the first or last), as the ◀ ▶ buttons under a sequence plot do. `loadSample`
+  on a word dataset also sets `meta.tokenNames` to the sample's words, in the same commit; a sample
+  of a dataset without words drops names that are all `WORDS` (left by a word dataset). `fold(on)`
   folds the panel to its header or unfolds it (no argument toggles), saved like the button;
   Explain uses it (docs/NN_LENS.md).
 - The shell's **Delete** and **+ Layer** keep token layers whole, by view.js's rules (its

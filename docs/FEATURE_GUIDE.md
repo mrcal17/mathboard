@@ -159,6 +159,10 @@ help:
   and grab eight frames 100 ms apart after each → (the refit and the caption card settle), then
   hold the last one: an ffmpeg concat list (`file '0007.png'` / `duration 3`) with `-fps_mode vfr`
   and the palette filter above keeps the held frames free. `net-explain.png` is its last step.
+- **Word presets.** `docs/media/net-words.png` is `#nn=agreement` trained with the Train panel's
+  handle (speed 100, 3000 steps), then `loadSample(i)` for the sample whose `words` are
+  "dog chases cats" (sample 10 at the preset's settings), the matrix panel hidden (a double-click
+  on `#nn-split`), `mathboardNet.ctx.attnviz.show('arcs')`, key 2 and a fit.
 
 ## When you're done
 Note what syntax/UI you added (with a 3-6 line example a lecturer would type), the files you

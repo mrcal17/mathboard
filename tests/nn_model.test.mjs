@@ -1409,6 +1409,24 @@ describe('edit operations keep the net valid', () => {
     valid(a);
   });
 
+  test('randomize { init }: a scheme per shared matrix name; identity and zero; fixed edges kept', () => {
+    const net = M.PRESETS.transformer.build(1), fixed = net.edges.filter(e => e.fixed).map(e => e.w);
+    const init = { W_V: 'identity', W_O: 'zero', W_1: 'small', W_Q: 'nonsense' };
+    M.randomize(net, { seed: 4, init });
+    const T = name => M.tiedMatrices(net, net.layers.findIndex((_, l) => M.tiedMatrices(net, l).some(t => t.name === name)))
+      .find(t => t.name === name).W;
+    assert.deepEqual(T('W_V'), [[1, 0], [0, 1]]);
+    assert.deepEqual(T('W_O'), [[0, 0], [0, 0]]);
+    assert.ok(T('W_1').flat().every(v => Math.abs(v) < 0.5), 'small');
+    assert.notDeepEqual(T('W_Q'), [[0, 0], [0, 0]], 'an unknown scheme falls back to the default');
+    assert.deepEqual(net.edges.filter(e => e.fixed).map(e => e.w), fixed);
+    valid(net);
+    // without init nothing changes
+    const a = M.PRESETS.attention.build(1), b = M.clone(a);
+    M.randomize(a, { seed: 3 }); M.randomize(b, { seed: 3, init: null });
+    assert.deepEqual(a, b);
+  });
+
   test('autoLayout: evenly spaced columns, centred, inside the box', () => {
     const net = M.PRESETS.deep.build(1);
     net.nodes.forEach(n => { n.x = 5000; n.y = -40; });
@@ -1611,7 +1629,7 @@ describe('validate and normalize', () => {
 
 // ---------------------------------------------------------------- tokens, ties, attention
 
-const ATT_KEYS = ['words', 'attention', 'causal', 'causal_rot', 'multihead', 'transformer'];
+const ATT_KEYS = ['words', 'pronouns', 'agreement', 'attention', 'causal', 'causal_rot', 'multihead', 'transformer'];
 const matmul = (A, B) => A.map(row => B[0].map((_, j) => row.reduce((s, v, k) => s + v * B[k][j], 0)));
 const transpose = A => A[0].map((_, j) => A.map(row => row[j]));
 const nearM = (A, B, tol, msg) => { assert.equal(A.length, B.length, `${msg} rows`); A.forEach((r, i) => nearV(r, B[i], tol, `${msg}[${i}]`)); };
@@ -2382,6 +2400,160 @@ describe('attention presets train on their datasets', () => {
   });
 });
 
+// ---------------------------------------------------------------- word datasets and presets
+
+describe('word datasets', () => {
+  const WORD_KEYS = ['nl_pronoun', 'nl_agree'];
+  // A tiny grammar check: the kind of each word, and number agreement.
+  const KIND = { dog: 'N', cat: 'N', dogs: 'N', cats: 'N', sees: 'V', see: 'V', chases: 'V', chase: 'V', itself: 'R', themselves: 'R' };
+  const NUMBER = { dog: 'sg', cat: 'sg', sees: 'sg', chases: 'sg', itself: 'sg', dogs: 'pl', cats: 'pl', see: 'pl', chase: 'pl', themselves: 'pl' };
+
+  test('WORDS: a 5 x 2 grid, x = the kind of word, y = +0.6 singular and -0.6 plural', () => {
+    assert.deepEqual(Object.keys(M.WORDS).sort(), Object.keys(KIND).sort());
+    const x = { dog: 1.2, cat: 0.6, itself: 0, sees: -0.6, chases: -1.2 };
+    const pl = { dog: 'dogs', cat: 'cats', itself: 'themselves', sees: 'see', chases: 'chase' };
+    for (const [sg, v] of Object.entries(x)) {
+      assert.deepEqual(M.WORDS[sg], [v, 0.6], sg);
+      assert.deepEqual(M.WORDS[pl[sg]], [v, -0.6], pl[sg]);
+    }
+    assert.ok(Object.isFrozen(M.WORDS) && Object.isFrozen(M.WORDS.dog));
+  });
+
+  for (const k of WORD_KEYS) {
+    test(`${k}: 3 words x 2 -> 3 x 2, deterministic, grammatical, targets are words of the sentence`, () => {
+      const d = M.DATASETS[k];
+      assert.deepEqual([d.kind, d.tokens, d.inputs, d.outputs], ['seq', 3, 6, 6]);
+      assert.equal(typeof d.label, 'string');
+      assert.ok(Object.keys(d.vocab).every(w => M.WORDS[w] === d.vocab[w]), 'vocab is a part of WORDS');
+      for (const noise of [0, 0.1]) {
+        const S = d.make(300, 3, noise);
+        assert.deepEqual(d.make(300, 3, noise), S, 'same seed, same data');
+        assert.deepEqual([S.X.length, S.Y.length, S.words.length, S.targetWords.length], [300, 300, 300, 300]);
+        S.words.forEach((w, s) => {
+          const [a, b, c] = w;
+          assert.ok(w.every(v => d.vocab[v]), `${w}: known words`);
+          if (k === 'nl_pronoun') {
+            assert.deepEqual(w.map(v => KIND[v]), ['N', 'V', 'R'], w.join(' '));
+            assert.ok(NUMBER[a] === NUMBER[b] && NUMBER[b] === NUMBER[c], `${w.join(' ')}: agreement`);
+            assert.deepEqual(S.targetWords[s], [a, b, a], 'the reflexive outputs its noun');
+          } else {
+            assert.deepEqual(w.map(v => KIND[v]), ['N', 'V', 'N'], w.join(' '));
+            assert.equal(NUMBER[a], NUMBER[b], `${w.join(' ')}: the verb agrees with its subject`);
+            assert.notEqual(NUMBER[a], NUMBER[c], `${w.join(' ')}: the object has the other number`);
+            assert.deepEqual(S.targetWords[s], [a, a, c], 'the verb outputs its subject');
+          }
+          // X is the words' vectors (plus noise); Y copies the vectors of the target positions
+          const src = S.targetWords[s].map(t => w.indexOf(t));
+          const T = [0, 1, 2].map(t => S.X[s].slice(2 * t, 2 * t + 2));
+          assert.deepEqual(S.Y[s], src.flatMap(j => T[j]), 'targets follow the (noisy) tokens');
+          if (!noise) assert.deepEqual(T, w.map(v => [...M.WORDS[v]]));
+          else T.forEach((v, t) => assert.ok(Math.hypot(v[0] - M.WORDS[w[t]][0], v[1] - M.WORDS[w[t]][1]) < 0.6, 'noise is small'));
+        });
+        // every sentence of the grammar turns up
+        const kinds = new Set(S.words.map(w => w.join(' ')));
+        assert.equal(kinds.size, k === 'nl_pronoun' ? 8 : 16, [...kinds].join(', '));
+      }
+      // the noise has its own random stream: a seed gives the same sentences at any noise level
+      assert.deepEqual(d.make(50, 3, 0.2).words, d.make(50, 3, 0).words);
+      assert.notDeepEqual(d.make(50, 3, 0.2).X, d.make(50, 3, 0).X);
+      assert.notDeepEqual(d.make(50, 4, 0).words, d.make(50, 3, 0).words);
+    });
+
+    test(`${k}: decode names each token by its nearest word`, () => {
+      const d = M.DATASETS[k], { X, words } = d.make(40, 5, 0);
+      X.forEach((x, s) => assert.deepEqual(d.decode(x), words[s]));
+      const w = Object.keys(d.vocab)[0], [a, b] = d.vocab[w];
+      assert.deepEqual(d.decode([a + 0.2, b - 0.2, NaN, 0, a, b]), [w, null, w]);
+      if (k === 'nl_agree') assert.ok(!('itself' in d.vocab), 'only the words the task uses');
+    });
+  }
+});
+
+describe('word presets train on their datasets', () => {
+  // As the Train panel runs them: 200 points, batches of 10, the preset's own lr and noise (0). Word
+  // accuracy and attention are measured on a held-out set without noise.
+  function run(k, { steps = 3000, init, noise = M.PRESETS[k].noise } = {}) {
+    const p = M.PRESETS[k], net = p.build(1), ds = M.DATASETS[p.dataset];
+    if (init) init(net);
+    const d = ds.make(200, 1, noise), test = ds.make(200, 7, 0), r = M.rng(3);
+    for (let s = 0; s < steps; s++) {
+      const idx = Array.from({ length: 10 }, () => Math.floor(r() * 200));
+      M.trainStep(net, { X: idx.map(i => d.X[i]), Y: idx.map(i => d.Y[i]) }, { lr: p.lr });
+    }
+    valid(net);
+    let hit = 0;
+    const A = [[0, 0, 0], [0, 0, 0], [0, 0, 0]], argmax = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    test.X.forEach((x, s) => {
+      const f = M.forward(net, x);
+      ds.decode(f.a.at(-1)).forEach((w, t) => { if (w === test.targetWords[s][t]) hit++; });
+      f.attn[2].heads[0].A.forEach((row, i) => {
+        row.forEach((v, j) => { A[i][j] += v / test.X.length; });
+        argmax[i][row.indexOf(Math.max(...row))]++;
+      });
+    });
+    return { net, acc: hit / (3 * test.X.length), A, argmax };
+  }
+
+  test('pronouns and agreement start as the note says: W_V = I, b_V = 0, small W_Q and W_K, the first sentence named', () => {
+    for (const k of ['pronouns', 'agreement']) {
+      const p = M.PRESETS[k], net = p.build(1), T = M.tiedMatrices(net, 1);
+      assert.deepEqual([net.meta.train.lr, net.meta.train.noise], [0.3, 0], 'lr 0.3 on the exact word vectors');
+      assert.deepEqual(net.meta.train.init, { W_Q: 'small', W_K: 'small', W_V: 'identity' }, 'the recipe Reset uses');
+      assert.deepEqual(T.find(t => t.name === 'W_V').W, [[1, 0], [0, 1]]);
+      assert.ok(M.nodesIn(net, 1).every(n => n.bias === 0), 'biases start at 0');
+      const again = M.clone(net);
+      M.randomize(again, { seed: 1, scheme: 'xavier', init: net.meta.train.init });
+      assert.deepEqual(again, net, 'Reset with init seed 1 gives back the preset');
+      for (const nm of ['W_Q', 'W_K']) assert.ok(T.find(t => t.name === nm).W.flat().every(v => Math.abs(v) < 0.4), nm);
+      const { words } = M.DATASETS[p.dataset].make(1, 1, 0);
+      assert.deepEqual(net.meta.tokenNames, words[0]);
+      assert.deepEqual(M.reshape(net, 0, M.forward(net).a[0]).X, words[0].map(w => [...M.WORDS[w]]), 'the inputs are its words');
+      // before training every word reads all three about evenly
+      M.forward(net).attn[2].heads[0].A.flat().forEach(v => assert.ok(v > 0.25 && v < 0.42, `${k}: ${v}`));
+    }
+  });
+
+  test('pronouns: itself and themselves read the noun they refer to; the noun and the verb read themselves', () => {
+    const t = run('pronouns');
+    assert.ok(t.acc > 0.99, `word accuracy ${t.acc}`);
+    assert.deepEqual(t.argmax, [[200, 0, 0], [0, 200, 0], [200, 0, 0]], 'row argmax of A on every held-out sentence');
+    assert.ok(t.A[2][0] > 0.9, `the reflexive's weight on its noun: ${t.A[2][0]}`);
+    assert.ok(t.A[0][0] > 0.9 && t.A[1][1] > 0.85, `self: ${t.A[0][0]}, ${t.A[1][1]}`);
+  });
+
+  test('agreement: the verb reads its subject, never the object, which has the other number', () => {
+    const t = run('agreement');
+    assert.ok(t.acc > 0.99, `word accuracy ${t.acc}`);
+    assert.deepEqual(t.argmax, [[200, 0, 0], [200, 0, 0], [0, 0, 200]], 'row argmax of A on every held-out sentence');
+    assert.ok(t.A[1][0] > 0.9 && t.A[1][2] < 0.03, `the verb on its subject ${t.A[1][0]}, on the object ${t.A[1][2]}`);
+  });
+
+  test('with noisy word vectors (noise 0.1) both still learn their pattern', () => {
+    for (const k of ['pronouns', 'agreement']) {
+      const t = run(k, { noise: 0.1 });
+      assert.ok(t.acc > 0.99, `${k}: word accuracy ${t.acc}`);
+      assert.ok(k === 'pronouns' ? t.A[2][0] > 0.9 : t.A[1][0] > 0.9, `${k}: ${JSON.stringify(t.A)}`);
+    }
+  });
+
+  test('from a random W_V a run can lock into a swap instead (the reason the presets start at W_V = I)', () => {
+    const t = run('pronouns', { init: net => M.randomize(net, { seed: 8, scheme: 'xavier' }) });
+    assert.ok(t.acc < 0.7, `word accuracy ${t.acc}`);
+    assert.ok(t.argmax[0][1] > 150, 'the noun reads the verb');
+    const W = M.tiedMatrices(t.net, 1).find(x => x.name === 'W_V').W;
+    assert.ok(W[0][0] * W[1][1] - W[0][1] * W[1][0] < 0, 'and W_V mirrors it back: det < 0');
+  });
+
+  test('Reset keeps the recipe (meta.train.init), so a new init seed trains as well as the preset', () => {
+    for (const k of ['pronouns', 'agreement']) {
+      for (const seed of [2, 3, 8, 9]) {
+        const r = run(k, { init: net => M.randomize(net, { seed, scheme: 'xavier', init: net.meta.train.init }) });
+        assert.ok(r.acc > 0.99, `${k}, init seed ${seed}: ${r.acc}`);
+      }
+    }
+  });
+});
+
 // ---------------------------------------------------------------- train.js pure helpers
 
 describe('train.js readouts agree with the model', async () => {
@@ -2424,6 +2596,19 @@ describe('train.js readouts agree with the model', async () => {
     const x = [[0.3, -0.2]], y = [[0.5, -0.5]];
     const P = new Float64Array(M.predict(net, x).flat());
     near(T.datasetLoss(P, y, 1, 2, 'xent', 'tanh'), M.backward(net, M.forward(net, x[0]), y[0], 'xent').loss, 1e-12);
+  });
+
+  test('wordAccuracy: the share of output tokens whose nearest word is the target word', () => {
+    const net = M.PRESETS.agreement.build(1), ds = M.DATASETS.nl_agree, D = ds.make(30, 2, 0.1);
+    const P = new Float64Array(M.predict(net, D.X).flat());
+    let hit = 0;
+    D.X.forEach((x, s) => ds.decode(M.predict(net, [x])[0]).forEach((w, t) => { if (w === D.targetWords[s][t]) hit++; }));
+    near(T.wordAccuracy(P, D.targetWords, 30, 6, ds), hit / 90, 1e-12);
+    // noise-free targets decode to their own words
+    const D0 = ds.make(30, 2, 0);
+    assert.equal(T.wordAccuracy(new Float64Array(D0.Y.flat()), D0.targetWords, 30, 6, ds), 1);
+    const want = D.X.reduce((s, x, i) => s + M.backward(net, M.forward(net, x), D.Y[i], 'mse').loss, 0) / 30;
+    near(T.datasetLoss(P, D.Y, 30, 6, 'mse', 'identity'), want, 1e-9, 'datasetLoss');
   });
 
   test('forwardMany (heatmaps, layer space) matches model.predict, skip edges included', () => {

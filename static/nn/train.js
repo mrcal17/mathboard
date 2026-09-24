@@ -11,6 +11,9 @@
 // its targets), a ◀ ▶ sample stepper replaces click-a-point, and neuron maps are off. Nets with
 // attention are evaluated through model.predict (attention multiplies activations, which the
 // matrices can't express); Adapt network keeps token structure or refuses (see adaptNet).
+// Word datasets (model.WORDS, ds.decode) also name things: the stepper shows the sentence, loading
+// a sample sets meta.tokenNames to its words, the plot names each output by its nearest word, and
+// the readout adds the word accuracy.
 
 import { colorFor, HI } from './store.js';
 import { tokenLabel } from './focus.js';
@@ -67,12 +70,23 @@ export function defaultDataset(net, model) {
 const num = (v, d, lo = -Infinity, hi = Infinity) =>
   (typeof v === 'number' && Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : d);
 
+// meta.train.init: { <shared matrix name>: scheme } for Reset (model.randomize's init option), e.g.
+// the word presets' { W_Q: 'small', W_K: 'small', W_V: 'identity' }. Unknown schemes are dropped.
+function cleanInit(v, model) {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+  const ok = model.INIT_SCHEMES || [];
+  const out = Object.fromEntries(Object.entries(v).filter(([k, s]) => k && ok.includes(s)));
+  return Object.keys(out).length ? out : null;
+}
+
 // net.meta.train with defaults filled in and junk repaired. Never mutates the net.
 // A dataset recorded in meta.train (a preset's, or the user's choice) wins even when the net no
 // longer fits it: the panel then offers "Adapt network" instead of silently switching.
 export function readSettings(net, model) {
   const raw = (net.meta && net.meta.train) || {};
+  const init = cleanInit(raw.init, model);
   return {
+    ...(init ? { init } : {}),
     dataset: (model.DATASETS || {})[raw.dataset] ? raw.dataset : defaultDataset(net, model),
     n: Math.round(num(raw.n, 200, 4, 5000)),
     noise: num(raw.noise, 0.1, 0, 10),
@@ -205,6 +219,21 @@ export function datasetLoss(P, Y, n, K, loss, outAct, segments = 1) {
     sum += e;
   }
   return sum / n;
+}
+
+// Word datasets (model.WORDS) name every output token by its nearest word: ds.decode(row) -> words.
+const isWords = ds => !!ds && typeof ds.decode === 'function' && !!ds.vocab;
+
+// The share of output tokens whose nearest word (ds.decode) is the target word. P: n x K outputs
+// (flat), targetWords: per sample, one word per token.
+export function wordAccuracy(P, targetWords, n, K, ds) {
+  let hit = 0, all = 0;
+  for (let s = 0; s < n; s++) {
+    const want = targetWords[s] || [];
+    const got = ds.decode(P.subarray ? P.subarray(s * K, (s + 1) * K) : P.slice(s * K, (s + 1) * K));
+    want.forEach((w, t) => { all++; if (got[t] === w) hit++; });
+  }
+  return all ? hit / all : null;
 }
 
 // Resize the input and output layers to fit a dataset; hidden layers are kept. New nodes are
@@ -466,7 +495,7 @@ export function install(ctx) {
       <div class="nt-ctl">
         <button class="nt-go" data-act="play" title="Play / pause training (Space)">&#9654; Play</button>
         <button data-act="step" title="One mini-batch gradient step (T)">Step</button>
-        <button data-act="reset" title="Re-randomize the weights from the init seed">Reset</button>
+        <button data-act="reset" title="Re-randomize the weights from the init seed (a preset that starts some shared matrices its own way, such as W_V = I, keeps that)">Reset</button>
         <label title="Seed for Reset">init <input type="number" data-k="initSeed" step="1"></label>
         <button data-act="dice" title="New random init seed, then reset">&#8635;</button>
       </div>
@@ -474,7 +503,7 @@ export function install(ctx) {
         <span>epoch <b data-r="epoch">0</b></span>
         <span>step <b data-r="steps">0</b></span>
         <span>loss <b data-r="loss">&ndash;</b></span>
-        <span data-r="accw" hidden>acc <b data-r="acc"></b></span>
+        <span data-r="accw" hidden><span data-r="accl">acc</span> <b data-r="acc"></b></span>
       </div>
       <canvas class="nt-chart"></canvas>
       <div class="nt-grid nt-g2b">
@@ -553,7 +582,10 @@ export function install(ctx) {
     if (data && data.key === key) return data;
     hover = -1;   // the hovered index belonged to the old samples
     const ds = model.DATASETS[t.dataset];
-    let { X, Y } = ds.make(t.n, t.seed, t.noise);
+    const made = ds.make(t.n, t.seed, t.noise);
+    let { X, Y } = made;
+    // A word dataset's samples carry their sentences: the words in, and the word each token should output.
+    const words = isWords(ds) && Array.isArray(made.words) && Array.isArray(made.targetWords) ? made : null;
     // A sequence sample may come as tokens x features rows: the net reads it flat, token-major.
     const flat = r => (Array.isArray(r) && r.some(Array.isArray) ? r.flat(Infinity) : r);
     if (ds.kind === 'seq') { X = X.map(flat); Y = Y.map(flat); }
@@ -584,7 +616,8 @@ export function install(ctx) {
       dom = { x0: x0 - px, x1: x1 + px, y0: lo - py, y1: hi + py };
     }
     const T = ds.kind === 'seq' ? Math.max(1, ds.tokens | 0 || 1) : 1;
-    data = { key, ds, X, Y, Xf, n, dim, K: Kout, cls, mid, half, dom, kind: ds.kind, grid: null, curve: null, lines: null, T };
+    data = { key, ds, X, Y, Xf, n, dim, K: Kout, cls, mid, half, dom, kind: ds.kind, grid: null, curve: null, lines: null, T,
+      words: words ? words.words : null, twords: words ? words.targetWords : null };
     if (dom && dim === 2) {
       const g = new Float64Array(GRID * GRID * 2);
       for (let r = 0; r < GRID; r++) for (let c = 0; c < GRID; c++) {
@@ -643,7 +676,8 @@ export function install(ctx) {
     const lastL = net.layers[L - 1];
     const loss = datasetLoss(out, d.Y, d.n, d.K, net.meta?.loss || 'mse', lastL.act, d.K / softmaxBlock(lastL, d.K));
     let acc = null;
-    if (d.kind === 'class') {
+    if (d.twords) acc = wordAccuracy(out, d.twords, d.n, d.K, d.ds);
+    else if (d.kind === 'class') {
       let hit = 0;
       for (let s = 0; s < d.n; s++) {
         let c;
@@ -755,7 +789,8 @@ export function install(ctx) {
     const net = store.net, t = live(net);
     if (seed != null) t.initSeed = seed;
     const acts = net.layers.slice(1).map(l => l.act);
-    model.randomize(net, { seed: t.initSeed, scheme: acts.some(a => a === 'relu' || a === 'leaky') ? 'he' : 'xavier' });
+    // a preset's own recipe for some shared matrices (meta.train.init) is kept
+    model.randomize(net, { seed: t.initSeed, scheme: acts.some(a => a === 'relu' || a === 'leaky') ? 'he' : 'xavier', init: t.init || null });
     Object.assign(t, { seen: 0, steps: 0, hist: [], every: 1 });
     const ds = model.DATASETS[t.dataset];
     if (fits(net, ds)) { const ev = evaluate(net, getData(t)); if (ev && Number.isFinite(ev.loss)) t.hist.push(round4(ev.loss)); }
@@ -788,6 +823,12 @@ export function install(ctx) {
     const d = getData(t), L = net.layers.length;
     model.nodesIn(net, 0).forEach((nd, j) => model.setNode(net, nd.id, { value: d.X[i][j] }));
     if (ds.outputs === sh.outputs) model.nodesIn(net, L - 1).forEach((nd, j) => model.setNode(net, nd.id, { target: d.Y[i][j] }));
+    // a sentence names the tokens (docs/NN_LENS.md), so the canvas, the matrix panel, the lens and
+    // the attention panel show its words; part of the same commit, so undo brings the old names back
+    // Names that are all vocabulary words were left by a word dataset: a sample without words drops them.
+    if (d.words?.[i]) { net.meta = net.meta || {}; net.meta.tokenNames = d.words[i].slice(); }
+    else if (Array.isArray(net.meta?.tokenNames) && model.WORDS && net.meta.tokenNames.length
+      && net.meta.tokenNames.every(w => Object.hasOwn(model.WORDS, w))) delete net.meta.tokenNames;
     lastLoaded = i;
     if (!running) store.commit(`Load sample ${i + 1}`);
     else { dirty = true; kick(); }
@@ -1060,7 +1101,15 @@ export function install(ctx) {
     R('loss').textContent = lastEval ? fmtLoss(lastEval.loss) : '–';
     const acc = lastEval && lastEval.acc != null;
     R('accw').hidden = !acc;
-    if (acc) R('acc').textContent = Math.round(lastEval.acc * 100) + '%';
+    if (acc) {
+      R('acc').textContent = Math.round(lastEval.acc * 100) + '%';
+      const wd = !!d?.twords, lab = wd ? 'words' : 'acc';
+      if (R('accl').textContent !== lab) {
+        R('accl').textContent = lab;
+        R('accw').title = wd ? 'Word accuracy: the share of output tokens, over the whole dataset, whose nearest word is the target word'
+          : 'Accuracy: the share of points classified correctly';
+      }
+    }
     mini.textContent = `${ro && ds ? (ds.label || t.dataset) + ' · ' : ''}epoch ${epoch} · ${lastEval ? fmtLoss(lastEval.loss) : '–'}`;
     const mis = !!ds && !ok;
     warn.hidden = !mis;
@@ -1076,7 +1125,9 @@ export function install(ctx) {
     steps.hidden = !seq;
     if (seq) {
       const cur = sh.inputs === ds.inputs ? currentSample(net, d) : -1;
-      stepsLab.textContent = cur >= 0 ? `sample ${cur + 1} of ${d.n}` : `not a sample (${d.n} in the set)`;
+      const said = cur >= 0 && d.words?.[cur] ? `: “${d.words[cur].join(' ')}”` : '';
+      const lab = cur >= 0 ? `sample ${cur + 1} of ${d.n}${said}` : `not a sample (${d.n} in the set)`;
+      if (stepsLab.textContent !== lab) { stepsLab.textContent = lab; stepsLab.title = lab; }
     }
     for (const b of goBtns) b.disabled = ro || !ok;
     stepBtn.disabled = ro || !ok;
@@ -1305,9 +1356,34 @@ export function install(ctx) {
           : `A(${ij}) = ${Number.isFinite(a) ? f2(a) : '?'}: how much ${who(i)} reads ${who(j)}` });
       }
     }
-    // outputs against targets
-    title(xO, ok ? 'ŷ vs y' : 'outputs');
-    if (!ok || wO < 30) {
+    // outputs against targets: a word dataset names both by their nearest words
+    const wordsOut = ok && !!d.twords && wO >= 30;
+    title(xO, wordsOut ? 'ŷ → word' : ok ? 'ŷ vs y' : 'outputs');
+    if (wordsOut) {
+      const yh = outs.map(q => fw?.node?.[q.id]?.a);
+      const cur = currentSample(net, d);
+      const got = d.ds.decode(yh), want = cur >= 0 ? d.twords[cur] : d.ds.decode(outs.map(q => q.target));
+      const two = c >= 22, bad = css(p.neg);
+      g.textAlign = 'left';
+      for (let i = 0; i < T; i++) {
+        const top = y0 + i * c;
+        if (i) { g.strokeStyle = p.line; g.lineWidth = 1; g.beginPath(); g.moveTo(xO, top + 0.5); g.lineTo(xO + wO, top + 0.5); g.stroke(); }
+        const w = got[i], y = want[i], hit = !!w && w === y;
+        const mark = w && y ? (hit ? '✓' : '✗') : '';
+        g.font = font(10.5, '600 ');
+        g.fillStyle = w && y && !hit ? bad : p.fg;
+        g.textAlign = 'left';
+        g.fillText(clip(w || '?', wO - 14), xO + 2, two ? top + c / 2 - 5 : top + c / 2);
+        g.textAlign = 'right';
+        g.fillText(mark, xO + wO, two ? top + c / 2 - 5 : top + c / 2);
+        if (two) {
+          g.font = font(9); g.fillStyle = p.muted; g.textAlign = 'left';
+          g.fillText(clip(`y ${y || '–'}`, wO - 2), xO + 2, top + c / 2 + 6);
+        }
+        const v = yh.slice(i * dOut, (i + 1) * dOut).map(a => (Number.isFinite(a) ? f2(a) : '?')).join(', ');
+        seqCells.push({ x: xO, y: top, w: wO, h: c, text: `${who(i)}: ŷ = (${v}), nearest word “${w || '?'}”; target “${y || 'none'}”${mark ? ' ' + mark : ''}` });
+      }
+    } else if (!ok || wO < 30) {
       g.font = font(10); g.fillStyle = p.muted; g.textAlign = 'left';
       g.fillText(ok ? '' : 'outputs don\'t fit', xO, y0 + c / 2);
     } else {
@@ -1346,7 +1422,9 @@ export function install(ctx) {
     const ly = y0 + T * c + 14;
     g.font = font(10); g.textAlign = 'left';
     let x = pad;
-    if (ok) {
+    if (wordsOut) {
+      g.fillStyle = p.muted; g.fillText('ŷ: nearest word · y: target', x, ly);
+    } else if (ok) {
       g.fillStyle = css(p.pos); g.fillRect(x, ly - 4, 12, 8); x += 16;
       g.fillStyle = p.muted; g.fillText('output ŷ', x, ly); x += g.measureText('output ŷ').width + 12;
       g.strokeStyle = HI; g.lineWidth = 2.5; g.beginPath(); g.moveTo(x + 2, ly - 6); g.lineTo(x + 2, ly + 6); g.stroke(); x += 8;
