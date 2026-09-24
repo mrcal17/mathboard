@@ -152,6 +152,13 @@ help:
   `ffmpeg -framerate 10 -i %04d.png -vf "split[a][b];[a]palettegen=max_colors=160:stats_mode=diff[p];[b][p]paletteuse=dither=none:diff_mode=rectangle" out.gif`.
   Lossless PNG frames keep the GIF small. The same clip made from Playwright's WebM recording
   came out about three times larger, because compression noise changes every frame.
+- **Lens, Attention panel and Explain.** `docs/media/net-lens.png` is the transformer trained as
+  above (then `store.net` saved as JSON and reloaded with `#nn=<URI-encoded JSON>`), the Train
+  panel folded (`mathboardNet.ctx.train.fold(true)`) and key 2 pressed. `net-attention.png` is
+  `words` with `mathboardNet.ctx.attnviz.show('mix')` and key 3. For `net-explain.gif`, press E
+  and grab eight frames 100 ms apart after each → (the refit and the caption card settle), then
+  hold the last one: an ffmpeg concat list (`file '0007.png'` / `duration 3`) with `-fps_mode vfr`
+  and the palette filter above keeps the held frames free. `net-explain.png` is its last step.
 
 ## When you're done
 Note what syntax/UI you added (with a 3-6 line example a lecturer would type), the files you

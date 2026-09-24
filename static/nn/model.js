@@ -2273,6 +2273,28 @@ export const PRESETS = {
   }),
 
   // ---------------------------------------------------------------- attention
+  // Hand-set: one-hot word types, so W_Q's rows read "what each kind of word asks for" and W_K's
+  // "what it offers". sat (verb) asks for a noun, cat (noun) for a determiner, the asks nothing.
+  words: preset({
+    group: ATT, label: 'Word attention: the cat sat (hand-set)',
+    note: 'Hand-set. Words come in one-hot (det, noun, verb). W_Q asks and W_K answers: sat\'s query points at the noun cat, cat\'s at the determiner the. The asks nothing (q = 0), so its row of A is even.',
+  }, () => {
+    const net = seqBlank('Word attention', 'mse', [
+      { name: 'Words: det, noun, verb', tokens: 3, d: 3, label: (t, f) => [`\\mathrm{det}_{${t}}`, `\\mathrm{noun}_{${t}}`, `\\mathrm{verb}_{${t}}`][f - 1] },
+      { name: 'Q, K, V', tokens: 3, d: 2, groups: QKV, label: qkvLabel },
+      { name: 'Attention Z', tokens: 3, d: 2, attention: { heads: 1 }, label: tokLabel('z') }]);
+    const W = {
+      Q: [[0, 0], [0, 4], [4, 0]],        // det asks nothing, noun asks "det?", verb asks "noun?"
+      K: [[0, 1], [1, 0], [0, 0]],        // det offers (0, 1), noun (1, 0), verb nothing
+      V: [[-0.8, 0.6], [1, 0], [0, -1]],  // three spread values, so the mix has a clear triangle
+    };
+    for (const g of QKV) {
+      wireTied(net, 0, 1, `W_${g}`, W[g], { to: g });
+      tieBias(net, 1, `b_${g}`, [0, 0], g);
+    }
+    net.meta.tokenNames = ['the', 'cat', 'sat'];
+    return gridLayout(io(net, [1, 0, 0, 0, 1, 0, 0, 0, 1], 'self'));
+  }),
   attention: preset({
     group: ATT, label: 'Self-attention (3 tokens × 2)', dataset: 'seq_max', lr: 0.3,
     note: 'Q = XW_Q, K = XW_K, V = XW_V, each one tied 2×2 matrix shared by all 3 tokens. Z = softmax(QKᵀ/√2)V; row i of A is where token i looks. Train: every token learns to look at the largest x₁.',
@@ -2298,6 +2320,31 @@ export const PRESETS = {
     wireQKV(net, 0, 1, r);
     wireTied(net, 2, 3, 'W_{out}', randW(r, 2, 1));
     tieBias(net, 3, 'b_{out}', randB(r, 1));
+    return gridLayout(seqIO(net, 'seq_prev'));
+  }),
+  // Hand-set solution of the causal preset's task: W_Q is 4 R(120°) on the position rows, so
+  // x W_Q turns token i's position (cos θ_i, sin θ_i) back one step, onto k_{i-1} = its position.
+  causal_rot: preset({
+    group: ATT, label: 'Previous token by rotation (hand-set)', dataset: 'seq_prev',
+    note: 'Hand-set causal attention. Positions come in as (cos θ, sin θ) and W_Q turns them back by 120°, so q_i points at k_(i−1) and token i copies c_(i−1). The loss starts near 0.',
+  }, () => {
+    const g = 4, co = -0.5, si = Math.sqrt(3) / 2;   // g R(120°)
+    const net = seqBlank('Previous token, hand-set', 'mse', [
+      { name: 'Tokens: c, cos θ, sin θ', tokens: 3, d: 3, label: (t, f) => [`c_{${t}}`, `\\cos\\theta_{${t}}`, `\\sin\\theta_{${t}}`][f - 1] },
+      { name: 'Q, K, V', tokens: 3, d: 2, groups: QKV, label: qkvLabel },
+      { name: 'Masked attention Z', tokens: 3, d: 2, attention: { heads: 1, causal: true }, label: tokLabel('z') },
+      { name: 'Output', tokens: 3, d: 1, label: t => `\\hat y_{${t}}` }]);
+    const W = {
+      Q: [[0, 0], [r3(g * co), r3(-g * si)], [r3(g * si), r3(g * co)]],
+      K: [[0, 0], [1, 0], [0, 1]],        // the key is the position itself
+      V: [[1, 0], [0, 0], [0, 1]],        // the value carries c (and sin θ, so the values span a plane)
+    };
+    for (const k of QKV) {
+      wireTied(net, 0, 1, `W_${k}`, W[k], { to: k });
+      tieBias(net, 1, `b_${k}`, [0, 0], k);
+    }
+    wireTied(net, 2, 3, 'W_{out}', [[1], [0]]);
+    tieBias(net, 3, 'b_{out}', [0]);
     return gridLayout(seqIO(net, 'seq_prev'));
   }),
   multihead: preset({

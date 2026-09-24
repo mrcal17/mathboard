@@ -1611,7 +1611,7 @@ describe('validate and normalize', () => {
 
 // ---------------------------------------------------------------- tokens, ties, attention
 
-const ATT_KEYS = ['attention', 'causal', 'multihead', 'transformer'];
+const ATT_KEYS = ['words', 'attention', 'causal', 'causal_rot', 'multihead', 'transformer'];
 const matmul = (A, B) => A.map(row => B[0].map((_, j) => row.reduce((s, v, k) => s + v * B[k][j], 0)));
 const transpose = A => A[0].map((_, j) => A.map(row => row[j]));
 const nearM = (A, B, tol, msg) => { assert.equal(A.length, B.length, `${msg} rows`); A.forEach((r, i) => nearV(r, B[i], tol, `${msg}[${i}]`)); };
@@ -2274,6 +2274,48 @@ describe('sequence datasets', () => {
     const { X } = M.DATASETS.seq_minmax.make(300, 1, 0);
     const gap = X.map((x, s) => Y[s][0] - (x[0] + x[2] + x[4]) / 3);
     assert.ok(sd(gap) > 0.1);
+  });
+});
+
+describe('hand-set attention presets mean what they say', () => {
+  const argmax = row => row.indexOf(Math.max(...row));
+
+  test('words: sat reads cat, cat reads the, and the (q = 0) reads all three evenly', () => {
+    const net = M.PRESETS.words.build(), f = M.forward(net), l = attnLayer(net);
+    assert.deepEqual(net.meta.tokenNames, ['the', 'cat', 'sat']);
+    assert.equal(net.meta.tokenNames.length, M.tokenShape(net, 0).tokens, 'one name per token');
+    assert.deepEqual(M.reshape(net, 0, f.a[0]).X, [[1, 0, 0], [0, 1, 0], [0, 0, 1]], 'one-hot det, noun, verb');
+    const { Q, K, S, A } = f.attn[l].heads[0];
+    assert.deepEqual(Q[0], [0, 0], 'the asks nothing');
+    nearV(A[0], [1 / 3, 1 / 3, 1 / 3], 1e-12, 'a zero query scores every key 0');
+    assert.equal(argmax(A[1]), 0, 'cat reads the');
+    assert.equal(argmax(A[2]), 1, 'sat reads cat');
+    assert.ok(A[1][0] > 0.85 && A[2][1] > 0.85, `peaked: ${A[1][0]}, ${A[2][1]}`);
+    // X is the identity, so S is W_Q W_Kᵀ · scale: the tied matrices alone say who reads whom
+    const T = M.tiedMatrices(net, 1), Wq = T.find(t => t.name === 'W_Q').W, Wk = T.find(t => t.name === 'W_K').W;
+    nearM(S, matmul(Wq, transpose(Wk)).map(r => r.map(v => v / Math.sqrt(2))), 1e-12, 'S = W_Q W_Kᵀ / √2');
+    nearM(Q, Wq, 1e-12, 'Q = W_Q'); nearM(K, Wk, 1e-12, 'K = W_K');
+    assert.equal(M.backward(net, f, targets(net)).loss, 0, 'targets are the net\'s own output');
+    assert.deepEqual(M.normalize(JSON.parse(JSON.stringify(net))).meta.tokenNames, ['the', 'cat', 'sat'], 'names survive a save');
+  });
+
+  test('causal_rot: W_Q is 4 R(120°) on the positions, so q_i = 4 k_(i-1) and each token copies the one before', () => {
+    const net = M.PRESETS.causal_rot.build(), T = M.tiedMatrices(net, 1);
+    const Wq = T.find(t => t.name === 'W_Q').W, c = Math.cos(2 * Math.PI / 3), s = Math.sin(2 * Math.PI / 3);
+    nearM(Wq.slice(1), [[4 * c, -4 * s], [4 * s, 4 * c]], 1e-3, 'rotation block');
+    near(Wq[1][0] * Wq[2][1] - Wq[1][1] * Wq[2][0], 16, 1e-2, 'det = 16: a rotation scaled by 4');
+    const d = M.DATASETS.seq_prev.make(100, 7, 0);
+    let loss = 0;
+    d.X.forEach((x, n) => {
+      const f = M.forward(net, x), { Q, K, A } = f.attn[2].heads[0];
+      for (const i of [1, 2]) {
+        nearV(Q[i], K[i - 1].map(v => 4 * v), 1e-3, `q_${i + 1} = 4 k_${i}`);
+        assert.ok(A[i][i - 1] > 0.95, `sample ${n}: token ${i + 1} reads token ${i} (${A[i][i - 1]})`);
+      }
+      assert.deepEqual(A[0], [1, 0, 0], 'the mask leaves token 1 only itself');
+      loss += M.backward(net, f, d.Y[n], 'mse').loss / d.X.length;
+    });
+    assert.ok(loss < 1e-3, `already solves Previous token: loss ${loss}`);
   });
 });
 

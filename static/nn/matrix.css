@@ -140,3 +140,85 @@
 .nm .nm-exp-btn:hover { color: var(--ui-fg); border-color: var(--ui-muted); }
 .nm-expand.open .nm-exp-btn { border-style: solid; }
 body.clean .nm-expand:not(.open), .nm-audience .nm-expand:not(.open) { display: none; }
+
+/* ---- the lens (docs/NN_LENS.md) */
+/* dimming: matrix.js sets --em per cell / header from focus.js's emphasis (unset = 1) */
+.nm-lens .nm-c, .nm-lens .nm-rh, .nm-lens .nm-ch { opacity: var(--em, 1); transition: opacity 0.18s; }
+.nm-lens .nm-c.nm-mask { opacity: calc(0.3 * var(--em, 1)); }
+.nm-lens .nm-c.nm-faint { opacity: calc(0.4 * var(--em, 1)); }
+.nm-lens .nm-c.nm-zero { opacity: calc(0.45 * var(--em, 1)); }
+.nm-lens .nm-c.nm-mask.nm-inf { opacity: calc(0.6 * var(--em, 1)); }
+.nm-lens .nm-c.nm-hi, .nm-lens .nm-c.nm-sel, .nm-lens .nm-c.nm-an { opacity: 1; }
+.nm-c.nm-legible { font-weight: 700; }   /* the followed token's row of A */
+
+/* the followed token's row (or column, transposed) in every token matrix */
+.nm-band {
+  display: none;
+  pointer-events: none;
+  z-index: 2;
+  align-self: stretch;
+  justify-self: stretch;
+  margin: -1px -2px;
+  border-radius: 4px;
+  box-shadow: 0 0 0 2px var(--nm-hi), 0 0 10px 1px var(--nm-hi-soft);
+}
+.nm-band.on { display: block; }
+.nm-rh.nm-tok-on, .nm-ch.nm-tok-on { color: var(--nm-hi); font-weight: 700; }
+
+/* focus: the other layers fold to their header and one line */
+.nm-sum { display: none; margin: 3px 0 0; color: var(--ui-muted); overflow-x: auto; overflow-y: hidden; white-space: nowrap; cursor: pointer; }
+.nm-layer.nm-folded { padding-top: 5px; padding-bottom: 5px; }
+.nm-layer.nm-folded > :not(.nm-lhead):not(.nm-sum) { display: none; }
+.nm-layer.nm-folded > .nm-sum { display: block; }
+.nm-layer.nm-folded > .nm-sum:hover { color: var(--ui-fg); }
+.nm-audience .nm-sum { cursor: default; }
+.nm-layer.nm-focus { border-left-color: var(--nm-hi); }
+.nm-formula [data-l].nm-foc { background: var(--nm-hi-soft); box-shadow: 0 0 0 1px var(--nm-hi); }
+/* focus.part: that stage (Q / K / V equation, scores, softmax, weighted sum) */
+.nm-layer [data-part] {
+  margin-left: -6px;
+  margin-right: -6px;
+  padding-left: 6px;
+  padding-right: 6px;
+  border-radius: 4px;
+  transition: opacity 0.18s, background 0.18s;
+}
+.nm-stage { padding-top: 1px; padding-bottom: 2px; }
+.nm-layer [data-part].nm-part-on { background: var(--nm-hi-soft); box-shadow: inset 3px 0 0 var(--nm-hi); }
+.nm-layer [data-part].nm-part-off { opacity: 0.35; }
+@keyframes nm-flash { from { box-shadow: 0 0 0 3px var(--nm-hi); } to { box-shadow: 0 0 0 3px transparent; } }
+.nm-flash { animation: nm-flash 1.3s ease-out; }
+
+/* the token trace card (lens.token) */
+.nm-trace {
+  --hdr: 0px;
+  --cap: 0px;
+  margin: 8px 0;
+  padding: 5px 8px 7px;
+  border: 1px solid var(--nm-hi);
+  border-radius: 6px;
+  background: var(--nm-hi-soft);
+}
+.nm-trace[hidden], .nm-tr-line[hidden] { display: none; }
+.nm-tr-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 3px; }
+.nm-tr-title { font-weight: 700; color: var(--nm-hi); }
+.nm-tr-hint { flex: 1; color: var(--ui-muted); font-size: 11.5px; }
+.nm .nm-tr-x {
+  font: inherit;
+  line-height: 1;
+  color: var(--ui-muted);
+  background: transparent;
+  border: 1px solid var(--ui-line);
+  border-radius: 4px;
+  padding: 1px 6px;
+  cursor: pointer;
+}
+.nm .nm-tr-x:hover { color: var(--ui-fg); border-color: var(--ui-muted); }
+.nm-audience .nm-tr-x, body.clean .nm-tr-x { display: none; }
+.nm-tr-lines { display: flex; flex-direction: column; }
+.nm-tr-line { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; padding: 0 4px; border-radius: 4px; cursor: pointer; }
+.nm-tr-line:hover { background: rgba(128, 128, 128, 0.12); }
+.nm-audience .nm-tr-line { cursor: default; }
+.nm-tr-sym { min-width: 5.2em; text-align: right; white-space: nowrap; }
+.nm-tr-sym.nm-tr-more { min-width: 0; margin-left: 10px; }
+.nm-tr-how { color: var(--ui-muted); font-size: 11.5px; white-space: nowrap; }

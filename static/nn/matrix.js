@@ -10,10 +10,19 @@
 //   Q = X W_Q (an expander shows the flattened I ⊗ W_Qᵀ form of z = W a), a fixed identity term is
 //   + X, and an attention layer is S = QKᵀ/√d_k, A = softmax(S), Z = A V. Attention steps go token
 //   by token in three phases ('scores', 'softmax', 'sum'); their anim.i is the token's first node.
+//   The lens (state.lens, docs/NN_LENS.md) filters the panel without a rebuild: focus folds every
+//   other layer to a one-line summary and scrolls to the focused one (its part is highlighted);
+//   token dims the other rows of every token matrix, outlines row t and opens a token trace card;
+//   head hides the other heads; minW / minA dim small weights / attention weights. Every dimming
+//   comes from focus.js's emphasis(), the same function the canvas uses.
+//   ctx.matrix.reveal(layer, part) and ctx.matrix.parts(layer) are for tour.js.
 import { colorFor } from './store.js';
+import { copyLens, emphasis, tokenNames } from './focus.js';
+import { lensOf } from './lens.js';
 
 const BATCH = 4;         // samples shown as columns in the batch view
 const STRONG = 0.55;     // |v| / max above which a tinted cell switches to contrasting text
+const DIM = 0.16;        // opacity of a cell outside the lens's emphasis
 const ACT_TEX = {
   identity: '', relu: '\\operatorname{ReLU}', leaky: '\\operatorname{LReLU}', sigmoid: '\\sigma',
   tanh: '\\tanh', softmax: '\\operatorname{softmax}',
@@ -61,6 +70,9 @@ const hasTie = e => !!e && e.tie != null && e.tie !== '';
 const tieName = tie => { const s = String(tie), c = s.lastIndexOf(':'); return c > 0 ? s.slice(0, c) : s; };
 const wT = s => `{${s}}^{\\top}`;
 const PHASES = ['scores', 'softmax', 'sum'];
+// Plain text inside KaTeX \text{...}
+const texEsc = s => String(s).replace(/[\\{}$&#^_%~]/g, c => ({ '\\': '\\textbackslash{}', '^': '\\textasciicircum{}', '~': '\\textasciitilde{}' }[c] || `\\${c}`));
+const unit = v => (Number.isFinite(+v) ? Math.max(0, Math.min(1, +v)) : 1);
 
 export function install(ctx) {
   const { store, model } = ctx;
@@ -144,6 +156,10 @@ export function install(ctx) {
     batchCache.key = null;
     if (opt.batch) schedule();
   }).catch(() => {});
+
+  // The lens (docs/NN_LENS.md): focus.js's emphasis() is what the canvas dims by, and the panel too.
+  const lensNow = () => lensOf(store);   // complete and valid, a fresh copy
+  const setLens = patch => store.set('lens', copyLens({ ...lensNow(), ...patch }));
 
   function batchInputs(net) {
     const ins = model.nodesIn(net, 0), n0 = ins.length;
@@ -244,6 +260,7 @@ export function install(ctx) {
       net.edges.map(e => `${e.id}:${e.from}>${e.to}`).join(),
       skey || '', opt.expand, (d.bflag || []).map(f => (f ? f.map(Number).join('') : '')).join(),
       !!d.fwd?.attn, !!d.bwd?.attn, !!d.bwd?.tie, d.bwd ? String(outRows(d)?.proper ?? '') : '',
+      JSON.stringify(net.meta?.tokenNames ?? null),
     ].join('|');
   }
 
@@ -389,6 +406,12 @@ export function install(ctx) {
   // ---------------------------------------------------------------- DOM registry
   let keyMap = new Map(), binds = [], stepBoxes = [], sig = '', eMap = new Map();
   let hoverOf = new WeakMap(), clickOf = new WeakMap();
+  // Lens registry (rebuilt with the DOM). emEls: { el, em } where em says what the element stands
+  // for, so emphasis() can weigh it: n (node ids, max), e (edge ids, max; w: minW / show apply),
+  // p ([from, to] of a missing edge), r ([layer, token row]), a ([l, i, j, h]: attention pair; thr:
+  // minA applies), lg (keep legible when emphasized). toks: row / column outlines and token
+  // headers { el, l, t }. secs[l]: layer sections. heads: per-head boxes { el, l, hh }.
+  let emEls = [], toks = [], secs = [], headBoxes = [], formulaEls = [], trace = null, names = null;
 
   const reg = (el, keys) => {
     for (const k of keys) {
@@ -414,8 +437,9 @@ export function install(ctx) {
   };
 
   // A bracketed grid of numbers. cell(i, j) -> { f(d) -> number, s: scale key, mask, faint, fixed,
-  // keys, hover, click }. o: { cap, rowHdr, colHdr: [{ tex, hover, click }], aug: column index with a
-  // bar before it, augRow: row index with a bar above it }.
+  // keys, hover, click, em }. o: { cap, rowHdr, colHdr: [{ tex, hover, click, em, tok }], aug: column
+  // index with a bar before it, augRow: row index with a bar above it, rowTok / colTok: the layer
+  // whose tokens the rows / columns are (they get the lens's row outline) }.
   function grid(n, m, cell, o = {}) {
     const blk = h('div', o.cls ? `nm-blk ${o.cls}` : 'nm-blk');
     const rh = opt.labels && o.rowHdr, ch = opt.labels && o.colHdr;
@@ -433,6 +457,8 @@ export function install(ctx) {
       if (s.hover) hoverOf.set(e, s.hover);
       if (s.click) clickOf.set(e, s.click);
       reg(e, s.keys || []);
+      if (s.em) emEls.push({ el: e, em: s.em });
+      if (s.tok) toks.push({ el: e, l: s.tok.l, t: s.tok.t, cls: 'nm-tok-on' });
       blk.append(e);
     };
     if (ch) ch.forEach((s, j) => hdr(s, 'nm-ch', `1 / ${c0 + 1 + j}`));
@@ -451,9 +477,19 @@ export function install(ctx) {
         reg(c, sp.keys || []);
         if (sp.hover) hoverOf.set(c, sp.hover);
         if (sp.click) clickOf.set(c, sp.click);
+        if (sp.em) emEls.push({ el: c, em: sp.em });
         blk.append(c);
       }
     }
+    // the lens's outline of token t's row (or column, in a transposed grid), drawn over the cells
+    const band = (area, l, t) => {
+      const b = h('i', 'nm-band');
+      b.style.gridArea = area;
+      toks.push({ el: b, l, t, cls: 'on' });
+      blk.append(b);
+    };
+    if (o.rowTok != null) for (let i = 0; i < n; i++) band(`${i + 2} / ${c0 + 1} / ${i + 3} / ${c0 + 1 + m}`, o.rowTok, i);
+    if (o.colTok != null) for (let j = 0; j < m; j++) band(`2 / ${c0 + 1 + j} / ${n + 2} / ${c0 + 2 + j}`, o.colTok, j);
     if (o.cap) {
       const cap = tex(h('span', 'nm-cap'), o.cap);
       cap.style.gridArea = `${n + 2} / 1 / ${n + 3} / -1`;
@@ -465,9 +501,10 @@ export function install(ctx) {
   // Column vector of node values. f(d, i) -> number.
   const nodeVec = (ids, f, s, keys, cap, extra = {}) => grid(ids.length, 1, i => ({
     f: d => f(d, i), s, keys: [`n:${ids[i]}`, ...keys(i)], hover: { kind: 'node', id: ids[i] }, click: { kind: 'node', id: ids[i] },
+    em: { n: [ids[i]] },
   }), { cap, ...extra });
 
-  const nodeHdr = (ids, extra) => ids.map((id, j) => ({ tex: label(id), ...extra(id, j) }));
+  const nodeHdr = (ids, extra) => ids.map((id, j) => ({ tex: label(id), em: { n: [id] }, ...extra(id, j) }));
 
   // W (or its transpose) of term t in layer l; aug appends b as a last column.
   function wGrid(d, l, ti, { aug = false, T = false } = {}) {
@@ -478,15 +515,15 @@ export function install(ctx) {
       const to = m.rows[i];
       if (j === c) {
         return { f: dd => dd.M[l].b[i], s: 'b', keys: [`b:${to}`, `row:${l}:${i}`, `dst:${to}`],
-          hover: { kind: 'bias', id: to }, click: { kind: 'node', id: to } };
+          hover: { kind: 'bias', id: to }, click: { kind: 'node', id: to }, em: { n: [to] } };
       }
       const from = t.cols[j], eid = t.edge[i][j];
       const keys = [...extraKeys(i, j), `dst:${to}`, `src:${from}`];
-      if (eid == null) return { mask: true, fixed: '0', keys: [...keys, `p:${from}>${to}`], hover: { kind: 'pair', from, to } };
+      if (eid == null) return { mask: true, fixed: '0', keys: [...keys, `p:${from}>${to}`], hover: { kind: 'pair', from, to }, em: { p: [from, to] } };
       const e = eMap.get(eid);
       return { f: dd => dd.M[l].terms[ti].W[i][j], s: 'w', keys: [...keys, `e:${eid}`, hasTie(e) && `tie:${e.tie}`],
         cls: e?.fixed ? 'nm-fixedc' : hasTie(e) ? 'nm-tied' : '',
-        hover: { kind: 'edge', id: eid }, click: { kind: 'edge', id: eid } };
+        hover: { kind: 'edge', id: eid }, click: { kind: 'edge', id: eid }, em: { e: [eid], w: true } };
     };
     const rowHdr = nodeHdr(m.rows, (id, i) => ({ hover: { kind: 'row', layer: layerRef(l), i }, click: { kind: 'node', id } }));
     const colHdr = nodeHdr(t.cols, (id, j) => ({ hover: { kind: 'col', layer: layerRef(l), k: t.k, j }, click: { kind: 'node', id } }));
@@ -508,7 +545,7 @@ export function install(ctx) {
     return grid(c + (aug ? 1 : 0), 1, i => (i === c
       ? { fixed: '1', keys: [`in:${l}`] }
       : { f: dd => dd.fwd.a[t.k][i], s: 'a', keys: [`n:${t.cols[i]}`, `col:${l}:${t.k}:${i}`, `in:${l}`],
-        hover: { kind: 'node', id: t.cols[i] }, click: { kind: 'node', id: t.cols[i] } }), {
+        hover: { kind: 'node', id: t.cols[i] }, click: { kind: 'node', id: t.cols[i] }, em: { n: [t.cols[i]] } }), {
       augRow: aug ? c : null,
       cap: aug ? `\\left[\\begin{smallmatrix}${aName(t.k)}\\\\ 1\\end{smallmatrix}\\right]` : aName(t.k),
     });
@@ -520,7 +557,7 @@ export function install(ctx) {
     return grid(c + (aug ? 1 : 0), B, (i, s) => (i === c
       ? { fixed: '1', keys: [`in:${l}`] }
       : { f: dd => dd.batch.a[t.k][i][s], s: 'a', keys: [`n:${t.cols[i]}`, `col:${l}:${t.k}:${i}`, `in:${l}`],
-        hover: { kind: 'node', id: t.cols[i] }, click: { kind: 'node', id: t.cols[i] } }), {
+        hover: { kind: 'node', id: t.cols[i] }, click: { kind: 'node', id: t.cols[i] }, em: { n: [t.cols[i]] } }), {
       augRow: aug ? c : null,
       colHdr: t.k === 0 ? Array.from({ length: B }, (_, s) => ({ tex: `\\#${s + 1}` })) : null,
       cap: aug ? `\\left[\\begin{smallmatrix}${AName(t.k)}\\\\ \\mathbf 1^{\\top}\\end{smallmatrix}\\right]` : AName(t.k),
@@ -534,7 +571,7 @@ export function install(ctx) {
       const B = d.batch.X.length;
       return grid(m.rows.length, B, (i, s) => ({
         f: dd => dd.batch[which][l][i][s], s: 'a', keys: [`n:${m.rows[i]}`, `out:${l}:${i}`],
-        hover: { kind: 'node', id: m.rows[i] }, click: { kind: 'node', id: m.rows[i] },
+        hover: { kind: 'node', id: m.rows[i] }, click: { kind: 'node', id: m.rows[i] }, em: { n: [m.rows[i]] },
       }), { cap: which === 'z' ? `Z^{(${l})}` : isOut ? '\\hat Y' : `A^{(${l})}` });
     }
     return nodeVec(m.rows, (dd, i) => dd.fwd[which][l][i], 'a', i => [`out:${l}:${i}`], cap);
@@ -544,7 +581,7 @@ export function install(ctx) {
     const m = d.M[l];
     return grid(m.rows.length, 1, i => ({
       f: dd => dd.M[l].b[i], s: 'b', keys: [`b:${m.rows[i]}`, `row:${l}:${i}`, `dst:${m.rows[i]}`],
-      hover: { kind: 'bias', id: m.rows[i] }, click: { kind: 'node', id: m.rows[i] },
+      hover: { kind: 'bias', id: m.rows[i] }, click: { kind: 'node', id: m.rows[i] }, em: { n: [m.rows[i]] },
     }), { cap: `b^{(${l})}` });
   };
 
@@ -690,18 +727,19 @@ export function install(ctx) {
       const aRow = grid(1, c + (aug ? 1 : 0), (_, j) => (j === c
         ? { fixed: '1', keys: [`bin:${l}`] }
         : { f: dd => dd.fwd.a[t.k][j], s: 'a', keys: [`n:${t.cols[j]}`, `bin:${l}`],
-          hover: { kind: 'node', id: t.cols[j] }, click: { kind: 'node', id: t.cols[j] } }), {
+          hover: { kind: 'node', id: t.cols[j] }, click: { kind: 'node', id: t.cols[j] }, em: { n: [t.cols[j]] } }), {
         aug: aug ? c : null, cap: aug ? `\\big[${aT(t.k)}\\ 1\\big]` : aT(t.k),
       });
       const dW = grid(n, c + (aug ? 1 : 0), (i, j) => {
         const to = ids[i];
         if (j === c) {
           return { f: dd => dd.bwd.db[l][i], s: 'g', keys: [`b:${to}`, `brow:${l}:${i}`],
-            hover: { kind: 'bias', id: to }, click: { kind: 'node', id: to } };
+            hover: { kind: 'bias', id: to }, click: { kind: 'node', id: to }, em: { n: [to] } };
         }
         const from = t.cols[j], eid = t.edge[i][j], e = eid == null ? null : eMap.get(eid);
         const keys = [`brow:${l}:${i}`, `dst:${to}`, `src:${from}`, eid == null ? `p:${from}>${to}` : `e:${eid}`, hasTie(e) && `tie:${e.tie}`];
         return { f: dd => dd.bwd.dZ[l][i] * dd.fwd.a[t.k][j], s: 'g', faint: eid == null || !!e?.fixed, keys,
+          em: eid == null ? { p: [from, to] } : { e: [eid] },
           hover: eid == null ? { kind: 'pair', from, to } : { kind: 'edge', id: eid }, click: eid == null ? null : { kind: 'edge', id: eid } };
       }, { aug: aug ? c : null, cap: aug ? `\\partial L / \\partial [${wName(l, t.k)} \\mid b]` : `\\partial L / \\partial ${wName(l, t.k)}` });
       const lead = aug ? `\\frac{\\partial L}{\\partial [${wName(l, t.k)} \\mid b]} =` : `\\frac{\\partial L}{\\partial ${wName(l, t.k)}} =`;
@@ -724,7 +762,7 @@ export function install(ctx) {
     if (!augB) {
       els.push(eqOf('db', [op(`\\frac{\\partial L}{\\partial b^{(${l})}} =`), grid(n, 1, i => ({
         f: dd => dd.bwd.db[l][i], s: 'g', keys: [`b:${ids[i]}`, `brow:${l}:${i}`],
-        hover: { kind: 'bias', id: ids[i] }, click: { kind: 'node', id: ids[i] },
+        hover: { kind: 'bias', id: ids[i] }, click: { kind: 'node', id: ids[i] }, em: { n: [ids[i]] },
       }), { cap: `\\partial L / \\partial b^{(${l})}` })]));
     }
     return els;
@@ -834,6 +872,7 @@ export function install(ctx) {
       reg(el, [`L:${l}`]);
       hoverOf.set(el, { kind: 'layer', id });
       clickOf.set(el, { kind: 'layer', id });
+      formulaEls.push({ el, l });
     }
     return box;
   }
@@ -905,14 +944,31 @@ export function install(ctx) {
   // ---------------------------------------------------------------- token layers: grids
   // t_1 ... t_n row (or column) headers. at(t) -> { hover, keys } makes each one hover its token
   // (store hover { kind: 'token', layer, t, g?, h? }) and light with it.
-  const tokHdr = (n, at = null) => Array.from({ length: n }, (_, t) => ({ tex: `t_{${t + 1}}`, ...(at ? at(t) : {}) }));
+  // net.meta.tokenNames (docs/NN_LENS.md) replace t_1 ... t_n wherever a name is set (as focus.js's tokenLabel).
+  const tokName = t => (typeof names?.[t] === 'string' && names[t] ? names[t] : null);
+  const tokTex = t => { const s = tokName(t); return s ? `\\text{${texEsc(s)}}` : `t_{${t + 1}}`; };
+  const tokHdr = (n, at = null) => Array.from({ length: n }, (_, t) => ({ tex: tokTex(t), ...(at ? at(t) : {}) }));
   const tokSpec = (layer, t, g = null, hh = null) => ({ kind: 'token', layer, t, ...(g == null ? {} : { g }), ...(hh == null ? {} : { h: hh }) });
   // A token header of layer k (group g): hovers the token, lights with its neurons.
   const tokAt = (d, k, g) => t => {
-    const S = d.T[k];
-    return { hover: tokSpec(k, t, S.groups ? g : null), keys: Array.from({ length: S.d }, (_, f) => `n:${S.ids[tidx(S, g, t, f)]}`) };
+    const S = d.T[k], ids = Array.from({ length: S.d }, (_, f) => S.ids[tidx(S, g, t, f)]);
+    return { hover: tokSpec(k, t, S.groups ? g : null), keys: ids.map(id => `n:${id}`), em: { n: ids }, tok: { l: k, t } };
   };
   const sub = (text, cls = 'nm-sub') => h('div', cls, text);
+  // A stage of a layer that lens.focus.part can pick ('scores', 'softmax', 'mix'; groups mark their eq)
+  const stage = (part, ...els) => {
+    const s = h('div', 'nm-stage');
+    s.dataset.part = part;
+    s.append(...els);
+    return s;
+  };
+  // One head's block of an attention layer: lens.head hides the others.
+  const headBox = (l, hh) => {
+    const b = h('div', 'nm-headbox');
+    b.dataset.head = hh;
+    headBoxes.push({ el: b, l, hh });
+    return b;
+  };
   // A wrapping note mixing text and TeX: parts are strings, or { t: tex } for inline maths.
   const note = (...parts) => {
     const p = h('p', 'nm-note');
@@ -926,8 +982,8 @@ export function install(ctx) {
     const S = d.T[l];
     return grid(S.tokens, S.d, (t, ff) => {
       const i = tidx(S, g, t, ff), id = S.ids[i];
-      return { f: dd => f(dd, i), s, keys: [`n:${id}`, ...keys(i, t)], hover: { kind: 'node', id }, click: { kind: 'node', id } };
-    }, { cap, ...o });
+      return { f: dd => f(dd, i), s, keys: [`n:${id}`, ...keys(i, t)], hover: { kind: 'node', id }, click: { kind: 'node', id }, em: { n: [id] } };
+    }, { cap, rowTok: l, ...o });
   }
 
   // Layer k's activations (group g) as the left operand of layer l's product, or transposed.
@@ -936,10 +992,10 @@ export function install(ctx) {
     const cell = (t, f) => {
       const i = tidx(S, g, t, f), id = S.ids[i];
       return { f: dd => dd.fwd.a[k][i], s: 'a', keys: [`n:${id}`, `${T ? 'tbin' : 'tin'}:${l}:${t}`],
-        hover: { kind: 'node', id }, click: { kind: 'node', id } };
+        hover: { kind: 'node', id }, click: { kind: 'node', id }, em: { n: [id] } };
     };
-    if (T) return grid(w, n, (f, t) => cell(t, f), { cap: wT(sym), colHdr: tokHdr(n, tokAt(d, k, g)) });
-    return grid(n, w, cell, { cap: sym, rowHdr: tokHdr(n, tokAt(d, k, g)) });
+    if (T) return grid(w, n, (f, t) => cell(t, f), { cap: wT(sym), colHdr: tokHdr(n, tokAt(d, k, g)), colTok: k });
+    return grid(n, w, cell, { cap: sym, rowHdr: tokHdr(n, tokAt(d, k, g)), rowTok: k });
   }
 
   const valGrid = (d, l, g, which, cap) => tvals(d, l, g, (dd, i) => dd.fwd[which][l][i], 'a',
@@ -954,14 +1010,14 @@ export function install(ctx) {
         grid(1, S.d, (_, f) => {
           const i = tidx(S, g, 0, f), id = S.ids[i];
           return { f: dd => dd.M[l].b[i], s: 'b', keys: [...col(f).flatMap(k => [`b:${S.ids[k]}`, `row:${l}:${k}`, `dst:${S.ids[k]}`])],
-            hover: { kind: 'bias', id }, click: { kind: 'node', id } };
+            hover: { kind: 'bias', id }, click: { kind: 'node', id }, em: { n: col(f).map(k => S.ids[k]) } };
         }, { cap: wT(bt.name) })];
     }
     return [grid(S.tokens, S.d, (t, f) => {
       const i = tidx(S, g, t, f), id = S.ids[i];
       return { f: dd => dd.M[l].b[i], s: 'b', keys: [`b:${id}`, `row:${l}:${i}`, `dst:${id}`],
-        hover: { kind: 'bias', id }, click: { kind: 'node', id } };
-    }, { cap: bSym(d, l, g) })];
+        hover: { kind: 'bias', id }, click: { kind: 'node', id }, em: { n: [id] } };
+    }, { cap: bSym(d, l, g), rowTok: l })];
   };
 
   // A tied block's small matrix (rows = input feature, cols = output feature: Q = X W_Q), or its
@@ -974,7 +1030,7 @@ export function install(ctx) {
       const keys = [`tie:${c.tie}`, ...c.byTok.map(id => `e:${id}`), ...c.dst.map(id => `dst:${id}`), ...c.src.map(id => `src:${id}`),
         ...(T ? c.cols.map(j => `brow:${b.k}:${j}`) : c.rows.map(i => `row:${l}:${i}`))];
       return { f: dd => dd.M[l].terms[b.ti].W[c.i][c.j], s: 'w', keys, cls: 'nm-tied',
-        hover: { kind: 'edge', id: c.rep }, click: { kind: 'edge', id: c.rep } };
+        hover: { kind: 'edge', id: c.rep }, click: { kind: 'edge', id: c.rep }, em: { e: c.byTok.filter(x => x != null), w: true } };
     };
     if (T) return grid(S.d, src.d, (fd, fs) => cell(fs, fd), { cap: wT(b.name) });
     return grid(src.d, S.d, cell, { cap: b.name });
@@ -1004,7 +1060,9 @@ export function install(ctx) {
       if (d.bflag[l]?.[g] || !grps.length) grps.push([lead(), ...biasEls(d, l, g)]);
       const outs = S.act === 'identity' ? [[op('='), valGrid(d, l, g, 'a')]]
         : [[op('='), valGrid(d, l, g, 'z')], [op(arrow(d, l)), valGrid(d, l, g, 'a')]];
-      els.push(eqOf('fwd', ...grps, ...outs));
+      const eq = eqOf('fwd', ...grps, ...outs);
+      if (S.groups) eq.dataset.part = S.groups[g];   // lens.focus.part 'Q' / 'K' / 'V'
+      els.push(eq);
     }
     for (const r of S.resid) {
       els.push(note({ t: `+\\,${symOf(d, r.k)}` }, `: a residual (skip) connection from layer ${r.k}, a fixed identity `
@@ -1060,37 +1118,42 @@ export function install(ctx) {
     const S = d.T[l], w = which === 'q' || which === 'k' ? S.dh : S.dvh, n = S.tokens;
     const cell = (t, c) => {
       const id = headNode(S, hh, which, t, c);
-      return { f: dd => f(dd, t, c), s, keys: [`n:${id}`, ...keys(t, c)], hover: { kind: 'node', id }, click: { kind: 'node', id } };
+      return { f: dd => f(dd, t, c), s, keys: [`n:${id}`, ...keys(t, c)], hover: { kind: 'node', id }, click: { kind: 'node', id }, em: { n: [id] } };
     };
     // headers hover the token: Z's (this layer, head hh) or Q's, K's, V's (the layer before)
+    const tl = which === 'z' ? l : l - 1;
     const at = t => {
       const w2 = which === 'q' || which === 'k' ? S.dh : S.dvh;
+      const ids = Array.from({ length: w2 }, (_, c) => headNode(S, hh, which, t, c));
       return { hover: which === 'z' ? tokSpec(l, t, null, S.heads > 1 ? hh : null)
           : tokSpec(l - 1, t, which === 'q' ? S.gq : which === 'k' ? S.gk : S.gv, S.heads > 1 ? hh : null),
-        keys: Array.from({ length: w2 }, (_, c) => `n:${headNode(S, hh, which, t, c)}`) };
+        keys: ids.map(id => `n:${id}`), em: { n: ids }, tok: { l: tl, t } };
     };
-    return T ? grid(w, n, (c, t) => cell(t, c), { cap, colHdr: tokHdr(n, at) }) : grid(n, w, cell, { cap, rowHdr: tokHdr(n, at) });
+    return T ? grid(w, n, (c, t) => cell(t, c), { cap, colHdr: tokHdr(n, at), colTok: tl })
+      : grid(n, w, cell, { cap, rowHdr: tokHdr(n, at), rowTok: tl });
   }
 
   // tokens × tokens (S, A, ∂A, ∂S): row i = query token, column j = key token. Hovering a cell
   // hovers token i's attention row in head hh ({ kind: 'token' }: the view shows A_i, the cards
   // light row i); keys ahr / ahc light that row / column of every such matrix of the head.
   // masked: text for causal cells, or null.
-  function sqMat(d, l, hh, f, s, cap, { T = false, keys = () => [], masked = null, heat = false } = {}) {
+  // The lens weighs a cell by its query row (rows(l)); an A cell below minA is dimmed too (thr).
+  function sqMat(d, l, hh, f, s, cap, { T = false, keys = () => [], masked = null, heat = false, thr = false } = {}) {
     const S = d.T[l], n = S.tokens, H = S.heads > 1 ? hh : null;
     const cell = (i, j) => {
       const z = Array.from({ length: S.dvh }, (_, c) => headNode(S, hh, 'z', i, c));
       const src = [...Array.from({ length: S.dh }, (_, c) => [headNode(S, hh, 'q', i, c), headNode(S, hh, 'k', j, c)]).flat(),
         ...Array.from({ length: S.dvh }, (_, c) => headNode(S, hh, 'v', j, c))];
       const sp = { keys: [...z.map(id => `dst:${id}`), ...src.map(id => `src:${id}`), `ahr:${l}:${hh}:${i}`, `ahc:${l}:${hh}:${j}`, ...keys(i, j)],
-        hover: tokSpec(l, i, null, H), click: { kind: 'node', id: z[0] }, cls: heat ? 'nm-heat' : '' };
-      if (masked != null && S.causal && j > i) return { ...sp, mask: true, fixed: masked, cls: `${sp.cls} nm-inf` };
+        hover: tokSpec(l, i, null, H), click: { kind: 'node', id: z[0] }, cls: heat ? 'nm-heat' : '',
+        em: { r: [l, i], ...(thr ? { a: [l, i, j, hh], lg: true } : {}) } };
+      if (masked != null && S.causal && j > i) return { ...sp, mask: true, fixed: masked, cls: `${sp.cls} nm-inf`, em: { r: [l, i] } };
       return { ...sp, f: dd => f(dd, i, j), s };
     };
     // row headers: token i's row (Z_i); column headers: key / value token j of the layer before
-    const rows = tokHdr(n, i => ({ hover: tokSpec(l, i, null, H), keys: [`ahr:${l}:${hh}:${i}`] }));
+    const rows = tokHdr(n, i => ({ hover: tokSpec(l, i, null, H), keys: [`ahr:${l}:${hh}:${i}`], em: { r: [l, i] }, tok: { l, t: i } }));
     const cols = tokHdr(n, j => ({ hover: tokSpec(l - 1, j, S.gv, H), keys: [`ahc:${l}:${hh}:${j}`] }));
-    return T ? grid(n, n, (i, j) => cell(j, i), { cap }) : grid(n, n, cell, { cap, rowHdr: rows, colHdr: cols });
+    return T ? grid(n, n, (i, j) => cell(j, i), { cap, colTok: l }) : grid(n, n, cell, { cap, rowHdr: rows, colHdr: cols, rowTok: l });
   }
 
   function attnLocalTex(d, l) {
@@ -1117,23 +1180,28 @@ export function install(ctx) {
     const zFull = () => tvals(d, l, 0, (dd, i) => dd.fwd.a[l][i], 'a', `Z^{(${l})}`, (i, t) => [`out:${l}:${i}`, `az:${l}:${t}`]);
     for (let hh = 0; hh < H; hh++) {
       const s = H > 1 ? `_{${hh + 1}}` : '', F = dd => dd.fwd.attn[l].heads[hh];
-      if (H > 1) els.push(sub(`Head ${hh + 1}`, 'nm-sub nm-head'));
-      const A = () => sqMat(d, l, hh, (dd, i, j) => F(dd).A[i][j], 'one', `A${s}`, { keys: i => [`aa:${l}:${i}`], masked: '0', heat: true });
-      els.push(sub('1 · scores: every query against every key'));
+      const hb = headBox(l, hh);
+      if (H > 1) hb.append(sub(`Head ${hh + 1}`, 'nm-sub nm-head'));
+      const A = () => sqMat(d, l, hh, (dd, i, j) => F(dd).A[i][j], 'one', `A${s}`, { keys: i => [`aa:${l}:${i}`], masked: '0', heat: true, thr: true });
       const gS = [[op(`S${s} = ${sc}`),
         headMat(d, l, hh, 'q', (dd, t, c) => F(dd).Q[t][c], 'a', `Q${s}`, { keys: t => [`aq:${l}:${t}`] }),
         headMat(d, l, hh, 'k', (dd, t, c) => F(dd).K[t][c], 'a', wT(`K${s}`), { T: true, keys: () => [`ak:${l}`] })]];
-      if (S.causal) gS.push([op('+'), grid(n, n, (i, j) => ({ fixed: j > i ? '−∞' : '0', cls: j > i ? 'nm-inf' : 'nm-zero' }), { cap: 'M' })]);
-      els.push(eqOf('scores', ...gS, [op('='), sqMat(d, l, hh, (dd, i, j) => F(dd).S[i][j], 's', `S${s}`, { keys: i => [`as:${l}:${i}`], masked: '−∞' })]));
-      els.push(sub('2 · softmax of each row: the attention weights (each row sums to 1)'));
-      els.push(eqOf('softmax', [op(`A${s} = \\operatorname{softmax}(S${s}) =`), A()]));
-      els.push(sub('3 · weighted sum of the values'));
+      if (S.causal) {
+        gS.push([op('+'), grid(n, n, (i, j) => ({ fixed: j > i ? '−∞' : '0', cls: j > i ? 'nm-inf' : 'nm-zero', em: { r: [l, i] } }), { cap: 'M', rowTok: l })]);
+      }
       const Z = H > 1 ? headMat(d, l, hh, 'z', (dd, t, c) => F(dd).Z[t][c], 'a', `Z${s}`, { keys: t => [`az:${l}:${t}`] }) : zFull();
-      els.push(eqOf('mix', [op(`${H > 1 ? `Z${s}` : `Z^{(${l})}`} =`), A(),
-        headMat(d, l, hh, 'v', (dd, t, c) => F(dd).V[t][c], 'a', `V${s}`, { keys: () => [`av:${l}`] })], [op('='), Z]));
+      hb.append(
+        stage('scores', sub('1 · scores: every query against every key'),
+          eqOf('scores', ...gS, [op('='), sqMat(d, l, hh, (dd, i, j) => F(dd).S[i][j], 's', `S${s}`, { keys: i => [`as:${l}:${i}`], masked: '−∞' })])),
+        stage('softmax', sub('2 · softmax of each row: the attention weights (each row sums to 1)'),
+          eqOf('softmax', [op(`A${s} = \\operatorname{softmax}(S${s}) =`), A()])),
+        stage('mix', sub('3 · weighted sum of the values'),
+          eqOf('mix', [op(`${H > 1 ? `Z${s}` : `Z^{(${l})}`} =`), A(),
+            headMat(d, l, hh, 'v', (dd, t, c) => F(dd).V[t][c], 'a', `V${s}`, { keys: () => [`av:${l}`] })], [op('='), Z])));
+      els.push(hb);
     }
     if (H > 1) {
-      els.push(eqOf('concat', [op(`Z^{(${l})} = \\big[${Array.from({ length: H }, (_, hh) => `Z_{${hh + 1}}`).join(' \\mid ')}\\big] =`), zFull()]));
+      els.push(stage('mix', eqOf('concat', [op(`Z^{(${l})} = \\big[${Array.from({ length: H }, (_, hh) => `Z_{${hh + 1}}`).join(' \\mid ')}\\big] =`), zFull()])));
     }
     els.push(h('p', 'nm-note', 'No fixed W here: A is computed from this input, so this layer is not z = W a + b. '
       + 'Flattened token-major it is vec Z = (A ⊗ I) vec V, a matrix that changes with every input.'));
@@ -1144,7 +1212,7 @@ export function install(ctx) {
     const S = d.T[l], m = d.M[l], B = d.batch.X.length;
     const out = grid(m.rows.length, B, (i, s) => ({
       f: dd => dd.batch.a[l][i][s], s: 'a', keys: [`n:${m.rows[i]}`, `out:${l}:${i}`],
-      hover: { kind: 'node', id: m.rows[i] }, click: { kind: 'node', id: m.rows[i] },
+      hover: { kind: 'node', id: m.rows[i] }, click: { kind: 'node', id: m.rows[i] }, em: { n: [m.rows[i]] },
     }), { cap: `Z^{(${l})}\\ \\text{(one column per sample)}` });
     return [line(attnLocalTex(d, l)),
       eqOf('fwd', [op(`Z^{(${l})} =`), out]),
@@ -1266,7 +1334,8 @@ export function install(ctx) {
           tvals(d, l, g, (dd, i) => dd.bwd.dZ[l][i], 'g', dSym(d, l, g), i => [`brow:${l}:${i}`])], [op('='), grid(1, S.d, (_, f) => {
           const id = S.ids[tidx(S, g, 0, f)];
           return { f: dd => (bt.extra ? sumDb(dd, f) : dd.bwd.tie?.[bt.ties[f]] ?? sumDb(dd, f)),
-            s: 'gt', keys: col(f).flatMap(i => [`b:${S.ids[i]}`, `brow:${l}:${i}`]), hover: { kind: 'bias', id }, click: { kind: 'node', id } };
+            s: 'gt', keys: col(f).flatMap(i => [`b:${S.ids[i]}`, `brow:${l}:${i}`]), hover: { kind: 'bias', id }, click: { kind: 'node', id },
+            em: { n: col(f).map(i => S.ids[i]) } };
         }, { cap: `\\partial L / \\partial ${wT(bt.name)}` })]));
       }
     };
@@ -1277,15 +1346,17 @@ export function install(ctx) {
     };
     for (const b of S.blocks) {
       const src = d.T[b.k];
-      const cellOf = (fs, fd, f, s, keys, hov) => {
+      const cellOf = (fs, fd, f, s, keys, hov, em) => {
         const c = b.cells[fs][fd];
         if (!c) return { mask: true, fixed: '0' };
         return { f: dd => f(dd, c), s, keys: [`tie:${c.tie}`, ...keys(c)], cls: 'nm-tied',
-          hover: { kind: 'edge', id: hov(c) }, click: { kind: 'edge', id: hov(c) } };
+          hover: { kind: 'edge', id: hov(c) }, click: { kind: 'edge', id: hov(c) }, em: { e: em(c).filter(x => x != null) } };
       };
+      // token t's outer product: the lens weighs it by token t's own edge
       const perTok = t => grid(src.d, S.d, (fs, fd) => cellOf(fs, fd, (dd, c) => dd.bwd.edge?.[c.byTok[t]], 'g',
-        c => [`e:${c.byTok[t]}`, `brow:${l}:${c.rowByTok[t]}`, `tbin:${l}:${t}`], c => c.byTok[t]), { cap: `t = ${t + 1}` });
-      const total = grid(src.d, S.d, (fs, fd) => cellOf(fs, fd, totalOf, 'gt', c => c.rows.map(i => `brow:${l}:${i}`), c => c.rep),
+        c => [`e:${c.byTok[t]}`, `brow:${l}:${c.rowByTok[t]}`, `tbin:${l}:${t}`], c => c.byTok[t], c => [c.byTok[t]]),
+      { cap: tokName(t) ? tokTex(t) : `t = ${t + 1}` });
+      const total = grid(src.d, S.d, (fs, fd) => cellOf(fs, fd, totalOf, 'gt', c => c.rows.map(i => `brow:${l}:${i}`), c => c.rep, c => c.byTok),
         { cap: `\\partial L / \\partial ${b.name}` });
       const grps = [[op(`\\frac{\\partial L}{\\partial ${b.name}} =`), srcGrid(d, l, b.k, b.gs, { T: true }),
         tvals(d, l, b.gd, (dd, i) => dd.bwd.dZ[l][i], 'g', dSym(d, l, b.gd), i => [`brow:${l}:${i}`])]];
@@ -1295,7 +1366,7 @@ export function install(ctx) {
       if (b.cells.some(r => r.some(c => c?.extra))) {
         els.push(note({ t: b.name }, ' is also used by edges outside this layer: the total gradient training applies adds their terms too.'));
         els.push(eqOf('grad', [op(`\\text{total } \\frac{\\partial L}{\\partial ${b.name}} =`), grid(src.d, S.d, (fs, fd) => cellOf(fs, fd,
-          (dd, c) => dd.bwd.tie?.[c.tie], 'gt', () => [], c => c.rep), { cap: '\\text{all edges}' })]));
+          (dd, c) => dd.bwd.tie?.[c.tie], 'gt', () => [], c => c.rep, c => c.byTok), { cap: '\\text{all edges}' })]));
       }
     }
     biasGrads();
@@ -1317,24 +1388,26 @@ export function install(ctx) {
     const scN = scaleNum(S);
     for (let hh = 0; hh < H; hh++) {
       const s = H > 1 ? `_{${hh + 1}}` : '', F = dd => dd.fwd.attn[l].heads[hh], B = dd => dd.bwd.attn[l].heads[hh];
-      if (H > 1) els.push(sub(`Head ${hh + 1}`, 'nm-sub nm-head'));
+      const hb = headBox(l, hh);
+      if (H > 1) hb.append(sub(`Head ${hh + 1}`, 'nm-sub nm-head'));
       const bk = t => [`bat:${l}:${t}`];
       const hm = (which, f, sc2, cap, T = false) => headMat(d, l, hh, which, f, sc2, cap, { T, keys: bk });
       const sq = (f, sc2, cap, o = {}) => sqMat(d, l, hh, f, sc2, cap, { keys: bk, ...o });
       const dZ = () => hm('z', (dd, t, c) => B(dd).dZ[t][c], 'g', `\\partial Z${s}`);
       const dA = () => sq((dd, i, j) => B(dd).dA[i][j], 'ga', `\\partial A${s}`);
       const dS = (T = false) => sq((dd, i, j) => B(dd).dS[i][j], 'ga', T ? wT(`\\partial S${s}`) : `\\partial S${s}`, { T, masked: T ? null : '0' });
-      const A = (T = false) => sq((dd, i, j) => F(dd).A[i][j], 'one', T ? wT(`A${s}`) : `A${s}`, { T, masked: T ? null : '0', heat: true });
-      els.push(eqOf('dV', [op(`\\partial V${s} =`), A(true), dZ()], [op('='), hm('v', (dd, t, c) => B(dd).dV[t][c], 'g', `\\partial V${s}`)]));
-      els.push(eqOf('dA', [op(`\\partial A${s} =`), dZ(), hm('v', (dd, t, c) => F(dd).V[t][c], 'a', wT(`V${s}`), true)], [op('='), dA()]));
+      const A = (T = false) => sq((dd, i, j) => F(dd).A[i][j], 'one', T ? wT(`A${s}`) : `A${s}`, { T, masked: T ? null : '0', heat: true, thr: true });
+      hb.append(eqOf('dV', [op(`\\partial V${s} =`), A(true), dZ()], [op('='), hm('v', (dd, t, c) => B(dd).dV[t][c], 'g', `\\partial V${s}`)]));
+      hb.append(eqOf('dA', [op(`\\partial A${s} =`), dZ(), hm('v', (dd, t, c) => F(dd).V[t][c], 'a', wT(`V${s}`), true)], [op('='), dA()]));
       const rVec = grid(S.tokens, 1, i => ({
-        f: dd => F(dd).A[i].reduce((acc, a, j) => acc + a * B(dd).dA[i][j], 0), s: 'ga', keys: bk(i),
-      }), { cap: `\\mathbf r${s}` });
-      els.push(eqOf('dS', [op(`\\partial S${s} =`), A(), op('\\odot\\Big('), dA(), op('-'), rVec, op('\\mathbf 1^{\\top}\\Big)')], [op('='), dS()]));
-      els.push(eqOf('dQ', [op(`\\partial Q${s} = ${scN}`), dS(), hm('k', (dd, t, c) => F(dd).K[t][c], 'a', `K${s}`)],
+        f: dd => F(dd).A[i].reduce((acc, a, j) => acc + a * B(dd).dA[i][j], 0), s: 'ga', keys: bk(i), em: { r: [l, i] },
+      }), { cap: `\\mathbf r${s}`, rowTok: l });
+      hb.append(eqOf('dS', [op(`\\partial S${s} =`), A(), op('\\odot\\Big('), dA(), op('-'), rVec, op('\\mathbf 1^{\\top}\\Big)')], [op('='), dS()]));
+      hb.append(eqOf('dQ', [op(`\\partial Q${s} = ${scN}`), dS(), hm('k', (dd, t, c) => F(dd).K[t][c], 'a', `K${s}`)],
         [op('='), hm('q', (dd, t, c) => B(dd).dQ[t][c], 'g', `\\partial Q${s}`)]));
-      els.push(eqOf('dK', [op(`\\partial K${s} = ${scN}`), dS(true), hm('q', (dd, t, c) => F(dd).Q[t][c], 'a', `Q${s}`)],
+      hb.append(eqOf('dK', [op(`\\partial K${s} = ${scN}`), dS(true), hm('q', (dd, t, c) => F(dd).Q[t][c], 'a', `Q${s}`)],
         [op('='), hm('k', (dd, t, c) => B(dd).dK[t][c], 'g', `\\partial K${s}`)]));
+      els.push(hb);
     }
     els.push(h('p', 'nm-note', `∂Q, ∂K and ∂V are what layer ${l - 1} receives: its δ for the Q, K and V groups. `
       + 'The attention layer itself has no parameters to train.'));
@@ -1361,6 +1434,17 @@ export function install(ctx) {
     return `${parts.join(' + ')} → ${x(n, S.d)}${S.G > 1 ? ` (each of ${S.groups.join(', ')})` : ''}`;
   }
 
+  // One line for a folded layer: its local equation.
+  function sumTex(d, l) {
+    const S = d.T?.[l];
+    if (S?.mode === 'attn') return attnLocalTex(d, l);
+    if (S?.mode === 'attnbad') return '';
+    if (S?.mode === 'tok') return localTex(d, l);
+    const parts = d.M[l].terms.filter(t => t.cols.length).map(t => `${wName(l, t.k)}\\,${aName(t.k)}`);
+    const sum = [...parts, `b^{(${l})}`].join(' + '), act = actTex(d.net.layers[l].act);
+    return `${l === d.L ? '\\hat{\\mathbf y}' : `a^{(${l})}`} = ${act ? `${act}\\!\\left(${sum}\\right)` : sum}`;
+  }
+
   function buildLayer(d, l) {
     const lay = d.net.layers[l], m = d.M[l], mode = layerMode(d, l), S = d.T?.[l];
     const sec = h('section', 'nm-layer');
@@ -1380,6 +1464,12 @@ export function install(ctx) {
       head.append(b);
     }
     sec.append(head);
+    // the one-line summary shown while lens.focus folds this layer; a click focuses it instead
+    const sum = line(sumTex(d, l) || '\\text{}', 'nm-sum');
+    sum.title = 'Focus this layer';
+    if (!ctx.audience) sum.onclick = e => { e.stopPropagation(); setLens({ focus: { layer: lay.id } }); };
+    sec.append(sum);
+    secs[l] = { el: sec, id: lay.id, sum };
     if (!m.rows.length) { sec.append(h('p', 'nm-note', 'This layer has no nodes.')); return sec; }
     if (mode === 'attnbad') {
       sec.append(h('p', 'nm-note', 'Attention needs the layer before it to have groups Q, K, V with the same number of tokens, '
@@ -1417,6 +1507,11 @@ export function install(ctx) {
     hoverOf = new WeakMap();
     clickOf = new WeakMap();
     painted = { hi: new Set(), hi2: new Set(), sel: new Set(), an: new Set(), an2: new Set() };
+    emEls = []; toks = []; secs = []; headBoxes = []; formulaEls = []; trace = null;
+    emOn = true;   // the new DOM has no lens state yet: apply everything once
+    // focus.js's tokenNames (a trimmed name or null per token), so the names match the canvas and cards
+    names = tokenNames(d.net);
+    if (!names.some(Boolean)) names = null;
     eMap = new Map(d.net.edges.map(e => [e.id, e]));
     body.replaceChildren();
     root.classList.toggle('nm-labels', opt.labels);
@@ -1425,6 +1520,8 @@ export function install(ctx) {
       return;
     }
     body.append(buildFormula(d));
+    trace = buildTrace(d);
+    if (trace) body.append(trace.el);
     if (d.col) body.append(buildCollapse(d));
     if (d.batch) {
       body.append(h('p', 'nm-note', `Batch: ${d.batch.X.length} samples (${d.batch.src}) as the columns of X.`
@@ -1442,6 +1539,7 @@ export function install(ctx) {
       body.append(p);
     }
     for (let l = 1; l <= d.L; l++) body.append(buildLayer(d, l));
+    for (const s of secs) if (s) s.parts = [...s.el.querySelectorAll(':scope > [data-part], :scope > .nm-headbox > [data-part]')];
   }
 
   // ---------------------------------------------------------------- update in place
@@ -1455,11 +1553,11 @@ export function install(ctx) {
       }
       let v;
       try { v = b.f(d); } catch { v = NaN; }
-      const s = GRAD.has(b.s) ? numg(v) : num(v);
+      const s = v === -Infinity ? '−∞' : GRAD.has(b.s) ? numg(v) : num(v);   // −∞: a masked score in the trace
       if (b.el._t !== s) b.el.textContent = b.el._t = s;
       if (!b.s) continue;
-      const max = d.max[b.s] || 1, strong = Math.abs(v) / max > STRONG;
-      const c = colorFor(v, max, th);
+      const max = d.max[b.s] || 1, strong = Number.isFinite(v) && Math.abs(v) / max > STRONG;
+      const c = v === -Infinity ? 'transparent' : colorFor(v, max, th);
       if (b.el._c !== c) { b.el._c = c; b.el.style.background = c; }
       if (b.el._s !== strong) { b.el._s = strong; b.el.classList.toggle('nm-strong', strong); }
     }
@@ -1798,13 +1896,14 @@ export function install(ctx) {
 
   function stepInfo(d, a) {
     const dir = a.dir === 'fwd' ? 'forward' : 'backward', mode = layerMode(d, a.l), S = d.T?.[a.l];
+    const nm = t => { const s = tokName(t); return s ? ` “${s}”` : ''; };
     if (mode === 'attn') {
       const r = Math.floor(a.i / S.d) + 1;
-      return `${dir} · layer ${a.l} · token ${r}/${S.tokens}${a.dir === 'fwd' ? ` · ${a.phase === 'sum' ? 'weighted sum' : a.phase}` : ''}`;
+      return `${dir} · layer ${a.l} · token ${r}/${S.tokens}${nm(r - 1)}${a.dir === 'fwd' ? ` · ${a.phase === 'sum' ? 'weighted sum' : a.phase}` : ''}`;
     }
     if (mode === 'tok') {
       const p = tpos(S, a.i);
-      return `${dir} · layer ${a.l} · ${S.groups ? `${S.groups[p.g]} ` : ''}token ${p.t + 1}, feature ${p.f + 1} · row ${a.i + 1}/${sizeOf(a.l)}`;
+      return `${dir} · layer ${a.l} · ${S.groups ? `${S.groups[p.g]} ` : ''}token ${p.t + 1}${nm(p.t)}, feature ${p.f + 1} · row ${a.i + 1}/${sizeOf(a.l)}`;
     }
     return `${dir} · layer ${a.l} · row ${a.i + 1}/${sizeOf(a.l)}`;
   }
@@ -1887,6 +1986,237 @@ export function install(ctx) {
       [fwd ? `in:${l}` : `bin:${l}`, ...(t == null ? [] : [`${fwd ? 'tin' : 'tbin'}:${l}:${t}`])]];
   }
 
+  // ---------------------------------------------------------------- token trace (lens.token)
+  // A card at the top: the followed token's row through every token layer (X; Q K V; S, A and Z per
+  // head; H; ...; Ŷ), live. Built with the DOM; the token is read per frame (trTok), so following
+  // another token never rebuilds. Clicking a line reveals that matrix.
+  let trTok = null;
+  function buildTrace(d) {
+    const T = d.T;
+    if (!T || !T.some(S => S.ok && S.tok)) return null;
+    const el = h('div', 'nm-trace'), head = h('div', 'nm-tr-head'), title = h('span', 'nm-tr-title');
+    el.hidden = true;
+    head.append(title, h('span', 'nm-tr-hint', 'its row is outlined in every matrix below'));
+    if (!ctx.audience) {
+      const x = h('button', 'nm-tr-x', '×');
+      x.type = 'button';
+      x.title = 'Stop following the token (0)';
+      x.onclick = e => { e.stopPropagation(); setLens({ token: null }); };
+      head.append(x);
+    }
+    const box = h('div', 'nm-tr-lines');
+    el.append(head, box);
+    const labels = [];                                   // { el, f(t) -> tex }
+    const has = S => trTok != null && trTok < S.tokens;
+    const row = (w, f, s, hover, cls = '') => grid(1, w, (_, j) => ({ f: dd => f(dd, j), s, cls, hover: () => hover(j) }));
+    const add = (l, part, pieces, hh = null) => {
+      const ln = h('div', 'nm-tr-line');
+      pieces.forEach((p, k) => {
+        const sym = h('span', k ? 'nm-tr-sym nm-tr-more' : 'nm-tr-sym');
+        labels.push({ el: sym, f: p.sym });
+        hoverOf.set(sym, () => (trTok == null ? null : tokSpec(l, trTok, p.g ?? null, hh != null && T[l].heads > 1 ? hh : null)));
+        ln.append(sym, p.grid);
+        if (p.how) { const how = h('span', 'nm-tr-how'); labels.push({ el: how, f: p.how }); ln.append(how); }
+      });
+      ln.title = 'Show this matrix';
+      ln.onclick = () => reveal(d.net.layers[l].id, part, { token: trTok });
+      if (hh != null) headBoxes.push({ el: ln, l, hh });
+      box.append(ln);
+    };
+    const node = (S, l, g, f) => () => (has(S) ? { kind: 'node', id: S.ids[tidx(S, g, trTok, f)] } : null);
+    for (let l = 0; l <= d.L; l++) {
+      const S = T[l];
+      if (!S?.ok || !S.tok || S.mode === 'attnbad') continue;
+      if (S.mode === 'attn') {
+        const n = S.tokens, H = S.heads, heads = dd => dd.fwd.attn?.[l]?.heads;
+        for (let hh = 0; hh < H; hh++) {
+          const nm = x => (H > 1 ? `(${x}_{${hh + 1}})` : x), tokH = () => (trTok == null ? null : tokSpec(l, trTok, null, H > 1 ? hh : null));
+          const q = H > 1 ? `\\mathbf q^{(${hh + 1})}` : '\\mathbf q', K = H > 1 ? `K_{${hh + 1}}` : 'K';
+          add(l, 'scores', [{ sym: t => `${nm('S')}_{${t + 1},:}`, how: t => `= ${scoreTex(S, `${q}_{${t + 1}}`, wT(K))}`,
+            grid: row(n, (dd, j) => (!has(S) ? NaN : S.causal && j > trTok ? -Infinity : heads(dd)[hh].S[trTok][j]), 's', tokH) }], hh);
+          add(l, 'softmax', [{ sym: t => `${nm('A')}_{${t + 1},:}`, how: t => `= \\operatorname{softmax}\\big(${nm('S')}_{${t + 1},:}\\big)`,
+            grid: row(n, (dd, j) => (has(S) ? heads(dd)[hh].A[trTok][j] : NaN), 'one', tokH, 'nm-heat') }], hh);
+        }
+        const A = t => (H > 1 ? `(A_h)_{${t + 1},j}` : `A_{${t + 1},j}`), v = H > 1 ? '\\mathbf v^{(h)}' : '\\mathbf v';
+        add(l, 'mix', [{ sym: t => `${symOf(d, l)}_{${t + 1},:}`,
+          how: t => `= ${H > 1 ? '\\big[\\,' : ''}\\textstyle\\sum_j ${A(t)}\\,${v}_j${H > 1 ? '\\,\\big]_{h=1..' + H + '}' : ''}`,
+          grid: row(S.d, (dd, f) => (has(S) ? dd.fwd.a[l][tidx(S, 0, trTok, f)] : NaN), 'a', f => node(S, l, 0, f)()) }]);
+        continue;
+      }
+      add(l, null, Array.from({ length: S.G }, (_, g) => ({
+        sym: t => `${symOf(d, l, g)}_{${t + 1},:}`, g: S.groups ? g : null,
+        grid: row(S.d, (dd, f) => (has(S) ? dd.fwd.a[l][tidx(S, g, trTok, f)] : NaN), 'a', f => node(S, l, g, f)()),
+      })));
+    }
+    return { el, title, labels, tok: undefined };
+  }
+
+  function syncTrace(d, lens) {
+    const t = Number.isInteger(lens?.token) && lens.token >= 0 ? lens.token : null;
+    trTok = t;
+    if (!trace) return;
+    const show = t != null && !!d.T?.some(S => S.ok && S.tok && t < S.tokens);
+    if (trace.el.hidden !== !show) trace.el.hidden = !show;
+    if (!show || trace.tok === t) return;
+    trace.tok = t;
+    const nm = tokName(t);
+    trace.title.textContent = `Following token ${t + 1}${nm ? ` “${nm}”` : ''}`;
+    for (const x of trace.labels) tex(x.el, x.f(t));
+  }
+
+  // ---------------------------------------------------------------- lens
+  let emOn = true, lastFocus = null, lastD = null;
+  const peek = new Set();   // layer ids reveal() opened while lens.focus folds them; cleared when the focus moves
+
+  const focusIndex = (d, lens) => {
+    const f = lens?.focus;
+    if (!f || f.layer == null) return null;
+    const l = typeof f.layer === 'number' ? f.layer : model.layerIndex(d.net, f.layer);
+    return l >= 0 && l <= d.L ? l : null;
+  };
+  const readsFrom = (d, l, k) => d.M[l]?.terms.some(t => t.k === k && t.cols.length) || (k === l - 1 && d.T?.[l]?.mode === 'attn');
+
+  function emphasisOf(d, lens) {
+    if (!lens || !d.fwd) return null;
+    try { return emphasis(d.net, d.fwd, lens); } catch (err) { console.error('[nn/matrix] emphasis:', err); return null; }
+  }
+
+  // How strongly the lens keeps an element (0 = dimmed, 1 = emphasized). thr.w / thr.a: minW / minA
+  // are set (their edge type shown), so W cells and A cells the canvas hides for them are dimmed.
+  // lens.show alone dims nothing here: it only declutters the canvas.
+  function emWeight(E, em, rowsOf, thr) {
+    let f = 1;
+    try {
+      if (em.n) { f = 0; for (const id of em.n) f = Math.max(f, unit(E.node(id))); }
+      else if (em.e) {
+        f = em.e.length ? 0 : 1;
+        let hid = thr.w && !!em.w && em.e.length > 0;
+        for (const id of em.e) {
+          f = Math.max(f, unit(E.edge(id)));
+          if (hid && (eMap.get(id)?.fixed || !E.hidden?.edge?.(id))) hid = false;
+        }
+        if (hid) f = 0;   // |w| < minW
+      } else if (em.p) f = Math.min(unit(E.node(em.p[0])), unit(E.node(em.p[1])));
+      if (em.r) { const R = rowsOf(em.r[0]); if (R && !R.has(em.r[1])) f = 0; }
+      if (em.a && thr.a && E.hidden?.attn?.(...em.a)) f = 0;   // A_ij < minA
+    } catch { f = 1; }
+    return f;
+  }
+
+  // Everything the lens changes, in place: folds, the focused part, heads, row outlines, dimming.
+  function applyLens(d, lens) {
+    // any: something is dimmed; hides: show / minW / minA remove something (dimmed here)
+    const E = emphasisOf(d, lens), on = !!(E?.any || E?.hides), memo = new Map();
+    const setOf = (k, l) => {
+      const key = `${k}${l}`;
+      if (!memo.has(key)) {
+        let r = null;
+        try { r = E?.[k]?.(l) ?? null; } catch { r = null; }
+        memo.set(key, r instanceof Set ? r : Array.isArray(r) ? new Set(r) : null);
+      }
+      return memo.get(key);
+    };
+    const rowsOf = l => (on ? setOf('rows', l) : null), headsOf = l => (on ? setOf('heads', l) : null);
+    const cls = (el, c, v) => { const k = `_${c}`; if (el[k] !== v) { el[k] = v; el.classList.toggle(c, v); } };
+
+    // focus: fold every other layer (the step-through's layer and revealed ones stay open)
+    const fl = focusIndex(d, lens), part = fl != null && typeof lens.focus.part === 'string' ? lens.focus.part : null;
+    const fkey = fl == null ? '' : `${d.net.layers[fl].id}|${part || ''}`;
+    const moved = fkey !== lastFocus;
+    if (moved) { lastFocus = fkey; peek.clear(); }
+    const open = new Set();
+    if (fl != null) {
+      if (fl === 0) { for (let l = 1; l <= d.L; l++) if (readsFrom(d, l, 0)) open.add(l); } else open.add(fl);
+      if (store.state.anim) open.add(store.state.anim.l);
+      secs.forEach((s, l) => { if (s && peek.has(s.id)) open.add(l); });
+    }
+    secs.forEach((s, l) => {
+      if (!s) return;
+      cls(s.el, 'nm-folded', fl != null && !open.has(l));
+      cls(s.el, 'nm-focus', fl != null && (l === fl || (fl === 0 && open.has(l) && readsFrom(d, l, 0))));
+      s.parts ||= [];
+      const hit = part && l === fl && s.parts.some(p => p.dataset.part === part);
+      for (const p of s.parts) {
+        cls(p, 'nm-part-on', !!hit && p.dataset.part === part);
+        cls(p, 'nm-part-off', !!hit && p.dataset.part !== part);
+      }
+    });
+    for (const x of formulaEls) cls(x.el, 'nm-foc', x.l === fl);
+
+    // head: the other heads' blocks (and trace lines) are hidden
+    for (const b of headBoxes) {
+      const Hs = headsOf(b.l), hide = !!Hs && !Hs.has(b.hh);
+      if (b.el.hidden !== hide) b.el.hidden = hide;
+    }
+    // token: row t's outline and header in every token matrix
+    for (const x of toks) { const R = rowsOf(x.l); cls(x.el, x.cls, !!R && R.has(x.t)); }
+    // dimming, weighted like the canvas
+    if (on || emOn) {
+      const thr = { w: on && +lens.minW > 0 && lens.show?.weights !== false, a: on && +lens.minA > 0 && lens.show?.attention !== false };
+      for (const x of emEls) {
+        const f = on ? emWeight(E, x.em, rowsOf, thr) : 1;
+        const o = on ? Math.round((DIM + (1 - DIM) * f) * 50) / 50 : 1;
+        if (x.el._em !== o) {
+          x.el._em = o;
+          if (o >= 1) x.el.style.removeProperty('--em'); else x.el.style.setProperty('--em', String(o));
+        }
+        if (x.em.lg) cls(x.el, 'nm-legible', on && f > 0.99 && !!rowsOf(x.em.a[0]));
+      }
+      emOn = on;
+    }
+    cls(root, 'nm-lens', on);
+
+    // a new focus scrolls its layer (or part) to the top of the panel
+    if (moved && fl != null) {
+      const s = fl === 0 ? secs.find((x, l) => x && open.has(l)) : secs[fl];
+      const tgt = (part && s?.parts.find(p => p.dataset.part === part && p.offsetParent !== null)) || s?.el;
+      scrollTo(tgt);
+    }
+  }
+
+  const reduceMotion = () => !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  function scrollTo(el, smooth = true) {
+    if (!el?.isConnected) return;
+    const r = el.getBoundingClientRect(), b = body.getBoundingClientRect();
+    if (!r.width && !r.height) return;
+    body.scrollTo({ top: Math.max(0, body.scrollTop + r.top - b.top - 6), behavior: smooth && !reduceMotion() ? 'smooth' : 'auto' });
+  }
+
+  // For tour.js: bring layer (id or index) into view, opening it if lens.focus folds it, scrolled to
+  // its part ('Q' | 'K' | 'V' | 'scores' | 'softmax' | 'mix') when given, and flash it. With
+  // token, the token's outlined row in that part is centred instead. Returns false if not shown.
+  function reveal(layer, part = null, { token = null, flash = true, smooth = true } = {}) {
+    if (queued || !secs.length) render();
+    let l = typeof layer === 'number' ? layer : model.layerIndex(store.net, layer);
+    if (l === 0 && lastD?.M) l = secs.findIndex((s, k) => s && readsFrom(lastD, k, 0));   // X shows where it is read
+    const s = secs[l];
+    if (!s) return false;
+    if (s.el.classList.contains('nm-folded')) { peek.add(s.id); render(); }
+    const tgt = (part && s.parts.find(p => p.dataset.part === part && p.offsetParent !== null)) || s.el;
+    // with a token and a part, centre the part's last outlined row of it (the stage's result: S, A or Z)
+    const bands = Number.isInteger(token) && tgt !== s.el
+      ? toks.filter(x => x.cls === 'on' && x.t === token && x.el._on && tgt.contains(x.el)) : [];
+    const br = bands.at(-1)?.el.getBoundingClientRect();
+    if (br?.height) {
+      const b = body.getBoundingClientRect(), top = body.scrollTop + br.top - b.top - body.clientHeight / 2 + br.height / 2;
+      body.scrollTo({ top: Math.max(0, top), behavior: smooth && !reduceMotion() ? 'smooth' : 'auto' });
+    } else scrollTo(tgt, smooth);
+    if (flash) {
+      tgt.classList.remove('nm-flash');
+      void tgt.offsetWidth;   // restart the animation
+      tgt.classList.add('nm-flash');
+      clearTimeout(tgt._flash);
+      tgt._flash = setTimeout(() => tgt.classList.remove('nm-flash'), 1400);
+    }
+    return true;
+  }
+
+  // The lens parts layer (id or index) shows, in order: e.g. ['Q', 'K', 'V'] or ['scores', 'softmax', 'mix'].
+  function parts(layer) {
+    const l = typeof layer === 'number' ? layer : model.layerIndex(store.net, layer);
+    return [...new Set((secs[l]?.parts || []).map(p => p.dataset.part))];
+  }
+
   // ---------------------------------------------------------------- render loop
   let queued = false;
   function schedule() {
@@ -1906,16 +2236,28 @@ export function install(ctx) {
       sig = s;
       try { build(d); } catch (err) { console.error('[nn/matrix] build:', err); body.replaceChildren(h('p', 'nm-note', `Matrix view failed: ${err.message}`)); }
     }
+    lastD = d;
+    const lens = store.state.lens ? lensNow() : null;
+    syncTrace(d, lens);   // before update(): the trace's cells read the followed token
     update(d);
+    try { applyLens(d, lens); } catch (err) { console.error('[nn/matrix] lens:', err); }
     updateSteps(d);
     paintState();
     for (const [k, b] of Object.entries(tg)) b.classList.toggle('on', k === 'mode' ? opt.mode === 'bwd' : opt[k]);
     tg.mode.classList.toggle('nm-dim', !store.state.bwd);
   }
 
-  // Debug / test handle (not part of the contract): render() forces a rebuild, update() is one
-  // per-frame in-place update, as during training.
-  ctx.matrix = { step, toggle, opt, render: () => { sig = ''; render(); }, update: () => { const d = compute(); update(d); updateSteps(d); } };
+  // render() forces a rebuild and update() is one per-frame in-place update, as during training
+  // (debug / test handles). reveal(layer, part, { token, flash, smooth }) and parts(layer) are for
+  // tour.js (see reveal above).
+  ctx.matrix = {
+    step, toggle, opt, reveal, parts,
+    render: () => { sig = ''; render(); },
+    update: () => {
+      const d = compute(), lens = store.state.lens ? lensNow() : null;
+      syncTrace(d, lens); update(d); applyLens(d, lens); updateSteps(d);
+    },
+  };
 
   // ---------------------------------------------------------------- 3D tab
   const eligible = m => {
@@ -1998,8 +2340,8 @@ export function install(ctx) {
   }
   if (!ctx.audience) {
     body.addEventListener('mouseover', e => {
-      const el = specEl(e.target, hoverOf);
-      setHover(el ? hoverOf.get(el) : null);
+      const el = specEl(e.target, hoverOf), v = el ? hoverOf.get(el) : null;
+      setHover(typeof v === 'function' ? v() : v);   // functions: the trace, whose token changes
     });
     body.addEventListener('mouseleave', () => setHover(null));
     body.addEventListener('click', e => {
@@ -2017,6 +2359,7 @@ export function install(ctx) {
   store.on('net', schedule);
   store.on('values', schedule);
   store.on('anim', () => render());   // user-paced: answer the key press in the same frame
+  store.on('lens', () => render());
   store.on('hover', t => {
     if ((t ? JSON.stringify(t) : null) !== myHover) myHover = undefined;
     paintState();

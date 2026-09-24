@@ -13,6 +13,7 @@
 // matrices can't express); Adapt network keeps token structure or refuses (see adaptNet).
 
 import { colorFor, HI } from './store.js';
+import { tokenLabel } from './focus.js';
 
 const LRS = [0.0001, 0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1, 3, 10];
 const BATCHES = [1, 2, 4, 8, 10, 16, 32, 64, 128, 0];   // 0 = the whole dataset
@@ -918,7 +919,7 @@ export function install(ctx) {
     const b = e.target.closest('button[data-act]');
     if (!b) return;
     const act = b.dataset.act;
-    if (act === 'fold') { ui.fold = !ui.fold; saveUi(); applyUi(); dirty = true; kick(); }
+    if (act === 'fold') fold();
     if (ro) return;
     if (act === 'play') toggle();
     else if (act === 'step') step();
@@ -959,6 +960,12 @@ export function install(ctx) {
     if (ui.x == null || ui.y == null) { panel.style.left = ''; panel.style.top = ''; panel.style.right = ''; }
     else { panel.style.left = ui.x + 'px'; panel.style.top = ui.y + 'px'; panel.style.right = 'auto'; }
     if (toolBtn) toolBtn.classList.toggle('on', !!ui.open);
+  }
+
+  // Fold the panel to its header (on), unfold it (false), or toggle; saved and mirrored like the button.
+  function fold(on = !ui.fold) {
+    if (!!ui.fold === !!on) return;
+    ui.fold = !!on; saveUi(); applyUi(); dirty = true; kick();
   }
 
   let toolBtn = null;
@@ -1230,7 +1237,12 @@ export function install(ctx) {
     const A = ch ? fw?.attn?.[ch.l]?.heads?.[ch.hd]?.A : null;
     const causal = ch ? !!net.layers[ch.l].causal : false;
     const nA = ch ? T : 0;
-    const pad = 8, lw = 20, gap = 9, head = 30, minOut = 66;
+    // token names (net.meta.tokenNames, docs/NN_LENS.md) replace t1…tn; the row labels widen to fit
+    const names = Array.from({ length: T }, (_, i) => tokenLabel(net, i));   // focus.js: its name, else t1, t2, ...
+    const g0 = plot.getContext('2d');
+    g0.font = font(10);
+    const pad = 8, lw = Math.min(64, Math.max(20, Math.ceil(Math.max(...names.map(s => g0.measureText(s).width))) + 7)), gap = 9, head = 30, minOut = 66;
+    const who = i => (names[i] === `t${i + 1}` ? `token ${i + 1}` : `${names[i]} (token ${i + 1})`);
     const fit = k => Math.floor((S - 2 * pad - lw - 2 * gap - minOut) / Math.max(1, k));
     let showX = true, c = Math.min(36, fit(dIn + nA));
     if (c < 15) { showX = false; c = Math.min(36, fit(nA || 1)); }
@@ -1266,7 +1278,8 @@ export function install(ctx) {
     };
     // row labels: token t
     g.font = font(10); g.fillStyle = p.muted; g.textAlign = 'right';
-    for (let i = 0; i < T; i++) g.fillText(`t${i + 1}`, xX - 5, y0 + i * c + c / 2);
+    const clip = (s, w) => { if (g.measureText(s).width <= w) return s; while (s.length > 1 && g.measureText(s + '…').width > w) s = s.slice(0, -1); return s + '…'; };
+    for (let i = 0; i < T; i++) g.fillText(clip(names[i], lw - 7), xX - 5, y0 + i * c + c / 2);
     // x_t
     if (showX) {
       title(xX, 'x');
@@ -1276,18 +1289,20 @@ export function install(ctx) {
       for (let i = 0; i < T; i++) for (let f = 0; f < dIn; f++) {
         const v = ins[i * dIn + f]?.value, x = xX + f * c, y = y0 + i * c;
         box(x, y, v, mx || 1, f2(v), false);
-        seqCells.push({ x, y, w: c, h: c, text: `x: token ${i + 1}, feature ${f + 1} = ${f2(v)}` });
+        seqCells.push({ x, y, w: c, h: c, text: `x: ${who(i)}, feature ${f + 1} = ${f2(v)}` });
       }
     }
     // A: rows are queries (this token), columns the keys it reads
     if (ch) {
       title(xA, net.layers[ch.l].heads > 1 ? `A, head ${ch.hd + 1}` : 'A (attention)');
-      for (let j = 0; j < T; j++) colLab(xA + j * c + c / 2, `t${j + 1}`);
+      g.font = font(9.5);
+      for (let j = 0; j < T; j++) colLab(xA + j * c + c / 2, clip(names[j], c - 2));
       for (let i = 0; i < T; i++) for (let j = 0; j < T; j++) {
         const a = A?.[i]?.[j], masked = causal && j > i, x = xA + j * c, y = y0 + i * c;
         box(x, y, a, 1, Number.isFinite(a) ? f2(a) : '?', masked);
-        seqCells.push({ x, y, w: c, h: c, text: masked ? `A(${i + 1},${j + 1}): masked, token ${i + 1} can't read the later token ${j + 1}`
-          : `A(${i + 1},${j + 1}) = ${Number.isFinite(a) ? f2(a) : '?'}: how much token ${i + 1} reads token ${j + 1}` });
+        const ij = names[i] === `t${i + 1}` && names[j] === `t${j + 1}` ? `${i + 1},${j + 1}` : `${names[i]}, ${names[j]}`;
+        seqCells.push({ x, y, w: c, h: c, text: masked ? `A(${ij}): masked, ${who(i)} can't read the later ${who(j)}`
+          : `A(${ij}) = ${Number.isFinite(a) ? f2(a) : '?'}: how much ${who(i)} reads ${who(j)}` });
       }
     }
     // outputs against targets
@@ -1323,7 +1338,7 @@ export function install(ctx) {
             g.strokeStyle = HI; g.lineWidth = 2.5;
             g.beginPath(); g.moveTo(xy, ly - 0.5); g.lineTo(xy, ly + lh + 0.5); g.stroke();
           }
-          seqCells.push({ x: xO, y: ly, w: wO, h: lh, text: `token ${i + 1}, output ${f + 1}: ŷ = ${Number.isFinite(a) ? f2(a) : '?'}, y = ${typeof y === 'number' ? f2(y) : 'none'}` });
+          seqCells.push({ x: xO, y: ly, w: wO, h: lh, text: `${who(i)}, output ${f + 1}: ŷ = ${Number.isFinite(a) ? f2(a) : '?'}, y = ${typeof y === 'number' ? f2(y) : 'none'}` });
         }
       }
     }
@@ -1635,10 +1650,11 @@ export function install(ctx) {
   syncControls();
   setRunning(false);
   kick();
-  // Handle for tests and the console.
-  panel.nnTrain = {
-    play, pause, step, reset, adapt, loadSample, stepSample,
+  // Handle for tests, the console and other modules (ctx.train: the walkthrough folds the panel).
+  panel.nnTrain = ctx.train = {
+    play, pause, step, reset, adapt, loadSample, stepSample, fold,
     get running() { return running; }, get eval() { return lastEval; },
+    get open() { return !!ui.open; }, get folded() { return !!ui.fold; },
     point: i => (pts && i >= 0 && 2 * i < pts.length ? [pts[2 * i], pts[2 * i + 1]] : null),
   };
 }

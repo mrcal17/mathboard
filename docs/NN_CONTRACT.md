@@ -22,6 +22,10 @@ Modules talk through the store, `ctx` and the handles listed below.
 | `inspector.js`, `inspector.css` | floating cards for the selected node, edge or layer |
 | `matrix.js`, `matrix.css` | the matrix panel in `#nn-matrix`, and step-through (`state.anim`) |
 | `train.js`, `train.css` | the floating Train panel: datasets, training loop, plots, per-neuron maps |
+| `focus.js` (tests: `tests/nn_focus.test.mjs`) | the lens rules: what a lens emphasizes, dims and hides; token names; stages. Pure: no DOM (docs/NN_LENS.md) |
+| `lens.js`, `lens.css` | the lens bar at the bottom of `#nn-stage`; owns `state.lens` (docs/NN_LENS.md) |
+| `attnviz.js`, `attnviz.css` | the floating attention panel (arcs, dots, mix, heat); owns `state.viz` (docs/NN_LENS.md) |
+| `tour.js`, `tour.css` | Explain, the guided walkthrough and its caption card; owns `state.tour` (docs/NN_LENS.md) |
 
 ## Network JSON (`model.js`)
 
@@ -110,7 +114,8 @@ adapt or play frame.
 - The loss choice stays in `meta.loss`.
 - The panel's own UI state is not in the net: localStorage `mathboard.nn.train` =
   `{ open, fold, x, y }` (`x`/`y` null = the default top-right spot). The audience window never
-  reads or writes it.
+  writes it; it follows the presenter's `open` and `fold` through `storage` events and keeps the
+  default spot.
 
 ## `model.js` exports (pure; no DOM)
 
@@ -140,9 +145,12 @@ PRESETS         // { key: { label, group, note, dataset: DATASETS key | null, lr
                 //     maxpool (b + ReLU(a - b)), lenet (tied conv, fixed pool), gnn (hand-set),
                 //     towers (block-diagonal), multitask (shared trunk, block-diagonal heads)
                 //   Sequences: rnn (unrolled; tied W_{hh}, w_x, b_h), wavenet (dilated causal conv, a tied kernel k^{(l)} per layer)
-                //   Attention (token nets, mse, see docs/NN_ATTENTION.md): attention (3 tokens x 2 -> tied QKV -> Z, seq_max,
-                //     lr 0.3), causal (seq_prev, lr 0.3), multihead (2 heads, seq_minmax, lr 1), transformer (2 tokens:
-                //     QKV, Z, H = X + Z W_O, ReLU FFN d -> 2d, Y = H + FFN; seq_addmax, lr 0.3). The three 3-token presets
+                //   Attention (token nets, mse, see docs/NN_ATTENTION.md): words (hand-set "the cat sat": one-hot
+                //     det / noun / verb -> tied QKV -> Z, no dataset, sets meta.tokenNames, see docs/NN_LENS.md),
+                //     attention (3 tokens x 2 -> tied QKV -> Z, seq_max, lr 0.3), causal (seq_prev, lr 0.3), causal_rot
+                //     (hand-set solution of causal's task: W_Q turns the positions back 120°; seq_prev), multihead
+                //     (2 heads, seq_minmax, lr 1), transformer (2 tokens: QKV, Z, H = X + Z W_O, ReLU FFN d -> 2d,
+                //     Y = H + FFN; seq_addmax, lr 0.3). The 3-token presets
                 //     lay X and Q, K, V out as tokens x d grids (a row per token, a column per feature, groups stacked,
                 //     X between the Q and K blocks), so they fit a 1600 x 900 window at 0.63 to 0.73 zoom; later layers are columns
                 //   Embeddings & autoencoders: autoencoder, embedding (one-hot lookup), pca_ae (linear, on cloud)
@@ -252,7 +260,8 @@ fmtg(x, digits = 2) -> string                  // for gradients: fmt from |x| >=
 ```js
 import { createStore, colorFor, POS, NEG, HI } from './store.js';
 store.net       // the live net. Read it fresh every time; its identity never changes (undo/load mutate in place)
-store.state     // { sel, hover, anim, fwd, bwd }. fwd / bwd are null when the recompute threw; bwd also without targets
+store.state     // { sel, hover, anim, fwd, bwd, lens, viz, tour }. fwd / bwd are null when the recompute threw; bwd also
+                //   without targets. lens / viz / tour start null: docs/NN_LENS.md
 store.model     // the model.js namespace
 store.on(evt, fn(payload, store)) -> off      store.emit(evt, payload)      store.set(key, value)   // sets state[key], emits key
 store.commit(label)           // after an edit: undo snapshot + recompute + emit 'net' then 'values'. store.lastLabel = label
@@ -286,10 +295,13 @@ store.load(net | json, { history = true })   // swap in a whole net (normalized)
     an attention layer's or neuron's card.
   The view emits node, edge, layer and token (a token box, and a heatmap cell or attention edge
   as its row of A); the inspector and the matrix panel emit every kind (the matrix panel's `t_i`
-  headers and S / A cells, and the inspector's A tables, emit token).
+  headers and S / A cells, and the inspector's A tables, emit token); the attention panel emits
+  token (docs/NN_LENS.md).
 - `anim`: see below.
 - `train`: `{ epoch, loss, running }`, emitted by `train.js` on play, pause, step, reset and every
-  frame while training. `loss` is the full-dataset loss, or null. Nothing listens to it yet.
+  frame while training. `loss` is the full-dataset loss, or null. The inspector listens to
+  `running` (it brings every card up to date on pause).
+- `lens`, `viz`, `tour`: see docs/NN_LENS.md.
 
 **`state.anim`** (step-through, owned by `matrix.js`)
 - `null | { dir: 'fwd' | 'bwd', l, i, phase }`. `l` is a layer index >= 1 (the view also accepts
@@ -362,7 +374,8 @@ store.load(net | json, { history = true })   // swap in a whole net (normalized)
 <section id="nn" hidden>
   <header id="nn-bar"> shell toolbar ... </header>
   <div id="nn-main">
-    <div id="nn-stage"></div>   <!-- view mounts the SVG; inspector and train float over it -->
+    <div id="nn-stage"></div>   <!-- view mounts the SVG; the inspector's cards, the Train and attention
+                                     panels, the lens bar and the Explain card float over it -->
     <div id="nn-split"></div>   <!-- drag to resize, double-click to hide / show the matrix panel -->
     <aside id="nn-matrix"></aside>
   </div>
@@ -370,9 +383,10 @@ store.load(net | json, { history = true })   // swap in a whole net (normalized)
 ```
 
 `nn.js` imports `model.js` and `store.js` first (if either fails, the stage shows an error and
-`body.dataset.nnReady = 'error'`). It then imports `view`, `inspector`, `matrix` and `train` in
-parallel and installs them in that order, awaiting each `export function install(ctx)`. A module
-that fails to import or install is logged and skipped.
+`body.dataset.nnReady = 'error'`). It then imports `view`, `inspector`, `matrix`, `train`, `lens`,
+`attnviz` and `tour` in parallel and installs them in that order, awaiting each
+`export function install(ctx)`. A module that fails to import or install is logged and skipped.
+`focus.js` is not installed: the modules import it (docs/NN_LENS.md).
 
 ```js
 ctx = {
@@ -387,15 +401,18 @@ ctx = {
   view,                   // set by view.js during its install (see below)
   inspector,              // set by inspector.js
   matrix,                 // set by matrix.js (test / debug handle)
+  train,                  // set by train.js: its test handle (below)
+  attnviz, tour,          // set by attnviz.js and tour.js: docs/NN_LENS.md
 }
 ctx.view = {
   svg, worldToScreen(x, y) -> { x, y },    // world -> px relative to #nn-stage
   screenToWorld(x, y) -> { x, y },         // px relative to the SVG (it fills the stage) -> world
   nodeRect(id) -> { x, y, w, h } | null,   // stage px, for placing the inspector
-  fit(ms?),                                // frames the net, beside a tall panel floating at one side (Train).
-                                           //   The view refits by itself when that panel opens, folds or closes,
-                                           //   unless the user has panned or zoomed since the last fit
-  outOfView() -> bool,                     // part of the net is off the stage or under that panel
+  fit(ms?),                                // frames the net in the free part of the stage: above the lens bar,
+                                           //   clear of the Train and attention panels (docs/NN_LENS.md, View fit).
+                                           //   The view refits by itself when a panel opens, folds, resizes or
+                                           //   closes, unless the user has panned or zoomed since the last fit
+  outOfView() -> bool,                     // part of the net is outside that free area
   contentRect() -> { x, y, w, h },         // stage px box of the whole net (lanes and headers included)
   setNodeImage(id, url | null),            // train's per-neuron maps, clipped inside the node; kept across rebuilds
   png(scale = 2) -> Promise<dataURL>,      // the net on the theme background, without hover, selection or handles
@@ -405,7 +422,8 @@ ctx.inspector = {
   open(target, { pin = true }) -> card element | null,   // a target that has a card reuses it; pin: false only selects
   closeAll(), cards -> [{ target, pinned, el }],
 }
-ctx.matrix = { step(±1), toggle(key), opt, render(), update() }   // not a contract: for tests and the console.
+ctx.matrix = { step(±1), toggle(key), opt, render(), update(), reveal(layer, part?, opts?), parts(layer) }
+               // not a contract except reveal / parts (for tour.js, docs/NN_LENS.md): for tests and the console.
                // opt = { mode: 'fwd' | 'bwd', bias, batch, collapse, labels, expand }; render() forces a rebuild.
                //   expand: a comma-separated string of the token layer ids whose "Flattened: z = W a" form is
                //   open (a string, so the audience mirror compares it by value)
@@ -413,23 +431,26 @@ ctx.matrix = { step(±1), toggle(key), opt, render(), update() }   // not a cont
 
 - Toolbar: the shell's groups `net` (New net…, + Layer, Layout, Fit, Randomize), `edit` (↶ ↷) and
   `file` (Export, Import, PNG, To board) come first, then module groups in the order they are
-  first used (view's `view`: Weights; train's `train`: Train), then a spacer, **Audience** and
-  `?`. Audience calls `window.mathboardGraph.audience.open()` (set by
-  `graph/features/lecture.js`), the same window the 3D tab's Audience button opens; it is lit
+  first used (`view`: Weights and lens.js's Lens; train's `train`: Train; `attnviz`: Attention;
+  `tour`: Explain), then a spacer, **Audience** and `?` (the cheat sheet: the keys below and most
+  toolbar buttons, Lens, Attention and Explain included). Audience calls
+  `window.mathboardGraph.audience.open()` (set by `graph/features/lecture.js`), the same window the 3D tab's Audience button opens; it is lit
   while that window is open (`audience.isOpen`, checked every second while the tab is shown).
   Toolbar buttons never take focus, so Space stays with training.
-- train.js sets no `ctx` field. Its named exports are `readSettings(net, model)`, `netShape`,
-  `defaultDataset`, `forwardMany(net, model, X, n, from, M)`,
+- train.js sets `ctx.train` (its test handle, below). Its named exports are
+  `readSettings(net, model)`, `netShape`, `defaultDataset`, `forwardMany(net, model, X, n, from, M)`,
   `datasetLoss(P, Y, n, K, loss, outAct, segments = 1)` and `adaptNet(net, model, ds, { seed })`;
   matrix.js and inspector.js import `readSettings`. `datasetLoss`'s `segments` is the number of
   softmax blocks of a token output layer (tokens × groups): its cross-entropy is their mean, as in
   `backward`. `adaptNet` returns a sentence saying what it did, or throws an `Error` whose message
   says why it can't (a token net on a plain dataset, another token count, an attention output of
   the wrong width, shared or fixed weights laid out for other inputs), leaving the net untouched.
-  Test handle: `document.querySelector('.nn-train').nnTrain` =
-  `{ play, pause, step, reset, adapt, loadSample(i), stepSample(±1), running, eval, point(i) }`.
-  `stepSample` loads the next or previous dataset sample (from the one the inputs hold, else the
-  first or last), as the ◀ ▶ buttons under a sequence plot do.
+  Test handle: `ctx.train` = `document.querySelector('.nn-train').nnTrain` =
+  `{ play, pause, step, reset, adapt, loadSample(i), stepSample(±1), fold(on?), running, eval, open,
+  folded, point(i) }`. `stepSample` loads the next or previous dataset sample (from the one the
+  inputs hold, else the first or last), as the ◀ ▶ buttons under a sequence plot do. `fold(on)`
+  folds the panel to its header or unfolds it (no argument toggles), saved like the button;
+  Explain uses it (docs/NN_LENS.md).
 - The shell's **Delete** and **+ Layer** keep token layers whole, by view.js's rules (its
   double-click and wiring code), and toast why instead of editing: Delete refuses one neuron of a
   token, Q, K, V or attention layer, a fixed edge, and the Q, K, V layer an attention layer reads;
@@ -443,6 +464,11 @@ ctx.matrix = { step(±1), toggle(key), opt, render(), update() }   // not a cont
 | view | W: weight labels on edges |
 | matrix | S: step, Shift+S: step back, B: bias-trick toggle |
 | train | Space: play/pause training, T: single training step |
+| lens | 1–9 / 0: follow token n / every token, `[` / `]`: previous / next stage, L: lens bar |
+| attnviz | A: attention panel, M / Shift+M: next / previous mode |
+| tour | E: Explain; while it runs → / PageDown, ← / PageUp, Esc (caught first) |
+
+Details for the last three: docs/NN_LENS.md.
 
 Alt+1 / Alt+2 / Alt+3 switch tabs (grapher.js, always).
 
@@ -462,6 +488,8 @@ freezes the splitter. Inspector cards and the Train panel stay as demo content w
 chrome: cards lose the pin, close and param-delete buttons, "+ add" and the drag cursor (they
 still work); the Train panel keeps its readout, loss chart, warning text and plots and hides its
 settings and buttons (as `.nn-train.ro`). These rules live in `nn.css`, under `body.clean #nn`.
+The lens bar hides; the attention panel and the Explain card stay without their chrome
+(docs/NN_LENS.md; rules in `lens.css`, `attnviz.css`, `tour.css`).
 `#nn-main` sits in grid row 2, so the stage keeps the full height when the toolbar is hidden.
 
 **Audience mirror**
@@ -469,30 +497,34 @@ settings and buttons (as `.nn-train.ro`). These rules live in `nn.css`, under `b
 nn.js publishes `window.mathboardNet = { store, ctx, audience, ready, mirrorState(), applyMirror(m),
 onMirror(fn) -> off }`. `ready` turns true, and `window` gets the `mathboard:nn-ready` event, once
 every module has installed.
-- `mirrorState()` -> `{ net, sel, hover, anim, split, matrixHidden, matrix, weights }`, where
+- `mirrorState()` -> `{ net, sel, hover, anim, split, matrixHidden, lens, viz, tour, matrix, weights }`, where
   `matrix` is a copy of `ctx.matrix.opt` (or null, `expand` included) and `weights` the W labels
   toggle. `hover` carries token hovers too, so the audience sees the token and attention row the
   presenter points at.
-- `onMirror(fn)` fires on the store's `net`, `layout`, `sel`, `hover` and `anim` events, when
+- `onMirror(fn)` fires on the store's `net`, `layout`, `sel`, `hover`, `anim`, `lens`, `viz` and `tour` events, when
   the split changes, and one frame after any click in the toolbar or the matrix panel or a key
   up in the tab (the matrix toggles and W have no store event).
 - `applyMirror(m)` does nothing outside an audience window. It loads `m.net` with
   `{ history: false }` when its JSON changed, copies `m.matrix` into `ctx.matrix.opt` and
-  re-renders the panel when a toggle differs, sets W, sets `sel` / `hover` / `anim` when they
-  differ, and applies the split.
+  re-renders the panel when a toggle differs, sets W, sets `sel` / `hover` / `anim` / `lens` /
+  `viz` / `tour` when they differ, and applies the split.
 - `graph/features/lecture.js` carries it over its BroadcastChannel. The presenter posts
   `{ nn: mirrorState() }` at most once per frame, leaving out `net` when it hasn't changed, and
   also sends a full snapshot (including `view` and the net) every second. The audience switches
   to the Net tab when the presenter's `view` is `nn` (anything else shows the 3D view) and passes
   `nn` to `applyMirror`, buffering it until the Net tab is ready.
 - Only that state is mirrored. Each window keeps its own pan / zoom (the audience view refits
-  when the net leaves the frame), pinned cards and Train panel layout (the audience always shows
-  the Train panel, read-only).
+  when the net leaves the frame) and pinned cards. Panel layout goes through localStorage
+  instead (both windows share an origin): the audience's read-only Train panel follows the
+  presenter's `open` and `fold` from `mathboard.nn.train` (its spot stays the default), and its
+  attention panel the presenter's spot, width and mode from `mathboard.nn.attnviz`, both through
+  `storage` events.
 
 **Persistence and test preload**
 - localStorage `mathboard.nn` = `{ v: 1, net, split, matrixHidden }`, owned by the shell, written
   500 ms after a `net` or `layout` event and on `pagehide`. `mathboard.nn.train` belongs to
-  train.js (see `meta.train`).
+  train.js (see `meta.train`), `mathboard.nn.lens` to lens.js and `mathboard.nn.attnviz` to
+  attnviz.js (docs/NN_LENS.md).
 - `index.html#nn=<preset key>`, `#nn=<base64url JSON>` or `#nn=<URI-encoded JSON>` opens the Net
   tab with that net (presets built with seed 1) and never saves. Use this for Playwright tests.
 - Audience windows (`?audience`) never save.

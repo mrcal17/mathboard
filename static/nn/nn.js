@@ -1,7 +1,7 @@
 // Net tab shell (see docs/NN_CONTRACT.md): layout with a resizable matrix panel, the toolbar,
-// the shell's keys, persistence and module loading. view, inspector, matrix and train each
-// export install(ctx); they are imported in parallel and installed in that order, and a missing
-// or broken one is logged and skipped.
+// the shell's keys, persistence and module loading. view, inspector, matrix, train, lens, attnviz
+// and tour each export install(ctx); they are imported in parallel and installed in that order,
+// and a missing or broken one is logged and skipped.
 //
 // Persistence: localStorage 'mathboard.nn' = { v: 1, net, split, matrixHidden }.
 // Test hook: index.html#nn=<preset key> | #nn=<base64url JSON> | #nn=<URI-encoded JSON> opens the
@@ -9,7 +9,7 @@
 // Audience windows (?audience) are read-only mirrors. graph/features/lecture.js carries the
 // presenter's state over its BroadcastChannel using window.mathboardNet (see the end of start()).
 
-const MODULES = ['view', 'inspector', 'matrix', 'train'];
+const MODULES = ['view', 'inspector', 'matrix', 'train', 'lens', 'attnviz', 'tour'];
 const STORE_KEY = 'mathboard.nn';
 const DEFAULT_PRESET = 'xor';
 const PRESET_SEED = 1;                     // presets always build the same weights; Randomize reshuffles
@@ -491,6 +491,18 @@ async function start({ model, createStore }) {
       ${row('<kbd>B</kbd>', 'bias trick: fold b into W')}
       ${row('<kbd>Space</kbd> <kbd>T</kbd>', 'play / pause training, one training step')}
       ${row('<kbd>Alt+1</kbd> <kbd>2</kbd> <kbd>3</kbd>', 'Board / 3D / Net tab')}
+      ${row('<kbd>?</kbd>', 'this cheat sheet')}
+    </table>
+    <h4>Lens, Attention, Explain</h4>
+    <table>
+      ${row('<kbd>1</kbd>&hellip;<kbd>9</kbd> <kbd>0</kbd>', 'follow token n (token nets); 0 stops following')}
+      ${row('<kbd>[</kbd> <kbd>]</kbd>', 'focus the previous / next stage')}
+      ${row('<kbd>L</kbd>', 'show / hide the lens bar')}
+      ${row('<kbd>A</kbd>', 'open / close the Attention panel')}
+      ${row('<kbd>M</kbd> <kbd>Shift+M</kbd>', 'next / previous Attention view: arcs, dots, mix, heat')}
+      ${row('<kbd>E</kbd>', 'start / end Explain, the step-by-step walkthrough')}
+      ${row('<kbd>&rarr;</kbd> <kbd>&larr;</kbd>', 'Explain: next / previous step (also <kbd>PageDown</kbd> <kbd>PageUp</kbd>)')}
+      ${row('<kbd>Esc</kbd>', 'end Explain (before anything else)')}
     </table>
     <h4>Toolbar</h4>
     <table>
@@ -500,6 +512,11 @@ async function start({ model, createStore }) {
       ${row('Randomize', 'new weights: He for ReLU nets, Xavier otherwise; Shift+click for small ones')}
       ${row('Export, Import', 'the net as a .json file')}
       ${row('PNG, To board', 'download a picture, or put it on the current board page')}
+      ${row('Lens', 'focus one stage, follow a token or a head, hide weak edges; the rest dims')}
+      ${row('Attention', 'one attention layer as arcs, dot products, the weighted sum or heatmaps')}
+      ${row('Explain', 'a guided walkthrough of this net, one caption per step; it sets the lens and panels as it goes')}
+      ${row('Weights', 'numbers on the edges (W)')}
+      ${row('Train', 'the Train panel: datasets, training and plots')}
       ${row('Audience', 'a window without UI that mirrors this one live, for the projector')}
     </table>
     <h4>Mouse</h4>
@@ -640,7 +657,7 @@ async function start({ model, createStore }) {
   // The matrix panel's toggles (ctx.matrix.opt) and the view's weight labels are UI state with no
   // store event: a click in the toolbars or the matrix panel, or a key, re-posts after it has run.
   function mirrorChanged() { for (const fn of mirrorFns) safe(fn); }
-  for (const evt of ['net', 'layout', 'sel', 'hover', 'anim']) store.on(evt, mirrorChanged);
+  for (const evt of ['net', 'layout', 'sel', 'hover', 'anim', 'lens', 'viz', 'tour']) store.on(evt, mirrorChanged);
   if (!audience) {
     const later = () => { if (mirrorFns.size) requestAnimationFrame(mirrorChanged); };
     el.bar.addEventListener('click', later);
@@ -653,6 +670,7 @@ async function start({ model, createStore }) {
     store, ctx, audience, ready: false,
     mirrorState: () => ({
       net: store.net, sel: store.state.sel, hover: store.state.hover, anim: store.state.anim, split, matrixHidden,
+      lens: store.state.lens, viz: store.state.viz, tour: store.state.tour,
       matrix: ctx.matrix?.opt ? { ...ctx.matrix.opt } : null, weights: !!ctx.view?.weights,
     }),
     applyMirror(m) {
@@ -670,7 +688,7 @@ async function start({ model, createStore }) {
         safe(() => ctx.matrix.render?.());
       }
       if ('weights' in m && ctx.view && ctx.view.weights !== !!m.weights) ctx.view.weights = !!m.weights;
-      for (const k of ['sel', 'hover', 'anim']) if (k in m && !same(m[k], store.state[k])) store.set(k, m[k] ?? null);
+      for (const k of ['sel', 'hover', 'anim', 'lens', 'viz', 'tour']) if (k in m && !same(m[k], store.state[k])) store.set(k, m[k] ?? null);
       if (Number.isFinite(m.split)) setSplit(m.split, !!m.matrixHidden);
     },
     onMirror(fn) { mirrorFns.add(fn); return () => mirrorFns.delete(fn); },

@@ -11,7 +11,9 @@ model reads the handwriting on your own GPU through [Ollama](https://ollama.com/
 you write is sent to a cloud service. Two more tabs cover what is slow to draw by hand: a 3D
 linear-algebra grapher you drive by typing expressions, and a neural network you can edit, read
 as matrix products and train live, from a single neuron up to a one-block transformer with
-self-attention. It's a local web app with a standard-library Python server and plain JavaScript.
+self-attention. On the network, a lens picks out one stage, token or head and dims the rest, an
+Attention panel draws an attention layer four ways, and Explain walks through the net step by step
+with captions. It's a local web app with a standard-library Python server and plain JavaScript.
 There is no build step and nothing to `npm install`.
 
 - [Tour](#tour)
@@ -80,7 +82,7 @@ The left image above is `transform(A, t)` with `eigen(A)`; the right one is
 An editable network for teaching. The canvas on the left and the matrix panel on the right show
 the same numbers: each layer is written out as `z = W a + b`, and hovering a weight anywhere
 lights it everywhere. Click a neuron, edge or layer for a card with its arithmetic and its
-gradients. The Train panel fits the net to a toy dataset while you watch. The 41 presets run
+gradients. The Train panel fits the net to a toy dataset while you watch. The 43 presets run
 from logic gates and MLPs to convolutions, an unrolled RNN and attention.
 
 ![Training a 2-6-4-1 ReLU network on the circles dataset: the decision region forms, the edges change colour and the matrices update](docs/media/net-train.gif)
@@ -98,6 +100,29 @@ Step-through goes one token at a time: the scores, the softmax, then the weighte
 token lights it on the canvas, in the matrix panel and in the cards. Above is the transformer
 block after training on "ReLU(own + max token)": both tokens attend to token 1, the one with the
 larger x₁.
+
+#### Lens, Attention panel and Explain
+
+<p>
+<img src="docs/media/net-lens.png" width="49%" alt="Net tab: the lens following token 2 of the trained transformer block. The canvas dims everything but token 2's rows and the key and value it attends to; the matrix panel outlines its row in every matrix, and the trace card at the top shows that row from X to the output">
+<img src="docs/media/net-attention.png" width="49%" alt="The Attention panel in Mix mode on the words preset (the, cat, sat): the three value vectors, their shaded hull, and z for sat as 0.05 v_the + 0.89 v_cat + 0.05 v_sat, drawn tip-to-tail beside the canvas">
+</p>
+
+The **Lens** bar (L) focuses one stage, follows a token or keeps one head, and dims the rest of
+the canvas, the matrix panel and the cards; it can also hide edges by type or below a threshold.
+Following a token (keys 1–9) outlines its row in every matrix and opens a card that traces the
+row through the block. The **Attention** panel (A) draws one attention layer as arcs from queries
+to keys, as the dot products q·k in the plane with a scale slider, as the weighted sum of the
+values, or as heatmaps of S and A. It also renames the tokens and can send the weighted sum to
+the 3D tab. On the left, the trained transformer block follows token 2, which puts nearly all of
+its attention on token 1. On the right is the hand-set `words` preset, where "sat" takes 0.89 of
+its output from the value of "cat".
+
+![Explain stepping through the words preset: the tokens, Q, K and V, the scores, the softmax, the weighted sum, then one token followed. The Train panel folds while it runs, each step moves the lens and opens the matching Attention view, and the caption quotes the numbers](docs/media/net-explain.gif)
+
+**Explain** (E) walks through the current net one caption per step, moving the lens and, on a net
+with attention, opening the matching Attention view as it goes. The captions quote the live
+numbers, so they keep up with training. ← → step through it and Esc ends it.
 
 ## Quick start
 
@@ -208,8 +233,15 @@ all three.
 | B | Bias trick `[W \| b]` |
 | W | Weight labels |
 | F | Fit the net |
+| 1–9 / 0 | Follow token n / stop following |
+| [ / ] | Focus the previous / next stage |
+| L | Lens bar |
+| A | Attention panel |
+| M / Shift+M | Next / previous Attention view |
+| E | Explain |
+| ← → | Explain steps (also PageUp / PageDown) |
 | Delete | Remove the selection |
-| Esc | Close the cheat sheet, else deselect |
+| Esc | End Explain, else close the cheat sheet, else deselect |
 | ? | Cheat sheet |
 | Ctrl+Z / Ctrl+Y | Undo / redo |
 
@@ -378,14 +410,20 @@ the right edge, to hide the panel; double-click again to bring it back. The firs
 | **Export**, **Import** | The net as a `.json` file, training settings included. Import repairs what it can and is undoable |
 | **PNG**, **To board** | Download a picture of the network, or drop it on the current board page (like the 3D tab's To board) |
 | **Weights** | Numbers on the edges (W) |
+| **Lens** | Shows or hides the [lens bar](#lens) (L). A dot on the button means the lens is dimming or hiding something |
 | **Train** | Shows or hides the [Train panel](#train-panel) (open by default) |
+| **Attention** | Opens or closes the [Attention panel](#attention-panel) (A) |
+| **Explain** | Starts or ends [Explain](#explain), the guided walkthrough (E) |
 | **Audience** | Opens the audience window, the same one as the 3D tab's |
 | **?** | Cheat sheet: keys, tools and mouse gestures |
 
 **Keys** (ignored while typing): Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z) undo / redo, Delete (or
-Backspace) removes the selected neuron, edge or layer, Esc closes the cheat sheet or deselects,
-F fits, H hides the UI, ? cheat sheet, W weight labels, S / Shift+S matrix step-through, B bias
-trick, Space play / pause training, T one training step.
+Backspace) removes the selected neuron, edge or layer, Esc ends Explain, else closes the cheat
+sheet or deselects, F fits, H hides the UI, ? cheat sheet, W weight labels, S / Shift+S matrix
+step-through, B bias trick, Space play / pause training, T one training step. 1–9 follow token n
+(on nets with tokens) and 0 stops, [ / ] focus the previous / next stage, L shows or hides the
+lens bar, A opens or closes the Attention panel, M / Shift+M switch its view, and E starts or ends
+Explain; while Explain runs, ← / → (or PageUp / PageDown) step through it.
 
 - **Building from Blank:** Blank is an empty input and output layer. Double-click empty space to
   add a neuron to the nearest layer. It is wired to every neuron of the neighbouring layers with
@@ -403,8 +441,11 @@ trick, Space play / pause training, T one training step.
   whole column). Positions are only the picture: moving never changes a neuron's row in `W`.
 - **Pan / zoom:** drag empty space or middle-drag anywhere; mouse wheel to zoom (Ctrl+wheel is
   faster). Text grows as you zoom out so the numbers stay legible on a projector. F (or **Fit**)
-  frames the net beside the Train panel; opening, folding or closing that panel refits by itself
-  unless you have panned or zoomed.
+  fits the net, as large as it will go, into a free area beside the Train and Attention panels,
+  wherever they are, and above the lens bar (if no free area is at least 160 px each way, it
+  ignores the panels). Opening, folding, moving, resizing or closing a panel or the lens bar
+  refits by itself unless you have panned or zoomed. Explain folds an open Train panel while it runs and
+  unfolds it at the end.
 - **Click** a neuron, edge or layer header to open its card; click empty space to deselect.
 - **Colours:** blue is positive, orange negative, stronger means larger. A neuron's fill and the
   number under it are its activation (the input value on the input layer); an edge's colour and
@@ -515,9 +556,9 @@ The Attention presets add three things to the plain `z = W a + b` layers. The fu
 [docs/NN_ATTENTION.md](docs/NN_ATTENTION.md).
 
 - **Token layers** hold `tokens` rows of `d` features, optionally split into named groups such as
-  Q, K and V. The canvas boxes each token (t₁, t₂, …) inside a band per group, and the 3-token
-  presets draw their input and Q, K, V layers as grids, a row per token and a column per feature.
-  The matrix panel shows these layers as tokens × d matrices.
+  Q, K and V. The canvas boxes each token (t₁, t₂, …, or its [name](#attention-panel)) inside a
+  band per group, and the 3-token presets draw their input and Q, K, V layers as grids, a row per
+  token and a column per feature. The matrix panel shows these layers as tokens × d matrices.
 - **Shared (tied) weights** are one parameter used by several edges, such as `W_Q(1,2)` once per
   token. Hovering or selecting one lights the whole group, its card's slider moves all of them,
   and its gradient is the sum of the per-token terms, which is the step training takes. A tied
@@ -545,9 +586,108 @@ The Attention presets add three things to the plain `z = W a + b` layers. The fu
 
 </details>
 
+<a name="lens"></a>
+<details>
+<summary>Lens</summary>
+
+The lens bar sits at the bottom left of the canvas; **Lens** or L shows or hides it. The lens sets
+what the canvas, the matrix panel and the cards light up; the rest is dimmed (drawn faint,
+without numbers). The bar only offers the controls that apply to the current net. The rules are
+in `static/nn/focus.js`.
+
+- **Focus:** pick a stage, which is a layer, one group of the Q, K, V layer, or one of an
+  attention layer's three parts (1 scores, 2 softmax, 3 mix). The layer, the layers feeding it directly and the
+  edges into it stay lit. Scores and softmax light Q, K and the attention layer; mix lights V,
+  the attention edges and Z. [ / ] step through the stages in order: every layer after the input,
+  with an attention layer split into its three parts. The matrix panel folds every other layer to
+  a one-line summary and scrolls to the focused one.
+- **Token** (nets with tokens): follow token n, or **all** (keys 1–9 and 0). Its row stays lit in
+  every token layer, and so do the attention edges into it; each key and value token stays lit by
+  how much token n attends to it (A_nj). The matrix panel dims the other rows, outlines row n and
+  opens a trace card at its top: that token's row through every token layer, live, from X through
+  Q, K, V and its rows of S and A to Z and the output. Click a line of the card to go to that
+  matrix.
+- **Head** (nets with two or more heads): keep head h, its columns of Q, K, V and Z and its
+  attention edges. The matrix panel hides the other heads.
+- **Edges:** show or hide each kind of edge (W, A for attention, fixed for the dashed residual and
+  pooling edges) when the net has more than one kind, and hide weight edges with |w| below a
+  threshold (fixed edges stay) or attention edges with A_ij below one. The canvas stops drawing
+  what these remove. The matrix panel dims the cells below a threshold and ignores the show / hide
+  toggles.
+- Focus, token and head combine: what stays lit is what all of them light. A plain net gets only
+  Focus and Edges. Hover, the selection and the step-through still light what they point at.
+- **Clear** goes back to the whole net. A dot on the **Lens** button shows that the lens is doing
+  something, even while the bar is hidden (by L or H); the keys then say what they did in a toast.
+- A new net (a preset or an import) starts with a clear lens. After other edits, whatever no
+  longer fits (a focus on a deleted layer, a token the net no longer has) is reset. The lens
+  itself isn't saved.
+
+</details>
+
+<a name="attention-panel"></a>
+<details>
+<summary>Attention panel</summary>
+
+**Attention** (A) opens a floating panel on one attention layer, drawn from the current forward
+pass. Drag it by its title bar, double-click the title bar to put it back, drag its bottom-right
+corner to change its width, and × closes it. With two or more attention layers, a menu in its
+header picks one; on a net without attention, A just says so. The buttons in the header (or
+M / Shift+M) switch between four views, and M on a closed panel opens it in the view you used
+last:
+
+| View | Shows |
+|---|---|
+| **Arcs** | Who reads whom: queries on the left, keys on the right and a line per pair as thick as A_ij, one colour per head (with more than three heads, one head at a time). Masked pairs have no line. Hover a token to see only its lines, with their numbers |
+| **Dots** | Why: the query q_i and the keys k_j as arrows (on a number line when d_h = 1; for d_h > 2 you pick the two dimensions to draw), each key's shadow on q's line, and per key q·k, the score s and a softmax bar. The **scale** slider changes the layer's scale, 1/√d_k by default, up to 16× either way: larger sharpens A and smaller flattens it, so it acts as an inverse softmax temperature. A drag is one undo step, and **1/√d** puts it back |
+| **Mix** | What comes out: z_i = Σ_j A_ij v_j drawn tip-to-tail from the scaled values, inside the shaded convex hull of the v_j (A's row sums to 1). **Send to 3D** writes the same construction into the 3D tab: the v_j, a slider per A_ij, the A_ij v_j chained with `@`, and z_i, then switches to that tab. Sending again replaces those rows |
+| **Heat** | S and A per head as heatmaps with their numbers. Masked cells are hatched and the followed token's row is ringed; hover a cell for what it means |
+
+- **Query and head:** the chips above the drawing are the lens's token and head, so picking a
+  query here follows that token on the canvas and in the matrix panel too (and 1–9 pick it here).
+  Dots and Mix need one query: with none followed they show the one that attends most
+  decisively, on a dashed chip, and head 1. Clicking a token in the drawing, or a heatmap cell for
+  its row, follows it; clicking again stops.
+- Arcs follows the lens: what the lens dims is faint and what it hides is not drawn.
+- **Token names:** click the followed token's chip again, or double-click any token chip, and type
+  a name (up to 16 characters; an empty name goes back to t_i). The name replaces t_i on the
+  canvas, in the matrix panel, the cards, the Train plot, the lens bar and the Explain captions.
+  It is saved in the net (`net.meta.tokenNames`), so export and undo keep it.
+- A caption under each view gives its formula, with the numbers of the query shown where there is
+  one.
+
+</details>
+
+<a name="explain"></a>
+<details>
+<summary>Explain</summary>
+
+![Explain on the words preset, last step: the caption follows cat, the Attention panel shows its arcs and the matrix panel steps through z₂ = Σ A₂ⱼ vⱼ](docs/media/net-explain.png)
+
+**Explain** (E) walks through the current net one step at a time, with a caption card along the
+top or bottom edge of the canvas, wherever it covers the least. → or PageDown goes on, ← or
+PageUp goes back, and Esc or E ends it; the card's ←, → and × buttons do the same, and on the last
+step → reads **Done**. Each step sets the lens, the Attention panel and the step-through to show
+what its caption says, and the end puts all three back as they were.
+
+- **Steps** come from the net's structure. A net with attention gets the transformer story: the
+  tokens as the rows of X, then Q, K and V, the scores (in Dots), the softmax (in Heat) and the
+  weighted sum (in Mix), for a multi-head layer each other head and then the heads side by side,
+  a step per later layer (residual, FFN, output), and last one token followed through the block
+  (in Arcs, with the step-through on its weighted sum). A plain net gets `z = W a + b` layer by
+  layer, one row worked out with its numbers, and then either how linear layers collapse into one
+  matrix (Collapse turns on for that step) or why the activations matter.
+- **Captions** quote the current forward pass and are read again as the numbers change, so they
+  keep up with a net that is training. They use the token names.
+- While it runs, an open Train panel is folded to its header so the net has room beside the
+  Attention panel. Explain fits the net when it starts and unfolds the Train panel at the end.
+- Adding or removing a neuron, edge or layer, or loading another net, ends it. Changing the heads,
+  the causal mask or an activation rebuilds the steps and keeps the step number.
+
+</details>
+
 <a name="presets"></a>
 <details>
-<summary>Presets (41, in 8 groups)</summary>
+<summary>Presets (43, in 8 groups)</summary>
 
 **Basics**
 
@@ -610,8 +750,10 @@ The Attention presets add three things to the plain `z = W a + b` layers. The fu
 
 | Preset | Net | Dataset | What to notice |
 |---|---|---|---|
+| Word attention: the cat sat (hand-set) (`words`) | 3×3 → 3×2 Q, K, V → 3×2 attention | none | Hand-set. Words come in one-hot (det, noun, verb). W_Q asks and W_K answers: sat's query points at the noun cat, cat's at the determiner the. The asks nothing (q = 0), so its row of A is even. |
 | Self-attention (3 tokens × 2) (`attention`) | 3×2 → 3×2 Q, K, V → 3×2 attention | Copy the max token (3 tokens × 2) | Q = XW_Q, K = XW_K, V = XW_V, each one tied 2×2 matrix shared by all 3 tokens. Z = softmax(QKᵀ/√2)V; row i of A is where token i looks. Train: every token learns to look at the largest x₁. |
 | Causal attention: the previous token (`causal`) | 3×3 → 3×2 Q, K, V → 3×2 causal attention → 3×1 | Previous token, causal (3 tokens, c + position) | The mask sets S_ij = −∞ for j > i, so token i reads only tokens up to i. Positions come in as (cos θ, sin θ); to copy the previous token, W_Q W_Kᵀ has to learn a rotation by one position. |
+| Previous token by rotation (hand-set) (`causal_rot`) | 3×3 → 3×2 Q, K, V → 3×2 causal attention → 3×1 | Previous token, causal (3 tokens, c + position) | Hand-set causal attention. Positions come in as (cos θ, sin θ) and W_Q turns them back by 120°, so q_i points at k_(i−1) and token i copies c_(i−1). The loss starts near 0. |
 | Two heads: max and min (`multihead`) | 3×2 → 3×2 Q, K, V → 3×2 attention, 2 heads | Max and min of x₁ (3 tokens × 2) | heads = 2 splits Q, K and V by column: head 1 uses column 1 of each, head 2 column 2, and each head has its own A. Train: one head learns to find the largest x₁, the other the smallest. |
 | Transformer block (2 tokens) (`transformer`) | 2×2 → 2×2 Q, K, V → 2×2 attention → 2×2 → 2×4 ReLU → 2×2 | ReLU(own + max token) (2 tokens × 2) | One block, all weights tied: Z = softmax(QKᵀ/√2)V, H = X + ZW_O, Y = H + ReLU(HW₁)W₂, the + X and + H being fixed residual edges. No LayerNorm: with d = 2 it sends every token to (±1, ∓1). |
 
@@ -642,19 +784,26 @@ that fits its shape, or offers **Adapt network**. In the Net column, `3×2` is a
 <details>
 <summary>Saving, audience window and H</summary>
 
-- **Saving:** the net (training settings included), the panel width and whether the matrix panel
-  is hidden autosave to local storage (`mathboard.nn`; the Train panel's open, folded and position
-  state is in `mathboard.nn.train`), and the app reopens on the tab you left.
+- **Saving:** the net (training settings and token names included), the panel width and whether
+  the matrix panel is hidden autosave to local storage (`mathboard.nn`), and the app reopens on
+  the tab you left. The panels keep their own UI state: the Train panel's open, folded and
+  position state is in `mathboard.nn.train`, whether the lens bar is shown in `mathboard.nn.lens`
+  (`{ open }`), and the Attention panel's position, width and last view in `mathboard.nn.attnviz`
+  (`{ x, y, w, mode }`). The lens settings and whether the Attention panel is open are not saved.
 - **Audience window:** opened from the Net or the 3D toolbar, it follows you into the Net tab and
   mirrors the net (training included), the selection and its card, hover, the step-through, W
-  labels, the matrix toggles and the matrix panel width live. It fits the net to its own size.
-  The Train panel shows read-only and follows yours open or folded; its position and pinned cards
-  are not mirrored. It never saves. While you are on the board it shows the 3D view.
+  labels, the matrix toggles, the matrix panel width, the lens, the Attention panel and Explain
+  live. It fits the net to its own size. The Train panel shows read-only and follows yours open or
+  folded; its position and pinned cards are not mirrored. The lens bar isn't shown, but the
+  canvas, the matrix panel and the cards show what the lens does. The Attention panel shows
+  read-only in your view, at your panel's position and width, and the Explain card shows without
+  its buttons. It never saves. While you are on the board it shows the 3D view.
 - **H** shows your window the way the audience sees it: the tab bar, the toolbar, the cheat sheet,
-  the matrix toolbar, the → 3D buttons and the connect dots go, and the divider is locked; cards
-  stay up without their pin, close and "+ add" buttons (they still work), and the Train panel
-  keeps its readout, chart and plot but hides its settings and buttons. Press H again (or
-  Alt+1/2/3) to get around.
+  the matrix toolbar, the → 3D buttons, the connect dots and the lens bar go, and the divider is
+  locked; cards stay up without their pin, close and "+ add" buttons (they still work), and the
+  Train panel keeps its readout, chart and plot but hides its settings and buttons. The Attention
+  panel hides its close, resize, Send to 3D and scale reset, and the Explain card its buttons
+  (the keys still work). Press H again (or Alt+1/2/3) to get around.
 - **Links for testing:** `index.html#nn=xor` (or another preset key, such as `mlp` or `deep`) or
   `#nn=<base64url JSON>` opens the Net tab with that net. The net and the last tab aren't saved from such a link. `#graph=` wins if both are given.
 
@@ -686,10 +835,17 @@ doesn't take the others down. See [docs/FEATURE_GUIDE.md](docs/FEATURE_GUIDE.md)
 holds the pure maths, edits, presets and datasets, and `store.js` the shared state, undo, events
 and colours. `nn.js` is the shell (layout, toolbar, keys, persistence, module loading, and the
 mirror API that `graph/features/lecture.js` carries to the audience window). It loads `view.js`
-(the canvas), `inspector.js` (the cards), `matrix.js` (the matrix panel and step-through) and
-`train.js` (datasets, training and plots), each with its own CSS and isolated so a broken one
-doesn't take the others down. Token layers, shared weights and attention are specified in
-[docs/NN_ATTENTION.md](docs/NN_ATTENTION.md).
+(the canvas), `inspector.js` (the cards), `matrix.js` (the matrix panel and step-through),
+`train.js` (datasets, training and plots), `lens.js` (the lens bar), `attnviz.js` (the Attention
+panel) and `tour.js` (Explain), each with its own CSS and isolated so a broken one doesn't take
+the others down. `focus.js` holds the lens's rules as pure functions (how strongly each neuron,
+edge and attention edge belongs to the lens, and what it hides), so the canvas, the matrix panel,
+the cards and the Attention panel agree on what to dim. Explain's steps are built from the
+net's structure by a pure function in `tour.js`. Each step sets the lens, the Attention panel, the
+step-through and the caption in the shared state, which the audience window mirrors. Token
+layers, shared weights and attention are specified in
+[docs/NN_ATTENTION.md](docs/NN_ATTENTION.md); the lens, the Attention panel, Explain and token
+names in [docs/NN_LENS.md](docs/NN_LENS.md).
 
 ## Project layout
 
@@ -701,13 +857,15 @@ static/
   app.js, style.css    the board
   graph/               3D tab: lang.js, linalg.js, scene.js, grapher.js
     features/          transform, fields, combos, systems, dual, lecture, present, bridge, drag
-  nn/                  Net tab: model.js, store.js, nn.js, view.js, inspector.js, matrix.js, train.js
+  nn/                  Net tab: model.js, store.js, nn.js, view.js, inspector.js, matrix.js, train.js,
+                       lens.js, focus.js, attnviz.js, tour.js
   vendor/              KaTeX 0.16.47 and three.js r186, with their licenses
 tests/                 node:test suites, plus draw_test.js (see Testing)
 docs/
   FEATURE_GUIDE.md     how 3D feature modules plug in, and the browser test recipe
   NN_CONTRACT.md       interfaces between the Net tab modules
   NN_ATTENTION.md      tokens, shared weights and attention in the Net tab
+  NN_LENS.md           the lens, the Attention panel, Explain and token names
   media/               the images in this README
 ```
 
@@ -717,9 +875,11 @@ docs/
 npm test               # same as: node --test "tests/*.test.mjs"
 ```
 
-The suites cover the 3D language and numeric core, the pure logic of each 3D feature module, and
-the Net tab's model (maths, edits, presets and datasets). They need Node 22 or newer and nothing
-else. GitHub Actions runs them on every push and pull request, along with
+The suites cover the 3D language and numeric core, the pure logic of each 3D feature module, the
+Net tab's model (maths, edits, presets and datasets), and in `tests/nn_focus.test.mjs` the lens
+rules (focus, token, head, the edge toggles and thresholds, cleaning and stage order) and the
+token-name rule, which Explain's captions are checked against too. They need Node 22 or newer and
+nothing else. GitHub Actions runs them on every push and pull request, along with
 `python -m py_compile server.py`.
 
 For checks in a real browser, [docs/FEATURE_GUIDE.md](docs/FEATURE_GUIDE.md) has a Python

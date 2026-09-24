@@ -1,0 +1,140 @@
+/* Attention panel (static/nn/attnviz.js): floats over #nn-stage like the Train panel. */
+
+.nn-attnviz {
+  --na-h0: #b794ff;   /* head 1: the canvas's attention purple (view.css --nnv-att) */
+  --na-h1: #199e70;
+  --na-h2: #c98500;
+  --na-hi: #ffd54a;   /* HI: the followed query */
+  position: absolute; z-index: 6; top: 10px; left: 10px;
+  width: 400px; max-width: calc(100% - 20px); max-height: calc(100% - 20px);
+  display: flex; flex-direction: column;
+  /* the UI tint over the page colour: opaque, so the canvas never shows through the drawings */
+  background: linear-gradient(var(--ui-bg), var(--ui-bg)), var(--bg); color: var(--ui-fg);
+  border: 1px solid var(--ui-line); border-radius: 12px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.25);
+  font-size: 12px; line-height: 1.3;
+}
+[data-theme="light"] .nn-attnviz { --na-h0: #7442d6; --na-h1: #1baf7a; --na-h2: #eda100; --na-hi: #e8a800; }
+.nn-attnviz[hidden] { display: none; }
+
+.na-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 4px 4px 10px; cursor: move; touch-action: none;
+  border-bottom: 1px solid var(--ui-line);
+}
+.na-title { font-size: 13px; }
+.na-flex { flex: 1; }
+.na-modes { display: flex; border: 1px solid var(--ui-line); border-radius: 7px; overflow: hidden; }
+.na-modes button { border: 0; border-radius: 0; padding: 3px 9px; font-size: 12px; }
+.na-modes button + button { border-left: 1px solid var(--ui-line); }
+.na-modes button.on { background: var(--accent); color: #fff; }
+.na-head select, .na-ctl select {
+  font: inherit; color: var(--ui-fg); max-width: 120px;
+  background: rgba(127, 127, 127, 0.12); border: 1px solid var(--ui-line); border-radius: 6px; padding: 2px 4px;
+}
+.na-head select option, .na-ctl select option { background: var(--ui-bg); color: var(--ui-fg); }
+.na-head select[hidden] { display: none; }
+.na-close { padding: 1px 8px; font-size: 15px; line-height: 1; }
+
+/* query and head chips: pick (sets lens.token / lens.head); the followed token's chip renames */
+.na-picks { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 6px 10px 2px; }
+.na-picks:empty { display: none; }
+.na-lab { color: var(--ui-muted); margin-right: 2px; }
+.na-lab2 { margin-left: 8px; }
+.na-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px; border-radius: 999px; font-size: 12px;
+  border: 1px solid var(--ui-line); background: rgba(127, 127, 127, 0.08); color: var(--ui-fg);
+}
+.na-chip.on { border-color: var(--na-hi); box-shadow: inset 0 0 0 1px var(--na-hi); font-weight: 600; }
+.na-chip.auto { border-style: dashed; border-color: var(--ui-muted); }
+.na-chip:disabled { opacity: 1; cursor: default; }
+.na-sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; }
+.na-name {
+  font: inherit; font-size: 12px; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--accent); background: var(--ui-bg); color: var(--ui-fg); outline: none;
+}
+
+.na-stage { position: relative; padding: 4px 10px 0; overflow-y: auto; overflow-x: hidden; min-height: 0; flex: 0 1 auto; scrollbar-gutter: stable; }
+.na-svg { display: block; width: 100%; overflow: hidden; }
+.na-msg { color: var(--ui-muted); font-style: italic; padding: 10px 2px 12px; }
+.na-msg[hidden] { display: none; }
+
+.na-ctl { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 4px 10px 0; }
+.na-ctl:empty { display: none; }
+.na-ctl label { display: flex; align-items: center; gap: 6px; color: var(--ui-muted); }
+.na-scale { flex: 1 1 220px; }
+.na-scale input[type="range"] { flex: 1; min-width: 90px; accent-color: var(--na-h0); }
+/* a fixed readout width ("11.31 = 16.00 × 1/√2" at most), so the track keeps its length under the pointer */
+.na-scale output { flex: none; min-width: 20ch; color: var(--ui-fg); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.na-ctl button { padding: 2px 9px; border: 1px solid var(--ui-line); }
+.na-ctl button:disabled { opacity: 0.45; cursor: default; }
+.na-send { border-color: var(--accent) !important; }
+.na-info { flex: 1 1 100%; color: var(--ui-muted); font-style: italic; min-height: 15px; }
+.na-cap { padding: 4px 10px 9px; font-size: 14px; overflow-x: auto; overflow-y: hidden; }
+.na-cap .katex { font-size: 1.02em; }
+.na-note { color: var(--ui-muted); font-style: italic; font-size: 12px; }
+.na-grip {
+  position: absolute; right: 1px; bottom: 1px; width: 14px; height: 14px; cursor: nwse-resize; touch-action: none;
+  background: linear-gradient(135deg, transparent 50%, var(--ui-muted) 50%, var(--ui-muted) 58%, transparent 58%, transparent 70%, var(--ui-muted) 70%, var(--ui-muted) 78%, transparent 78%);
+  opacity: 0.55; border-bottom-right-radius: 11px;
+}
+
+/* ---------------------------------------------------------------- the drawings */
+.na-svg text { font: 12px system-ui, "Segoe UI", sans-serif; fill: var(--ui-fg); }
+.na-svg .na-tl {
+  font: italic 600 14px "KaTeX_Math", "Times New Roman", serif;
+  paint-order: stroke; stroke: var(--bg); stroke-width: 3px; stroke-linejoin: round;
+}
+.na-svg .na-sub { font: 500 10.5px system-ui, "Segoe UI", sans-serif; }
+.na-svg .na-colhd { fill: var(--ui-muted); font-size: 10.5px; letter-spacing: 0.04em; }
+.na-svg .na-leg, .na-svg .na-lane, .na-svg .na-chd { fill: var(--ui-muted); font-size: 11px; }
+.na-svg .na-tick { fill: var(--ui-muted); font-size: 9.5px; }
+.na-svg .na-axlab { fill: var(--ui-muted); font-size: 10px; font-style: italic; }
+.na-plotbg { fill: rgba(127, 127, 127, 0.045); stroke: var(--ui-line); }
+.na-grid { stroke: var(--ui-line); stroke-width: 1; }
+.na-axis { stroke: var(--ui-muted); stroke-opacity: 0.6; stroke-width: 1.2; }
+.na-qline { stroke: var(--na-hi); stroke-opacity: 0.55; stroke-width: 1.5; stroke-dasharray: 2 5; }
+.na-perp { stroke: var(--ui-muted); stroke-opacity: 0.8; stroke-width: 1; stroke-dasharray: 3 3; }
+
+.na-tok { cursor: pointer; }
+.na-tok rect { fill: rgba(127, 127, 127, 0.1); stroke: var(--ui-line); stroke-width: 1.2; }
+.na-tok text { font-weight: 600; font-size: 12.5px; }
+.na-tok.on rect { stroke: var(--na-hi); stroke-width: 2.4; }
+.na-tok.hot rect { stroke: var(--accent); stroke-width: 2; }
+.na-arc { stroke-linecap: round; }
+.na-svg .na-anum, .na-svg .na-wlab {
+  font-size: 11px; font-variant-numeric: tabular-nums;
+  paint-order: stroke; stroke: var(--bg); stroke-width: 3px; stroke-linejoin: round;
+}
+
+.na-rowbg { fill: transparent; }
+.na-krow:hover .na-rowbg { fill: rgba(127, 127, 127, 0.1); }
+.na-svg .na-kname { font-weight: 600; font-size: 12.5px; }
+.na-svg .na-num { font-variant-numeric: tabular-nums; }
+.na-svg .na-strong { font-weight: 600; }
+.na-svg .na-muted { fill: var(--ui-muted); }
+.na-bartrack { fill: rgba(127, 127, 127, 0.14); }
+
+.na-hull { fill-opacity: 0.1; stroke-opacity: 0.6; stroke-width: 1.2; stroke-dasharray: 4 4; }
+.na-hull2 { stroke-opacity: 0.25; stroke-width: 9; stroke-linecap: round; }
+.na-vtip { fill: var(--ui-muted); }
+
+.na-svg .na-mtitle { font-size: 12px; font-weight: 600; }
+.na-svg .na-rhd { cursor: pointer; }
+.na-svg .na-rhd.on { fill: var(--na-hi); font-weight: 700; }
+.na-cell text { font-variant-numeric: tabular-nums; }
+.na-cell.hot rect { stroke: var(--accent); stroke-width: 1.5; }
+.na-hatchline { stroke: var(--ui-muted); stroke-width: 1.3; stroke-opacity: 0.6; }
+.na-ring { fill: none; stroke: var(--na-hi); stroke-width: 2.5; }
+
+/* ---------------------------------------------------------------- audience mirror and clean view (H)
+   Read-only: what the presenter shows, without the chrome. The scale slider stays, disabled, so
+   the audience sees it move. */
+.nn-attnviz.ro .na-head, body.clean #nn .nn-attnviz .na-head { cursor: default; }
+.nn-attnviz.ro .na-close, .nn-attnviz.ro .na-grip, .nn-attnviz.ro .na-send, .nn-attnviz.ro .na-reset,
+body.clean #nn .nn-attnviz .na-close, body.clean #nn .nn-attnviz .na-grip,
+body.clean #nn .nn-attnviz .na-send, body.clean #nn .nn-attnviz .na-reset { display: none; }
+.nn-attnviz.ro .na-modes button:not(.on) { display: none; }
+.nn-attnviz.ro .na-modes { border: 0; }
+.nn-attnviz.ro .na-modes button.on { border-radius: 6px; }

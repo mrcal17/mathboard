@@ -15,6 +15,7 @@
 // tokens, heads, the causal mask, the scale and this sample's A per head.
 
 import { colorFor } from './store.js';
+import { emphasis, tokenNames } from './focus.js';
 
 const CARD_W = 322;
 const GAP = 16;        // px between a card and its target
@@ -123,6 +124,7 @@ const fitSpan = v => (Math.abs(v) <= SPAN ? SPAN : Math.ceil(Math.abs(v) * 1.25)
 const TEXT_ESC = { '\\': '\\textbackslash{}', '^': '\\textasciicircum{}', '~': '\\textasciitilde{}' };
 const texSafe = s => String(s).replace(/[\\{}$&#^_%~]/g, ch => TEXT_ESC[ch] || '\\' + ch);
 const same = (a, b) => !!a && !!b && a.kind === b.kind && a.id === b.id;
+const cap = s => (s ? s[0].toUpperCase() + s.slice(1) : s);
 const hoverKey = t => (!t ? ''
   : t.kind === 'pair' ? `pair:${t.from}>${t.to}`
   : t.kind === 'row' ? `row:${t.layer}:${t.i}`
@@ -233,6 +235,12 @@ export function install(ctx) {
   const matSym = L => (L === 0 ? 'X' : isAttn(L) ? 'Z' : L === lastIndex() ? '\\hat Y' : `H^{(${L})}`);
   const grpSym = (s, g) => (s.groups ? `{${s.groups[g]}}` : null);
 
+  // Token names (docs/NN_LENS.md): net.meta.tokenNames, one per token, replace t_1 ... t_n. Read
+  // live (in binds), since a name edit is not a structural change and cards are not rebuilt.
+  // focus.js's tokenNames is the rule: a slot holding its own default ('t2' for token 2) is unnamed.
+  const tokName = t => tokenNames(net())[t] ?? null;
+  const tokNameTex = t => (tokName(t) ? `\\text{${texSafe(tokName(t))}}` : null);
+  const tokWord = t => (tokName(t) ? `“${tokName(t)}”` : `token ${t + 1}`);   // plain text (tooltips)
   const headsOf = L => { const v = layerAt(L)?.heads; return Number.isInteger(v) && v > 0 ? v : 1; };
   const causalOf = L => !!layerAt(L)?.causal;
   // d_k per head, from the Q/K/V layer that feeds attention layer L.
@@ -365,7 +373,7 @@ export function install(ctx) {
   }
 
   function open(target, { pin = false } = {}) {
-    const c = { target, pinned: pin, dragged: false, x: 0, y: 0, binds: [], hov: [], akey: '', failed: false };
+    const c = { target, pinned: pin, dragged: false, x: 0, y: 0, binds: [], hov: [], dims: [], akey: '', failed: false };
     c.title = h('span', { class: 'nn-insp-title' });
     c.kind = h('span', { class: 'nn-insp-kind' });
     c.pinBtn = h('button', { class: 'nn-insp-btn nn-insp-pin', title: 'Pin: keep this card open (the next selection opens another)' }, pinIcon());
@@ -626,6 +634,7 @@ export function install(ctx) {
     if (hk && c.hov.some(el => el.dataset.hk === hk)) store.set('hover', null);
     c.binds = [];
     c.hov = [];
+    c.dims = [];
     c.failed = false;
     c.body.replaceChildren();
     c.el.dataset.kind = c.target.kind;
@@ -651,6 +660,7 @@ export function install(ctx) {
         c.failed = true;
       }
     }
+    paintLens(c);
   }
 
   function updateAll() {
@@ -690,6 +700,57 @@ export function install(ctx) {
       }
     }
   }
+
+  // ---------------------------------------------------------------- lens (docs/NN_LENS.md)
+  // What the lens de-emphasizes on the canvas fades in the cards too, weighed by focus.js's
+  // emphasis(): a weight row or used-by chip by its edge, a bias or input slider by its neuron, an
+  // attention bar or heatmap cell by its A_ij edge, a query header by the lens's token rows, a
+  // head's heatmap by the lens's heads. What the lens hides (edge types off, below a threshold)
+  // fades further. The card's own target never fades.
+  const DIM_MIN = 0.3, DIM_HID = 0.16;
+  const emphasisFn = emphasis;
+  let emWarned = false;
+  let emCache = null, emLens, emFwd, emNet = '';
+  function lensEm() {
+    const lens = store.state.lens, fwd = store.state.fwd;
+    if (!emphasisFn || !lens) return null;
+    const sig = `${net().layers.length}|${net().nodes.length}|${net().edges.length}`;
+    if (lens === emLens && fwd === emFwd && sig === emNet) return emCache;
+    emLens = lens; emFwd = fwd; emNet = sig;
+    try { emCache = emphasisFn(net(), fwd, lens) || null; } catch (err) {
+      emCache = null;
+      if (!emWarned) { emWarned = true; console.warn('[nn] inspector: lens emphasis failed:', err); }
+    }
+    return emCache;
+  }
+  // 0..1 emphasis, 'hid' (hidden by the lens) or null (no opinion: leave it as it is)
+  const edgeEm = (E, id) => (E.hidden?.edge?.(id) ? 'hid' : E.any ? E.edge?.(id) ?? null : null);
+  const nodeEm = (E, id) => (E.any ? E.node?.(id) ?? null : null);
+  const attnEm = (E, l, i, j, hd) => (E.hidden?.attn?.(l, i, j, hd) ? 'hid' : E.any ? E.attn?.(l, i, j, hd) ?? null : null);
+  const rowEm = (E, l, i) => { const r = E.rows?.(l); return r && !r.has(i) ? 0 : null; };
+  const headEm = (E, l, hd) => { const s = E.heads?.(l); return s && !s.has(hd) ? 0 : null; };
+  // el fades by fn(emphasis) while the lens is on
+  function dimBy(c, el, fn) { c.dims.push({ el, fn }); }
+  function applyDim(el, v) {
+    const hid = v === 'hid';
+    const o = hid ? DIM_HID : typeof v !== 'number' || !(v < 0.999) ? 1 : DIM_MIN + (1 - DIM_MIN) * Math.max(0, v);
+    const s = o >= 1 ? '' : o.toFixed(2);
+    if (el._lensO === s) return;
+    el._lensO = s;
+    el.style.opacity = s;
+    el.classList.toggle('nn-lens-out', !!s);
+    el.classList.toggle('nn-lens-hid', hid);
+  }
+  function paintLens(c) {
+    if (!c.dims.length) return;
+    const E = lensEm();
+    for (const d of c.dims) {
+      let v = null;
+      if (E) try { v = d.fn(E); } catch { v = null; }
+      applyDim(d.el, v);
+    }
+  }
+  function paintLensAll() { for (const c of cards) paintLens(c); }
 
   // ---------------------------------------------------------------- widgets
 
@@ -964,9 +1025,12 @@ export function install(ctx) {
       const m = grpSym(tp, tp.g) || matSym(L);
       const ah = attn ? attnAt(L, i) : null;
       tokEl = h('div', { class: 'nn-where nn-tok' });
-      setTex(tokEl, `\\text{token } ${tp.t + 1},\\ \\text{feature } ${tp.f + 1}` +
-        `\\quad (\\text{row } ${tp.t + 1},\\ \\text{column } ${tp.f + 1} \\text{ of } ${m})` +
-        (ah && ah.heads > 1 ? `,\\ \\text{head } ${ah.hd + 1}` : ''));
+      c.binds.push(() => {
+        const nm = tokNameTex(tp.t);
+        setTex(tokEl, (nm ? `${nm}\\ (\\text{token } ${tp.t + 1})` : `\\text{token } ${tp.t + 1}`) + `,\\ \\text{feature } ${tp.f + 1}` +
+          `\\quad (\\text{row } ${tp.t + 1},\\ \\text{column } ${tp.f + 1} \\text{ of } ${m})` +
+          (ah && ah.heads > 1 ? `,\\ \\text{head } ${ah.hd + 1}` : ''));
+      });
     }
     const chip = h('button', { class: 'nn-chip', title: 'Open the layer' });
     chip.addEventListener('click', () => select({ kind: 'layer', id: layerId }));
@@ -1159,6 +1223,7 @@ export function install(ctx) {
       row.classList.add('tied');
       row.title = `Shared parameter ${tieText(tie)}: moving it moves all ${n} edges`;
     }
+    dimBy(c, row, E => edgeEm(E, eid));
     return row;
   }
 
@@ -1170,6 +1235,7 @@ export function install(ctx) {
     const row = h('div', { class: 'nn-sl fixed', title: 'Fixed weight: training, Randomize and connect never change it' },
       sw, name, h('span', { class: 'nn-masked-txt', text: 'fixed' }), val);
     hoverable(c, row, { kind: 'edge', id: eid }, otherId);
+    dimBy(c, row, E => edgeEm(E, eid));
     if (!ro) name.addEventListener('click', () => select({ kind: 'edge', id: eid }));
     c.binds.push(() => {
       setTex(name, label(otherId));
@@ -1232,15 +1298,18 @@ export function install(ctx) {
     const bars = [];
     for (let j = 0; j < T; j++) {
       const lab = h('span', { class: 'nn-att-lab' });
-      setTex(lab, `A${hs}_{${i + 1},${j + 1}}`);
+      const tex = h('span');
+      setTex(tex, `A${hs}_{${i + 1},${j + 1}}`);
+      const name = h('span', { class: 'nn-att-name' });   // key token j's name, when the tokens have names
+      lab.append(tex, name);
       const fill = h('i');
       const val = h('span', { class: 'nn-att-val' });
       const row = h('div', { class: 'nn-att-row' }, lab, h('span', { class: 'nn-att-bar' }, fill), val);
       const v = qkvNode(L, 2, j, at.f);
       if (v) hoverable(c, row, { kind: 'node', id: v.id }, v.id);
       tokenLit(c, row, [{ layer: L - 1, t: j, g: 2, h: at.heads > 1 ? hd : null }]);   // value token j (V is group 2)
-      row.title = `Token ${i + 1} attends to token ${j + 1} with this weight (hover: v${j + 1})`;
-      bars.push({ row, fill, val, j });
+      dimBy(c, row, E => (causalOf(L) && j > i ? null : attnEm(E, L, i, j, hd)));
+      bars.push({ row, fill, val, name, j });
     }
     c.binds.push(() => {
       const A = attnFwd(L, hd)?.A?.[i];
@@ -1250,9 +1319,16 @@ export function install(ctx) {
         b.row.classList.toggle('masked', masked);
         setStyle(b.fill, 'width', Number.isFinite(a) ? `${Math.max(0, Math.min(1, a)) * 100}%` : '0%');
         setText(b.val, masked ? '0 (masked)' : Number.isFinite(a) ? fmt(a) : '?');
+        setText(b.name, tokName(b.j) || '');
+        setHidden(b.name, !tokName(b.j));
+        const title = `${cap(tokWord(i))} attends to ${tokWord(b.j)} with this weight (hover: v${b.j + 1})`;
+        if (b.row.title !== title) b.row.title = title;
       }
     });
-    const rowSec = section(c, 'node.attn', 'Attention row', `\\text{token } ${i + 1} \\text{ attends to}`, def, ...bars.map(b => b.row));
+    const attendsTex = () => `${tokNameTex(i) || `\\text{token } ${i + 1}`} \\text{ attends to}`;
+    const rowSec = section(c, 'node.attn', 'Attention row', attendsTex(), def, ...bars.map(b => b.row));
+    const rowSub = rowSec.head.querySelector('.nn-sec-sub');
+    if (rowSub) c.binds.push(() => setTex(rowSub, attendsTex()));
     const hh = at.heads > 1 ? hd : null;   // lit by this token's row: its Z token, its query, a heatmap row
     tokenLit(c, rowSec.head, [{ layer: L, t: i, h: hh }, { layer: L - 1, t: i, g: 0, h: hh }]);
   }
@@ -1679,9 +1755,10 @@ export function install(ctx) {
     for (const e of es) {
       const chip = h('button', { class: 'nn-chip nn-used-chip' + (e.id === eid ? ' on' : ''), title: 'Open this edge' });
       const t = byTok ? tokPos(tokL, indexIn(e.to)).t : -1;
-      setTex(chip, (byTok ? `t_{${t + 1}}\\!:\\ ` : '') + `{${label(e.from)}} \\to {${label(e.to)}}`);
+      c.binds.push(() => setTex(chip, (byTok ? `${tokNameTex(t) || `t_{${t + 1}}`}\\!:\\ ` : '') + `{${label(e.from)}} \\to {${label(e.to)}}`));
       chip.addEventListener('click', () => select({ kind: 'edge', id: e.id }));
       hoverable(c, chip, { kind: 'edge', id: e.id });
+      if (e.id !== eid) dimBy(c, chip, E => edgeEm(E, e.id));
       wrap.append(chip);
     }
     return wrap;
@@ -1754,7 +1831,13 @@ export function install(ctx) {
         return `Z = \\operatorname{softmax}\\big(QK^{\\top} c${causalOf(L) ? ' + M' : ''}\\big)\\,V \\in \\mathbb{R}^{${s.tokens} \\times ${s.d}}`;
       }
       const tokTex = tok ? (s.groups ? s.groups.map(g => `{${g}}`).join(',\\ ') : matSym(L)) + ` \\in \\mathbb{R}^{${s.tokens} \\times ${s.d}}` : '';
-      if (L === 0) return tok ? `${tokTex}\\quad (x = a^{(0)} \\in \\mathbb{R}^{${m}})` : `x = a^{(0)} \\in \\mathbb{R}^{${m}}`;
+      // named tokens: the rows, in order (docs/NN_LENS.md)
+      const named = tok && s.tokens > 1 && Array.from({ length: s.tokens }, (_, t) => tokName(t)).some(Boolean)
+        ? `\\text{rows: } ${Array.from({ length: s.tokens }, (_, t) => tokNameTex(t) || `t_{${t + 1}}`).join(',\\ ')}` : '';
+      if (L === 0) {
+        const top = tok ? `${tokTex}\\quad (x = a^{(0)} \\in \\mathbb{R}^{${m}})` : `x = a^{(0)} \\in \\mathbb{R}^{${m}}`;
+        return named ? `\\begin{aligned} &${top} \\\\ &${named} \\end{aligned}` : top;
+      }
       const n = M.nodesIn(net(), L - 1).length;
       const ids = new Set(nodes().map(q => q.id));
       const prev = new Set(M.nodesIn(net(), L - 1).map(q => q.id));
@@ -1838,7 +1921,11 @@ export function install(ctx) {
       onLabel: () => select({ kind: 'node', id: q.id }),
       labelTitle: biasTie(q.id) ? `Shared bias ${tieText(biasTie(q.id))}: open this neuron` : 'Open this neuron',
     }));
-    rows.forEach((r, k) => { if (biasTie(nodes()[k]?.id)) r.classList.add('tied'); });
+    rows.forEach((r, k) => {
+      const q = nodes()[k];
+      if (biasTie(q?.id)) r.classList.add('tied');
+      if (q) dimBy(c, r, E => nodeEm(E, q.id));
+    });
     section(c, 'layer.vec', L === 0 ? 'Inputs' : 'Biases', null, vec, ...rows);
   }
 
@@ -1930,7 +2017,8 @@ export function install(ctx) {
     def.addEventListener('click', () => setAttnLayer(lid, { scale: null }, 'scale'));
     const scaleNote = h('span', { class: 'nn-k nn-scale-note' });
     c.binds.push(() => {
-      setText(tokEl, String(shapeOf(L).tokens));
+      const T = shapeOf(L).tokens, names = Array.from({ length: T }, (_, t) => tokName(t));
+      setText(tokEl, names.some(Boolean) ? `${T}: ${names.map((n, t) => n || `t${t + 1}`).join(', ')}` : String(T));
       setVal(heads, String(headsOf(L)));
       if (document.activeElement !== causal) causal.checked = causalOf(L);
       setVal(scale, numText(scaleOf(L)));
@@ -1946,15 +2034,17 @@ export function install(ctx) {
       return lines.length ? aligned(lines.map(s => `&${s}`)) : null;
     }, true);
     const maps = h('div', { class: 'nn-amaps' });
-    let mapKey = '', cells = [];
+    let mapKey = '', cells = [], hdrs = [];
     c.binds.push(() => {
       const T = shapeOf(L).tokens, H = headsOf(L), cz = causalOf(L);
       const key = `${T}|${H}|${cz}`;
       if (key !== mapKey) {
         mapKey = key;
-        const old = new Set(maps.querySelectorAll('span'));
+        const old = new Set(maps.querySelectorAll('div, span'));
         c.hov = c.hov.filter(el => !old.has(el));
+        c.dims = c.dims.filter(d => !old.has(d.el));
         cells = [];
+        hdrs = [];
         maps.replaceChildren();
         // Row i is token i's attention row, column j key / value token j: a cell or header hovers
         // that token ({ kind: 'token' }), and lights with it (Q, K and V are groups 0, 1, 2).
@@ -1963,22 +2053,27 @@ export function install(ctx) {
           const grid = h('div', { class: 'nn-amap' });
           grid.style.gridTemplateColumns = `auto repeat(${T}, minmax(0, 1fr))`;
           grid.append(h('span', { class: 'nn-amap-c', text: H > 1 ? `h${hd + 1}` : 'A' }));
+          dimBy(c, grid, E => headEm(E, L, hd));
           for (let j = 0; j < T; j++) {
-            const kh = h('span', { class: 'nn-amap-h', text: `k${j + 1}` });
+            const kh = h('span', { class: 'nn-amap-h' });
             hoverable(c, kh, tok(L - 1, j, 1));
             tokenLit(c, kh, [{ layer: L - 1, t: j, g: 1, h: hh }, { layer: L - 1, t: j, g: 2, h: hh }]);
             grid.append(kh);
+            hdrs.push({ el: kh, t: j, key: true });
           }
           for (let i = 0; i < T; i++) {
-            const qh = h('span', { class: 'nn-amap-h', text: `q${i + 1}` });
+            const qh = h('span', { class: 'nn-amap-h' });
             hoverable(c, qh, tok(L, i));
             tokenLit(c, qh, [{ layer: L, t: i, h: hh }, { layer: L - 1, t: i, g: 0, h: hh }]);
+            dimBy(c, qh, E => rowEm(E, L, i));
             grid.append(qh);
+            hdrs.push({ el: qh, t: i, key: false });
             for (let j = 0; j < T; j++) {
-              const cell = h('span', { class: 'nn-amap-v' + (cz && j > i ? ' masked' : ''), title: `A(${i + 1},${j + 1}): how much token ${i + 1} reads token ${j + 1}` });
+              const cell = h('span', { class: 'nn-amap-v' + (cz && j > i ? ' masked' : '') });
               hoverable(c, cell, tok(L, i));
               tokenLit(c, cell, [{ layer: L, t: i, h: hh }, { layer: L - 1, t: i, g: 0, h: hh },
                 { layer: L - 1, t: j, g: 1, h: hh }, { layer: L - 1, t: j, g: 2, h: hh }]);
+              dimBy(c, cell, E => (cz && j > i ? null : attnEm(E, L, i, j, hd)));
               grid.append(cell);
               cells.push({ cell, hd, i, j });
             }
@@ -1987,11 +2082,21 @@ export function install(ctx) {
         }
         paintHover();
       }
+      // headers: q_i / k_j, or the token's name (named tokens)
+      for (const q of hdrs) {
+        const nm = tokName(q.t);
+        setText(q.el, nm || `${q.key ? 'k' : 'q'}${q.t + 1}`);
+        q.el.classList.toggle('named', !!nm);
+        const tip = `${q.key ? 'key' : 'query'} ${q.t + 1}${nm ? `: ${nm}` : ''}`;
+        if (q.el.title !== tip) q.el.title = tip;
+      }
       for (const q of cells) {
         const a = attnFwd(L, q.hd)?.A?.[q.i]?.[q.j];
         const masked = cz && q.j > q.i;
         setText(q.cell, masked ? '–' : Number.isFinite(a) ? fmt(a) : '?');
         setStyle(q.cell, 'background', masked || !Number.isFinite(a) ? 'transparent' : colorFor(a, 1, theme()));
+        const tip = `A(${q.i + 1},${q.j + 1}): how much ${tokWord(q.i)} reads ${tokWord(q.j)}`;
+        if (q.cell.title !== tip) q.cell.title = tip;
       }
     });
     section(c, 'layer.attn', 'Attention', null,
@@ -2110,6 +2215,7 @@ export function install(ctx) {
   });
   store.on('layout', () => { for (const c of cards) c.akey = ''; ensureLoop(); });
   store.on('hover', paintHover);
+  store.on('lens', paintLensAll);
   ctx.onTheme?.(() => { for (const c of cards) update(c); });
   ctx.onShow?.(v => {
     visible = !!v;

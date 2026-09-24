@@ -19,8 +19,15 @@
 // A hovered or selected tied edge lights its whole tie group; fixed edges are dashed. Edits keep
 // token layers whole: a double-click adds a feature to every token (or says why it can't), and a
 // new edge between tokenwise-tied layers becomes a new shared entry, added for every token.
+// Token boxes show net.meta.tokenNames when set (else t₁…tₙ).
+//
+// Lens (docs/NN_LENS.md, rules in focus.js): what state.lens leaves out of its story is dimmed
+// (opacity --le, about 0.1, and no numbers); what its show toggles and thresholds remove is not
+// drawn. Hover, selection and the step-through still light what they point at. Following a token
+// shows its row of A on the attention edges, as hovering it would.
 
 import { colorFor } from './store.js';
+import { emphasis, tokenNames } from './focus.js';
 
 const NS = 'http://www.w3.org/2000/svg';
 const XHTML = 'http://www.w3.org/1999/xhtml';
@@ -42,6 +49,13 @@ const VARS = ['--nnv-hi', '--nnv-bg', '--nnv-text', '--nnv-muted', '--nnv-node',
   '--nnv-band-line', '--nnv-head', '--nnv-head-line', '--nnv-dot', '--nnv-bad', '--nnv-att', '--nnv-tok',
   '--nnv-tok-line', '--nnv-grp', '--nnv-grp-line'];
 const MARKS = ['sel', 'hov', 'rel', 'lit', 'bias', 'show', 'drop', 'tie', 'foc'];
+// Lens: a dimmed thing is drawn at DIM + (1 - DIM)·emphasis; below NUM_MIN it also loses its numbers.
+const DIM = 0.1, NUM_MIN = 0.25;
+// Token names: a name's width at the largest text boost (a gutter left of the token box holds it).
+const NAME_MAX = 8, NAME_CH = 7.2 * TEXT_MAX;
+// Fit: the panels floating over the stage that the net fits beside (px of air around each), the
+// smallest free area worth fitting into, and how much scale a larger free area may cost.
+const FLOATS = '.nn-train, .nn-attnviz', FLOAT_GAP = 6, FREE_MIN = 160, FIT_SLACK = 0.9;
 
 const r1 = v => Math.round(v * 10) / 10;
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
@@ -212,7 +226,8 @@ export function install(ctx) {
   let shown = document.body.dataset.view === 'nn';
   let needFit = 0, everFit = false, userMoved = false, fitAnim = 0;   // needFit: false | ms of the pending fit
   let showW = false, marked = [], pulseKey = '', pairIds = null, dropId = null, textScale = 1;
-  let focus = null;   // the shown attention row (or column)
+  let focus = [];     // the shown attention rows (or column)
+  let E = null;       // the lens's emphasis (focus.js), or null without a lens
 
   // Per-flush index of the live net. store.net's contents are replaced on undo, so never cache
   // node objects across events.
@@ -361,18 +376,19 @@ export function install(ctx) {
   // ---------------------------------------------------------------- tokens and attention (structure)
   // A layer's token shape lives in its fields, so changing it is not a structural event (no id
   // changes): compare shape keys on every net event and rebuild only what changed.
-  const tokKey = s => (s?.d ? `${s.T}|${s.d}|${s.groups ? s.groups.join('\u0001') : ''}|${s.att}` : '');
+  // Token names (net.meta.tokenNames) are part of the key: renaming rebuilds the boxes' labels.
+  const tokKey = (s, names) => (s?.d ? `${s.T}|${s.d}|${s.groups ? s.groups.join('\u0001') : ''}|${s.att}|${names.slice(0, s.T).join('\u0001')}` : '');
   const attKey = a => (a ? `${a.T}|${a.d}|${a.heads}|${a.vG}|${a.qG}|${a.kG}` : '');
   function syncTokens() {
-    const net = store.net, I = ix(), live = new Set();
+    const net = store.net, I = ix(), live = new Set(), names = tokenNames(net);
     let changed = false;
     net.layers.forEach((l, i) => {
       live.add(l.id);
-      const key = tokKey(I.tok[i]), r = toks.get(l.id);
+      const key = tokKey(I.tok[i], names), r = toks.get(l.id);
       if ((r?.key ?? '') !== key) {
         if (r) dropTok(r);
         toks.delete(l.id);
-        if (key) toks.set(l.id, makeTok(l.id, I.tok[i], key));
+        if (key) toks.set(l.id, makeTok(l.id, I.tok[i], key, names));
         changed = true;
       }
       const akey = attKey(I.att[i]), q = atts.get(l.id), head = layers.get(l.id);
@@ -387,8 +403,12 @@ export function install(ctx) {
     for (const [id, q] of atts) if (!live.has(id)) { dropAtt(q); atts.delete(id); changed = true; }
     return changed;
   }
-  function makeTok(id, s, key) {
-    const r = { key, bands: [], boxes: [] };
+  // A token's name, shortened for its box (the full name is the box's tooltip).
+  const shortName = n => (n.length > NAME_MAX ? `${n.slice(0, NAME_MAX - 1)}…` : n);
+  function makeTok(id, s, key, names = []) {
+    // The left gutter holds t₁, or the longest name (at the largest text boost).
+    const long = Math.max(0, ...names.slice(0, s.T).map(n => (n ? shortName(n).length : 0)));
+    const r = { key, bands: [], boxes: [], gut: long ? Math.max(TOK.l, Math.round(10 + long * NAME_CH)) : TOK.l };
     (s.groups || []).forEach((name, g) => {
       const rect = mk('rect', { class: 'nnv-grp', rx: 16 }, gGroups);
       const lab = mk('text', { class: 'nnv-grp-lab' }, gTokLabs);
@@ -401,10 +421,16 @@ export function install(ctx) {
       const el = mk('g', { class: 'nnv-tok', 'data-kind': 'token', 'data-id': id, 'data-g': g, 'data-t': t }, gToks);
       const rect = mk('rect', { class: 'nnv-tok-box', rx: 12 }, el);
       const lab = mk('text', { class: 'nnv-tok-lab' }, gTokLabs);
-      lab.textContent = 't';
-      mk('tspan', { class: 'nnv-sub', dy: '0.3em' }, lab).textContent = String(t + 1);
+      if (names[t]) {
+        lab.classList.add('name');
+        lab.textContent = shortName(names[t]);
+        mk('title', null, el).textContent = names[t];
+      } else {
+        lab.textContent = 't';
+        mk('tspan', { class: 'nnv-sub', dy: '0.3em' }, lab).textContent = String(t + 1);
+      }
       if (s.T === 1) { el.setAttribute('display', 'none'); lab.setAttribute('display', 'none'); }   // one token: the band is enough
-      r.boxes.push({ el, rect, lab, g, t });
+      r.boxes.push({ el, rect, lab, g, t, name: !!names[t] });
     }
     return r;
   }
@@ -629,7 +655,7 @@ export function install(ctx) {
           const n = ns[(b.g * s.T + b.t) * s.d + f];
           x0 = Math.min(x0, n.x); x1 = Math.max(x1, n.x); y0 = Math.min(y0, n.y); y1 = Math.max(y1, n.y);
         }
-        return { b, cy0: y0, cy1: y1, x0: x0 - R - TOK.l, x1: x1 + R + TOK.r, y0: y0 - R - TOK.t, y1: y1 + R + TOK.b };
+        return { b, cy0: y0, cy1: y1, x0: x0 - R - r.gut, x1: x1 + R + TOK.r, y0: y0 - R - TOK.t, y1: y1 + R + TOK.b };
       });
       // Tokens packed tighter than their boxes: neighbours split the space between their neurons.
       const order = [...boxes].sort((a, b) => a.cy0 - b.cy0);
@@ -648,8 +674,9 @@ export function install(ctx) {
         const { b } = q;
         put(b.rect, 'x', r1(q.x0)); put(b.rect, 'y', r1(q.y0));
         put(b.rect, 'width', r1(q.x1 - q.x0)); put(b.rect, 'height', r1(q.y1 - q.y0));
-        put(b.lab, 'x', r1(q.x0 + TOK.l / 2 + 1));
-        put(b.lab, 'y', r1((q.cy0 + q.cy1) / 2));
+        put(b.lab, 'x', r1(q.x0 + r.gut / 2 + 1));
+        // A name sits level with the token's first neuron, clear of the numbers under it.
+        put(b.lab, 'y', r1(b.name ? q.cy0 : (q.cy0 + q.cy1) / 2));
         grow(q.x0, q.x1, q.y0, q.y1);
       }
       const bands = r.bands.map(band => {
@@ -782,6 +809,7 @@ export function install(ctx) {
       if (showW || r.lab.__show) paintLabel(r, e);
     }
     paintAtt();
+    paintLens();
   }
   // b = 0.12, or a shared bias by name: b_Q(2) = 0.12 (node.tie 'b_Q:2').
   function paintBias(r, n, on) {
@@ -794,7 +822,7 @@ export function install(ctx) {
     txt(r.bv, on ? `${m?.[2] ? `(${m[2]})` : ''} = ${num(n.bias ?? 0)}` : '');
   }
   // A_ij: the attention edges' width and opacity, the heatmap cells, the shown row's labels.
-  // Causally masked pairs (j > i) have no edge; their cells are hatched.
+  // Causally masked pairs (j > i) have no edge (paintLens hides them); their cells are hatched.
   function attA(l, h, i, j) {
     const v = store.state.fwd?.attn?.[l]?.heads?.[h]?.A?.[i]?.[j];
     return isNum(v) ? v : NaN;
@@ -806,7 +834,6 @@ export function install(ctx) {
       if (!a) continue;
       for (const rec of q.lines) {
         const v = attA(l, rec.h, rec.i, rec.j), u = isNum(v) ? clamp(v, 0, 1) : 0;
-        put(rec.g, 'display', a.causal && rec.j > rec.i ? 'none' : null);
         put(rec.line, 'stroke-width', r1(0.8 + 6.4 * u));
         put(rec.line, 'stroke-opacity', isNum(v) ? (0.06 + 0.88 * u).toFixed(3) : '0.12');
       }
@@ -817,6 +844,86 @@ export function install(ctx) {
       }
       for (const t of q.labs) if (t.on) txt(t.el, num(attA(l, t.h, t.i, t.j)));
     }
+  }
+
+  // ---------------------------------------------------------------- lens (dim, hide)
+  // --le on an element is its opacity (view.css), 1 when unset; the hover and step dimming
+  // multiply it. Runs after every paint (A, and so a followed token's keys and values, change
+  // with the values) and on every lens change; only what changed touches the DOM.
+  function setLe(el, v) {
+    if (!el) return;
+    const s = v >= 0.995 ? '' : (DIM + (1 - DIM) * clamp(v, 0, 1)).toFixed(2);
+    if (el.__le === s) return;
+    el.__le = s;
+    if (s) el.style.setProperty('--le', s);
+    else el.style.removeProperty('--le');
+  }
+  function cls(el, c, on) {
+    if (!el) return;
+    const k = `__${c}`;
+    if (el[k] === on) return;
+    el[k] = on;
+    el.classList.toggle(c, on);
+  }
+  function paintLens() {
+    const net = store.net, I = ix(), lens = store.state.lens;
+    E = null;
+    if (lens) {
+      try { E = emphasis(net, store.state.fwd, lens); } catch (err) { console.error('[nn] lens:', err); }
+    }
+    const dim = !!E?.any, hides = !!E?.hides;
+    const nv = id => (dim ? E.node(id) : 1);
+    for (const n of net.nodes) {
+      const r = nodes.get(n.id);
+      if (!r) continue;
+      const v = nv(n.id);
+      setLe(r.g, v);
+      cls(r.g, 'lz-dim', v < NUM_MIN);
+    }
+    for (const e of net.edges) {
+      const r = edges.get(e.id);
+      if (!r) continue;
+      const gone = hides && E.hidden.edge(e.id), v = dim ? E.edge(e.id) : 1;
+      put(r.g, 'display', gone ? 'none' : null);
+      setLe(r.g, v);
+      setLe(r.lab, v);
+      cls(r.lab, 'lz-gone', gone);
+      cls(r.lab, 'lz-dim', v < NUM_MIN);
+    }
+    for (const [id, q] of atts) {
+      const l = I.li.get(id), a = I.att[l];
+      if (!a) continue;
+      for (const rec of q.lines) {
+        const gone = (a.causal && rec.j > rec.i) || (hides && E.hidden.attn(l, rec.i, rec.j, rec.h));
+        put(rec.g, 'display', gone ? 'none' : null);
+        setLe(rec.g, dim ? E.attn(l, rec.i, rec.j, rec.h) : 1);
+      }
+      for (const t of q.labs) cls(t.el, 'lz-gone', hides && E.hidden.attn(l, t.i, t.j, t.h));   // A moved under minA
+      // The heatmap dims with its header; within it, the followed token's row and the kept head.
+      const rows = dim ? E.rows(l) : null, hs = dim ? E.heads(l) : null;
+      for (const c of q.hm?.cells || []) setLe(c.el, (!rows?.size || rows.has(c.i)) && (!hs || hs.has(c.h)) ? 1 : 0);
+    }
+    for (const [id, r] of toks) {
+      const l = I.li.get(id), s = I.tok[l], ns = I.byLayer[l];
+      if (!s?.d || ns?.length !== s.G * s.T * s.d) continue;
+      const most = (g, t0, t1) => {
+        let v = 0;
+        for (let t = t0; t < t1; t++) for (let f = 0; f < s.d; f++) v = Math.max(v, nv(ns[(g * s.T + t) * s.d + f].id));
+        return v;
+      };
+      for (const b of r.boxes) { const v = most(b.g, b.t, b.t + 1); setLe(b.el, v); setLe(b.lab, v); }
+      for (const b of r.bands) { const v = most(b.g, 0, s.T); setLe(b.rect, v); setLe(b.lab, v); }
+    }
+    const fl = E?.lens.focus?.layer;
+    net.layers.forEach((l, i) => {
+      const r = layers.get(l.id);
+      if (!r) return;
+      const v = dim ? E.layer(i) : 1;
+      setLe(r.g, v);
+      setLe(r.band, v);
+      cls(r.g, 'lz-foc', fl === l.id);
+      cls(r.band, 'lz-foc', fl === l.id);
+    });
   }
 
   // ---------------------------------------------------------------- highlight (sel, hover, anim)
@@ -987,25 +1094,40 @@ export function install(ctx) {
     if (!b) return null;   // on the Q, K, V layer: a query token's row, a key or value token's column
     return { l: l + 1, dir: Number.isInteger(hv.g) && hv.g === b.qG ? 'row' : 'col', t: hv.t, h, f: null };
   }
-  function attFocus(A) {
-    if (!atts.size) return null;
+  // After hover and the step-through, a followed token (lens.token) shows its row of A in every
+  // attention layer (lens.head: that head's), with no extra lighting: the lens does the dimming.
+  function attFoci(A) {
+    if (!atts.size) return [];
     const I = ix(), st = store.state, li = v => (typeof v === 'number' ? v : I.li.get(v));
     const hv = st.hover, hn = hv?.kind === 'node' ? hv.id : hv?.kind === 'row' ? I.byLayer[li(hv.layer)]?.[hv.i]?.id : null;
     const fh = hv?.kind === 'token' ? focusOfToken(hv) : hn && focusOfNode(hn);
-    if (fh) return { ...fh, hover: true };
-    return A?.focus || (A?.node && focusOfNode(A.node)) || (st.sel?.kind === 'node' && focusOfNode(st.sel.id)) || null;
+    if (fh) return [{ ...fh, hover: true }];
+    const fa = A?.focus || (A?.node && focusOfNode(A.node));
+    if (fa) return [fa];
+    const t = E?.lens.token, h = E?.lens.head;
+    if (Number.isInteger(t)) {
+      const out = [];
+      I.att.forEach((a, l) => { if (a && t < a.T) out.push({ l, dir: 'row', t, h: Number.isInteger(h) && h < a.heads ? h : null, f: null, lens: true }); });
+      if (out.length) return out;
+    }
+    const fs = st.sel?.kind === 'node' && focusOfNode(st.sel.id);
+    return fs ? [fs] : [];
   }
-  function highlightAtt(F, mark, onNode) {
+  function highlightAtt(foci, mark, onNode) {
     for (const q of atts.values()) {
       for (const t of q.labs) t.on = false;
       for (const hl of q.hm?.hl || []) put(hl.el, 'display', 'none');
     }
+    for (const F of foci) showAtt(F, mark, onNode);
+    placeAttLabels();
+  }
+  function showAtt(F, mark, onNode) {
     const I = ix(), a = F && I.att[F.l], q = a && atts.get(store.net.layers[F.l].id);
     if (!q) return;
     const row = F.dir === 'row', inHead = h => F.h == null || h === F.h;
     const hit = rec => (row ? rec.i : rec.j) === F.t && inHead(rec.h) && (F.f == null || rec.f === F.f) && !(a.causal && rec.j > rec.i);
     for (const rec of q.lines) {
-      if (F.labels === false || !hit(rec)) continue;   // labels false: the scores step, before A exists
+      if (F.labels === false || F.lens || !hit(rec)) continue;   // labels false: the scores step, before A exists
       mark(rec.g, 'rel');
       if (F.hover) {
         onNode(tokNode(F.l - 1, a.vG, rec.j, rec.f)?.id, 'rel');
@@ -1022,14 +1144,15 @@ export function install(ctx) {
     }
     const box = toks.get(store.net.layers[row ? F.l : F.l - 1].id)?.boxes.find(b => b.t === F.t && b.g === (row ? 0 : a.vG));
     if (box) mark(box.el, 'foc');
+    // A number rides a visible edge only: not one the lens hides, nor (for its own row) dims.
+    const off = t => !!E && (E.hidden.attn(F.l, t.i, t.j, t.h) || (F.lens && E.any && E.attn(F.l, t.i, t.j, t.h) < NUM_MIN));
     for (const t of q.labs) {
-      if (F.labels === false || (row ? t.i : t.j) !== F.t || !inHead(t.h) || (a.causal && t.j > t.i)) continue;
+      if (F.labels === false || (row ? t.i : t.j) !== F.t || !inHead(t.h) || (a.causal && t.j > t.i) || off(t)) continue;
       t.on = true;
       mark(t.el, 'show');
       put(t.el, 'data-dir', F.dir);
       txt(t.el, num(attA(F.l, t.h, t.i, t.j)));
     }
-    placeAttLabels();
     const hm = q.hm;
     for (const [h, hl] of (hm?.hl || []).entries()) {
       if (!inHead(h)) continue;
@@ -1083,7 +1206,7 @@ export function install(ctx) {
       A.edges.forEach(id => onEdge(id, 'lit'));
       A.rel.forEach(id => onNode(id, 'rel'));
     }
-    focus = attFocus(A);
+    focus = attFoci(A);
     highlightAtt(focus, mark, onNode);
     // The hovered / selected edge shows its numbers even with W off; the rest of its tie group its value.
     const shows = [...S.edges, ...H.edges].map(id => [id, true]).concat([...S.ties, ...H.ties].map(id => [id, 'tie']));
@@ -1096,7 +1219,7 @@ export function install(ctx) {
     }
     // Labels that just lost 'show' drop the tie name (with W on they stay, as plain numbers).
     if (showW) for (const e of store.net.edges) { const r = edges.get(e.id); if (r && !r.lab.__show) paintLabel(r, e, false); }
-    svg.classList.toggle('focus', H.any || !!A.node || !!focus?.hover);
+    svg.classList.toggle('focus', H.any || !!A.node || !!focus[0]?.hover);
     pairIds = H.pair;
     layoutPair();
     const key = A.node ? `${A.dir}|${A.node}|${A.edges.join()}|${A.phase}` : '';
@@ -1124,7 +1247,8 @@ export function install(ctx) {
     const moved = d.build || d.layout || reshaped || retitled || (d.meta && posChanged());
     if (moved) layoutAll();
     if (d.build || d.paint || reshaped) paint();
-    if (d.build || d.hl || reshaped) highlight();
+    else if (d.lens) paintLens();
+    if (d.build || d.hl || d.lens || reshaped) highlight();
     if (audience && moved && shown && needFit === false && outOfView()) needFit = 300;
     if (needFit !== false && shown && stage.clientWidth && stage.clientHeight) fit(everFit ? needFit : 0);
   }
@@ -1134,6 +1258,7 @@ export function install(ctx) {
   store.on('values', () => invalidate('paint'));
   store.on('layout', () => { stale = true; invalidate('layout'); });
   for (const k of ['sel', 'hover', 'anim']) store.on(k, () => invalidate('hl'));
+  store.on('lens', () => invalidate('lens'));
   ctx.onTheme?.(() => invalidate('paint'));
   ctx.onShow?.(v => {
     shown = v;
@@ -1147,12 +1272,12 @@ export function install(ctx) {
       if (!userMoved || audience) needFit = 0;   // follow the resize without easing
       invalidate('layout');
     }).observe(stage);
-    // A floating panel (train) opening, folding or closing changes fitArea(): refit, unless the
-    // user has panned or zoomed since the last fit.
+    // A floating panel (Train, Attention) opening, folding, resizing, moving or closing changes
+    // fitArea(): refit, unless the user has panned or zoomed since the last fit.
     let areaKey = '';
     const areaChanged = () => {
       if (!stage.clientWidth || !stage.clientHeight) return;
-      const A = fitArea(), key = `${Math.round(A.x)},${Math.round(A.w)}`;
+      const F = floats(), key = [F.w, F.h, ...F.rects.flatMap(r => [r.x0, r.y0, r.x1, r.y1])].map(Math.round).join(',');
       if (key === areaKey) return;
       const first = !areaKey;
       areaKey = key;
@@ -1162,6 +1287,8 @@ export function install(ctx) {
     const watch = () => { for (const c of stage.children) if (c !== svg) panels.observe(c); };
     new MutationObserver(watch).observe(stage, { childList: true });
     watch();
+    // Moving a panel changes it too: a drag ends with a pointerup on the panel's header.
+    stage.addEventListener('pointerup', () => requestAnimationFrame(areaChanged), true);
   }
 
   // ---------------------------------------------------------------- view transform
@@ -1213,27 +1340,57 @@ export function install(ctx) {
     const y0 = (I.box ? I.box.minY : I.cy) - HEAD_UP - 24, y1 = (I.box ? I.box.maxY : I.cy) + LANE_DOWN + 20;
     return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
   }
-  // The part of the stage the net should fit into: beside a tall panel floating on one side (train).
-  function fitArea() {
-    const s = stage.getBoundingClientRect();
-    let left = 0, right = s.width;
+  // The part of the stage the net should fit into: above the lens bar (lens.js) at the bottom and
+  // clear of the floating panels (FLOATS: Train, Attention) wherever they sit. Of the free
+  // rectangles between the panels it is the one where content box b comes out largest, or nearly
+  // (FIT_SLACK) and roomier; without b, the largest one. When none is at least FREE_MIN each way
+  // (a small window, panels over most of it), the panels are ignored.
+  function floats() {
+    const s = stage.getBoundingClientRect(), rects = [];
+    let bottom = s.height;
     for (const c of stage.children) {
       if (c === svg) continue;
       const r = c.getBoundingClientRect();
-      if (!r.width || r.height < s.height * 0.35 || r.width > s.width * 0.45) continue;
-      if (r.right >= s.right - 40 && r.left - s.left > s.width * 0.5) right = Math.min(right, r.left - s.left);
-      else if (r.left <= s.left + 40 && r.right - s.left < s.width * 0.5) left = Math.max(left, r.right - s.left);
+      if (!r.width || !r.height) continue;
+      if (c.classList.contains('nn-lens')) {
+        if (r.bottom >= s.bottom - 40) bottom = Math.min(bottom, r.top - s.top - 4);
+      } else if (c.matches(FLOATS)) {
+        rects.push({ x0: r.left - s.left - FLOAT_GAP, y0: r.top - s.top - FLOAT_GAP, x1: r.right - s.left + FLOAT_GAP, y1: r.bottom - s.top + FLOAT_GAP });
+      }
     }
-    return { x: left, y: 0, w: right - left, h: s.height };
+    return { w: s.width, h: Math.max(s.height * 0.5, bottom), rects };
+  }
+  const fitPad = A => clamp(Math.min(A.w, A.h) * 0.05, 12, 40);
+  const fitScale = (A, b) => Math.min((A.w - 2 * fitPad(A)) / b.w, (A.h - 2 * fitPad(A)) / b.h);
+  function fitArea(b = null) {
+    const F = floats(), all = { x: 0, y: 0, w: F.w, h: F.h };
+    const obs = F.rects.filter(r => r.x1 > 0 && r.x0 < F.w && r.y1 > 0 && r.y0 < F.h);
+    if (!obs.length) return all;
+    // A largest free rectangle has each side on the stage's edge or on a panel's.
+    const cuts = (lo, hi, k0, k1) => [...new Set([lo, hi, ...obs.flatMap(r => [r[k0], r[k1]]).filter(v => v > lo && v < hi)])].sort((a, c) => a - c);
+    const xs = cuts(0, F.w, 'x0', 'x1'), ys = cuts(0, F.h, 'y0', 'y1');
+    const free = [];
+    for (let i = 0; i < xs.length; i++) for (let j = i + 1; j < xs.length; j++) {
+      if (xs[j] - xs[i] < FREE_MIN) continue;
+      for (let p = 0; p < ys.length; p++) for (let q = p + 1; q < ys.length; q++) {
+        const A = { x: xs[i], y: ys[p], w: xs[j] - xs[i], h: ys[q] - ys[p] };
+        if (A.h < FREE_MIN || obs.some(r => r.x0 < A.x + A.w && r.x1 > A.x && r.y0 < A.y + A.h && r.y1 > A.y)) continue;
+        free.push({ A, k: b ? Math.min(fitScale(A, b), FIT_MAX_K) : 0 });
+      }
+    }
+    if (!free.length) return all;
+    // Within FIT_SLACK of the largest scale the larger area wins, so a folded panel's header doesn't
+    // push the net into a corner for a few percent of size.
+    const kMax = Math.max(...free.map(c => c.k));
+    return free.filter(c => c.k >= kMax * FIT_SLACK - 1e-9).reduce((a, c) => (c.A.w * c.A.h > a.A.w * a.A.h ? c : a)).A;
   }
   function fit(ms = 0) {
     if (!stage.clientWidth || !stage.clientHeight) { needFit = 0; return; }
     needFit = false;                     // before contentBox(): it flushes, and a flush may fit
     userMoved = false;
     everFit = true;
-    const b = contentBox(), A = fitArea();
-    const pad = clamp(Math.min(A.w, A.h) * 0.05, 12, 40);
-    const k = clamp(Math.min((A.w - 2 * pad) / b.w, (A.h - 2 * pad) / b.h), MIN_K, FIT_MAX_K);
+    const b = contentBox(), A = fitArea(b);
+    const k = clamp(fitScale(A, b), MIN_K, FIT_MAX_K);
     moveTo(k, A.x + A.w / 2 - (b.x + b.w / 2) * k, A.y + A.h / 2 - (b.y + b.h / 2) * k, ms);
   }
   // Stage px box of the whole net (lanes and headers included), e.g. to place a card beside it.
@@ -1244,7 +1401,7 @@ export function install(ctx) {
   // Is any of the net outside the stage, or under a panel that fit() avoids?
   function outOfView() {
     if (!stage.clientWidth || !stage.clientHeight) return false;
-    const b = contentBox(), A = fitArea();
+    const b = contentBox(), A = fitArea(b);
     const x0 = b.x * V.k + V.x, y0 = b.y * V.k + V.y;
     return x0 < A.x - 2 || y0 < A.y - 2 || x0 + b.w * V.k > A.x + A.w + 2 || y0 + b.h * V.k > A.y + A.h + 2;
   }

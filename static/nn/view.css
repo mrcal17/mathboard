@@ -127,11 +127,29 @@
 }
 .nnv-al.show { display: inline; }
 
-/* hover (here or in the matrix panel) and the step animation dim everything unrelated */
-.nnv.focus:not(.wiring) .nnv-edge:not(.hov):not(.sel):not(.rel):not(.lit):not(.tie) { opacity: 0.13; }
-.nnv.focus:not(.wiring) .nnv-att:not(.rel):not(.lit) { opacity: 0.1; }
-.nnv.focus:not(.wiring) .nnv-node:not(.hov):not(.sel):not(.rel):not(.lit) { opacity: 0.42; }
-.nnv.focus:not(.wiring) .nnv-wl:not(.hov):not(.sel):not(.rel):not(.lit):not(.tie) { opacity: 0.15; }
+/* hover (here or in the matrix panel) and the step animation dim everything unrelated, on top of the lens */
+.nnv.focus:not(.wiring) .nnv-edge:not(.hov):not(.sel):not(.rel):not(.lit):not(.tie) { opacity: calc(0.13 * var(--le, 1)); }
+.nnv.focus:not(.wiring) .nnv-att:not(.rel):not(.lit) { opacity: calc(0.1 * var(--le, 1)); }
+.nnv.focus:not(.wiring) .nnv-node:not(.hov):not(.sel):not(.rel):not(.lit) { opacity: calc(0.42 * var(--le, 1)); }
+.nnv.focus:not(.wiring) .nnv-wl:not(.hov):not(.sel):not(.rel):not(.lit):not(.tie) { opacity: calc(0.15 * var(--le, 1)); }
+
+/* the lens (view.js paintLens, docs/NN_LENS.md): --le is set inline on what it dims (about 0.1);
+   what hover, selection or the step-through point at shows in full anyway */
+.nnv-node, .nnv-edge, .nnv-att, .nnv-wl, .nnv-tok, .nnv-tok-lab, .nnv-grp, .nnv-grp-lab, .nnv-band, .nnv-head, .nnv-hm-c { opacity: var(--le, 1); }
+.nnv-node:is(.hov, .sel, .lit), .nnv-edge:is(.hov, .sel, .lit, .tie), .nnv-wl:is(.hov, .sel, .lit, .tie), .nnv-tok:is(.hov, .foc),
+.nnv.focus .nnv-node.rel, .nnv.focus .nnv-edge.rel, .nnv.focus .nnv-wl.rel, .nnv.focus .nnv-att:is(.rel, .lit) { opacity: 1; }
+/* dimmed: no numbers (unless pointed at) */
+.nnv:not(.focus) .nnv-node.lz-dim:not(.hov):not(.sel):not(.bias) :is(.nnv-val, .nnv-grad, .nnv-tgt, .nnv-bias),
+.nnv.focus .nnv-node.lz-dim:not(.hov):not(.sel):not(.lit):not(.rel):not(.bias) :is(.nnv-val, .nnv-grad, .nnv-tgt, .nnv-bias),
+.nnv .nnv-wl.lz-dim:not(.show):not(.hov):not(.sel):not(.tie), .nnv .nnv-wl.lz-gone, .nnv .nnv-al.lz-gone { display: none; }
+/* the focused stage's header */
+.nnv-head.lz-foc:not(.hov):not(.sel):not(:hover) .nnv-head-bg { stroke: var(--nnv-text); stroke-opacity: 0.7; stroke-width: 2; }
+.nnv-band.lz-foc:not(.hov):not(.sel) { stroke: var(--nnv-text); stroke-opacity: 0.35; stroke-width: 1.5; }
+/* token names (net.meta.tokenNames) instead of t₁ */
+.nnv-tok-lab.name {
+  font-family: system-ui, "Segoe UI", sans-serif; font-style: normal; font-weight: 600;
+  font-size: calc(12.5px * var(--nnv-ts, 1)); fill: var(--nnv-text);
+}
 
 .nnv-pair, .nnv-ghost { fill: none; stroke: var(--nnv-hi); stroke-width: 2.5; stroke-dasharray: 7 6; stroke-linecap: round; pointer-events: none; }
 .nnv-ghost.bad { stroke: var(--nnv-bad); }
