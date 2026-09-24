@@ -59,6 +59,7 @@ export function createStore(net, { undoLimit = 200 } = {}) {
     const exists = t => !t || (t.kind === 'node' || t.kind === 'bias' ? model.node(net, t.id)
       : t.kind === 'edge' ? model.edge(net, t.id)
       : t.kind === 'layer' ? net.layers.some(l => l.id === t.id)
+      : t.kind === 'token' ? (typeof t.layer === 'number' ? !!net.layers[t.layer] : net.layers.some(l => l.id === t.layer))
       : true);
     if (!exists(state.sel)) store.set('sel', null);
     if (!exists(state.hover)) store.set('hover', null);

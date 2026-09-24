@@ -307,14 +307,48 @@ async function start({ model, createStore }) {
     else toast(`New net: ${label}. Ctrl+Z goes back`, 2200);
   }
 
+  // Token layers keep their shape (docs/NN_ATTENTION.md). The model never refuses an edit on token
+  // grounds: a token layer that loses one neuron quietly becomes a plain vector, and an attention
+  // layer whose Q, K, V input breaks becomes a dense layer. So the shell refuses those edits with
+  // a toast, by view.js's rules (its addFeature and insertLayer) and in the same words.
+  const layerAt = l => store.net.layers[l];
+  const isAttn = l => layerAt(l)?.kind === 'attention';
+  const isTokenLayer = l => {
+    const lay = layerAt(l);
+    return !!lay && (lay.kind === 'attention' || (Number.isInteger(lay.tokens) && lay.tokens > 1)
+      || (Array.isArray(lay.groups) && lay.groups.length > 0));
+  };
+  const plainName = s => String(s || '').replace(/\\[a-zA-Z]+\s*/g, '').replace(/[{}_^$]/g, '');
+  function refuseRemove(s) {
+    const net = store.net;
+    if (s.kind === 'edge') {
+      return model.edge(net, s.id)?.fixed ? 'Fixed edges (a residual or a pooling weight) are read-only' : null;
+    }
+    if (s.kind === 'layer') {
+      const l = model.layerIndex(net, s.id);
+      return isAttn(l + 1) ? 'Attention reads Q, K and V from this layer: delete the attention layer first' : null;
+    }
+    if (s.kind !== 'node') return null;
+    const l = model.nodeLayerIndex(net, s.id);
+    if (!isTokenLayer(l)) return null;
+    const lay = layerAt(l), nm = lay.name || 'This layer', sh = model.tokenShape?.(net, l);
+    if (isAttn(l)) return 'Attention has no weights of its own: Z is tokens × d_v, one row per token of V, so it can\'t lose one neuron';
+    if (lay.groups?.length) return `${lay.groups.map(plainName).join(', ')} share one shape (tokens × d each), so they can't lose one neuron at a time`;
+    if (isAttn(l + 1)) return 'Attention reads this layer as Q, K and V: its shape is fixed';
+    const shape = sh?.d ? `${sh.tokens} tokens × ${sh.d}` : `${lay.tokens} tokens`;
+    return `${nm} is ${shape}: one neuron less would break its token rows. Delete the whole layer instead`;
+  }
+
   // A dense layer after the selected layer (by default just before the outputs). The direct edges
   // between its two neighbours would become skip edges, so they are replaced. model.addLayer puts
   // the neurons midway between the neighbouring columns; if those are too close, later columns
-  // move right to make room.
+  // move right to make room. Never next to token layers (see refuseRemove).
   function addLayer() {
     const net = store.net, L = net.layers.length, sel = store.state.sel;
     const li = !sel ? -1 : sel.kind === 'layer' ? model.layerIndex(net, sel.id) : sel.kind === 'node' ? model.nodeLayerIndex(net, sel.id) : -1;
     const at = L < 2 ? L : li >= 0 ? clamp(li + 1, 1, L - 1) : L - 1;
+    if (isAttn(at)) return toast('Attention reads Q, K and V straight from the layer before it: nothing goes between them', 4500);
+    if (isTokenLayer(at - 1) || isTokenLayer(at)) return toast('Between token layers a plain dense layer would cut their shared (tied) weights, so none is added here', 4500);
     const hidden = at > 0 && at < L, before = net.layers[at - 1];
     const meanX = i => {
       const ns = model.nodesIn(net, i);
@@ -360,6 +394,8 @@ async function start({ model, createStore }) {
     const s = store.state.sel;
     const remove = { node: model.removeNode, edge: model.disconnect, layer: model.removeLayer }[s?.kind];
     if (s?.kind === 'layer' && store.net.layers.length <= 2) return toast('A net keeps at least an input and an output layer');
+    const why = s && refuseRemove(s);
+    if (why) return toast(why, 4500);
     // Deleting a hidden layer reconnects its neighbours, the reverse of "+ Layer".
     const opts = s?.kind === 'layer' ? { bridge: true, seed: randomSeed() } : undefined;
     if (!remove || !attempt(`delete that ${s.kind}`, net => remove(net, s.id, opts))) return;

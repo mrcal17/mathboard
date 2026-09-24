@@ -157,6 +157,20 @@ describe('rng / fmt / ACTS', () => {
     assert.ok(!M.fmt(-3.2).includes('−'));
   });
 
+  test('fmtg: fmt from 0.01 up, two significant figures below, rounding noise reads 0', () => {
+    assert.equal(M.fmtg(0.123), '0.12');
+    assert.equal(M.fmtg(-0.01), '-0.01');
+    assert.equal(M.fmtg(0.0123, 3), '0.012');
+    assert.equal(M.fmtg(0.00345), '0.0034');
+    assert.equal(M.fmtg(-0.0072), '-0.0072');
+    assert.equal(M.fmtg(0.000346), '3.5e-4');
+    assert.equal(M.fmtg(-7.61e-5), '-7.6e-5');
+    assert.equal(M.fmtg(8.7e-19), '0.00');
+    assert.equal(M.fmtg(0, 3), '0.000');
+    assert.equal(M.fmtg(NaN), 'NaN');
+    assert.equal(M.fmtg(-Infinity), '-inf');
+  });
+
   test('ACTS has the six contract activations with label, tex, f, df', () => {
     assert.deepEqual(Object.keys(M.ACTS).sort(), ['identity', 'leaky', 'relu', 'sigmoid', 'softmax', 'tanh']);
     for (const [k, a] of Object.entries(M.ACTS)) {
@@ -342,7 +356,7 @@ describe('PRESETS', () => {
 
 describe('PRESETS: every preset in the menu', () => {
   const ALL = Object.keys(M.PRESETS);
-  const GROUPS = ['Basics', 'MLPs', 'Skip connections', 'Structure in W', 'Sequences', 'Embeddings & autoencoders', 'Teaching demos'];
+  const GROUPS = ['Basics', 'MLPs', 'Skip connections', 'Structure in W', 'Sequences', 'Attention', 'Embeddings & autoencoders', 'Teaching demos'];
   const R = 26;   // view.js neuron radius
 
   test('menu: known groups, each in one run and in order; a one-line note each; unique titles', () => {
@@ -380,12 +394,17 @@ describe('PRESETS: every preset in the menu', () => {
           assert.ok(Math.hypot(a.x - b.x, a.y - b.y) >= 2 * R + 24, `${a.id} and ${b.id} too close (value labels overlap)`);
         }
       }
-      const colX = net.layers.map((_, l) => {
-        const xs = M.nodesIn(net, l).map(n => n.x);
-        assert.ok(xs.every(x => x === xs[0]), `layer ${l} is one column`);
-        return xs[0];
+      // A layer is one column, or (the 3-token attention presets) a tokens x d grid like the matrix
+      // panel: a column per feature, a row per token. Each layer sits right of the one before.
+      const ext = net.layers.map((_, l) => {
+        const ns = M.nodesIn(net, l), xs = ns.map(n => n.x), { d } = M.tokenShape(net, l);
+        if (!xs.every(x => x === xs[0])) {
+          assert.ok(d > 1 && new Set(xs).size === d, `layer ${l} is one column, or one column per feature`);
+          assert.ok(ns.every((n, k) => n.x === ns[k % d].x && n.y === ns[k - (k % d)].y), `layer ${l}: a column per feature, a row per token`);
+        }
+        return [Math.min(...xs), Math.max(...xs)];
       });
-      colX.forEach((x, l) => assert.ok(l === 0 || x > colX[l - 1] + 2 * R, `column ${l} is right of column ${l - 1}`));
+      ext.forEach(([x0], l) => assert.ok(l === 0 || x0 > ext[l - 1][1] + 2 * R, `layer ${l} is right of layer ${l - 1}`));
 
       const f = M.forward(net);
       assert.ok(allFinite(f.a) && allFinite(f.z), 'finite forward');
@@ -493,20 +512,34 @@ describe('hand-set presets compute what they claim', () => {
     assert.equal(a[2][4], 0, 'node 5 is three hops away');
   });
 
-  test('rnn: every step starts with the same W_hh, x weights and bias; x_t only feeds step t', () => {
-    const net = M.PRESETS.rnn.build(), m = M.matrices(net), T = 4;
-    const Whh = term(net, 2, 1).W, wx = term(net, 1, 0).W.map(row => row[0]);
-    for (let t = 1; t <= T; t++) {
-      const x = term(net, t, 0);
-      x.edge.forEach(row => row.forEach((e, j) => assert.equal(e !== null, j === t - 1, `step ${t}, x_${j + 1}`)));
-      assert.deepEqual(x.W.map(row => row[t - 1]), wx);
-      if (t > 1) assert.deepEqual(term(net, t, t - 1).W, Whh);
-      assert.deepEqual(m[t - 1].b, m[0].b);
-    }
-    assert.deepEqual(m[T].terms.map(t => t.k), [T], 'the output reads the last step only');
-    const trained = M.clone(net);   // no weight tying: a training step moves the copies apart
+  test('rnn: every step shares one tied W_hh, x weights and bias; x_t only feeds step t', () => {
+    const net = M.PRESETS.rnn.build(), T = 4;
+    const same = (n, msg) => {
+      const m = M.matrices(n), Whh = term(n, 2, 1).W, wx = term(n, 1, 0).W.map(row => row[0]);
+      for (let t = 1; t <= T; t++) {
+        const x = term(n, t, 0);
+        x.edge.forEach(row => row.forEach((e, j) => assert.equal(e !== null, j === t - 1, `${msg} step ${t}, x_${j + 1}`)));
+        assert.deepEqual(x.W.map(row => row[t - 1]), wx, msg);
+        if (t > 1) assert.deepEqual(term(n, t, t - 1).W, Whh, msg);
+        assert.deepEqual(m[t - 1].b, m[0].b, msg);
+      }
+      return { Whh, wx, b: m[0].b };
+    };
+    const before = same(net, 'built');
+    assert.deepEqual(M.matrices(net)[T].terms.map(t => t.k), [T], 'the output reads the last step only');
+    const tied = e => M.nodeLayerIndex(net, e.to) <= T;
+    assert.ok(net.edges.filter(tied).every(e => /^(W_\{hh\}|w_x):\d,\d$/.test(e.tie)), 'every step edge is tied');
+    // the X W convention: W_hh:j,i is the weight from h_j of step t-1 to h_i of step t
+    const e = M.edgeBetween(net, M.nodesIn(net, 1)[1].id, M.nodesIn(net, 2)[0].id);
+    assert.equal(e.tie, 'W_{hh}:2,1');
+    assert.equal(M.tiedMatrices(net, 3).find(t => t.name === 'W_{hh}').W[1][0], e.w);
+    const trained = M.clone(net);   // tied: a training step moves every copy together
     M.trainStep(trained, { X: [[0.5, -0.3, 0.9, 0.2]], Y: [[1]] }, { lr: 0.5 });
-    assert.notDeepEqual(term(trained, 2, 1).W, term(trained, 3, 2).W);
+    valid(trained);
+    const after = same(trained, 'trained');
+    assert.notDeepEqual(after.Whh, before.Whh, 'W_hh moved');
+    assert.notDeepEqual(after.wx, before.wx, 'w_x moved');
+    assert.notDeepEqual(after.b, before.b, 'b moved');
   });
 
   test('wavenet: causal W with dilations 1, 2, 4; the last output is the mean of the inputs', () => {
@@ -779,11 +812,12 @@ describe('forward, matrices, predict, collapse', () => {
     assert.deepEqual(m.terms[0].edge, [[null, null]]);
   });
 
-  test('matrix form reproduces forward: z = b + sum_k W a', () => {
+  test('matrix form reproduces forward: z = b + sum_k W a (attention layers: see the attention tests)', () => {
     for (const k of Object.keys(M.PRESETS)) {
       const net = M.PRESETS[k].build(2);
       const f = M.forward(net);
       for (const m of M.matrices(net)) {
+        if (m.kind === 'attention') continue;
         m.rows.forEach((_, i) => {
           let z = m.b[i];
           for (const t of m.terms) t.W[i].forEach((w, j) => { z += w * f.a[t.k][j]; });
@@ -1572,6 +1606,737 @@ describe('validate and normalize', () => {
     store.undo();
     valid(store.net);
     assert.equal(M.nodesIn(store.net, 0).length, 1);
+  });
+});
+
+// ---------------------------------------------------------------- tokens, ties, attention
+
+const ATT_KEYS = ['attention', 'causal', 'multihead', 'transformer'];
+const matmul = (A, B) => A.map(row => B[0].map((_, j) => row.reduce((s, v, k) => s + v * B[k][j], 0)));
+const transpose = A => A[0].map((_, j) => A.map(row => row[j]));
+const nearM = (A, B, tol, msg) => { assert.equal(A.length, B.length, `${msg} rows`); A.forEach((r, i) => nearV(r, B[i], tol, `${msg}[${i}]`)); };
+const attnLayer = net => net.layers.findIndex(l => l.kind === 'attention');
+
+// Attention from the formulas: per head S = Q Kᵀ · scale (masked -Infinity), A = row softmax, Z = A V.
+function refAttention(Q, K, V, { heads = 1, causal = false, scale } = {}) {
+  const n = Q.length, d = Q[0].length, dh = d / heads, sc = scale ?? 1 / Math.sqrt(dh);
+  const Z = Q.map(() => new Array(d).fill(0)), out = [];
+  for (let h = 0; h < heads; h++) {
+    const c = f => h * dh + f;
+    const S = Q.map((q, i) => K.map((k, j) => {
+      if (causal && j > i) return -Infinity;
+      let s = 0;
+      for (let f = 0; f < dh; f++) s += q[c(f)] * k[c(f)];
+      return sc * s;
+    }));
+    const A = S.map(row => {
+      const m = Math.max(...row), e = row.map(s => Math.exp(s - m)), t = e.reduce((a, b) => a + b, 0);
+      return e.map(v => v / t);
+    });
+    A.forEach((row, i) => { for (let f = 0; f < dh; f++) Z[i][c(f)] = row.reduce((s, a, j) => s + a * V[j][c(f)], 0); });
+    out.push({ S, A });
+  }
+  return { Z, heads: out };
+}
+
+// Finite differences on a net with ties, fixed edges and attention layers: every edge on its
+// own (= bwd.edge), every tie group moved together (= bwd.tie, the sum of its members), every
+// bias (and bias group), every input; an attention layer's biases have no effect (db = 0).
+function gradCheckShared(net, y, loss, tol = 1e-6) {
+  const fwd = M.forward(net), bwd = M.backward(net, fwd, y, loss);
+  assert.ok(Number.isFinite(bwd.loss), 'loss finite');
+  const groups = new Map(), bgroups = new Map();
+  for (const e of net.edges) {
+    near(bwd.edge[e.id], fd(net, y, loss, () => e.w, v => { e.w = v; }), tol, `dL/dw ${e.id}${e.fixed ? ' (fixed)' : ''}`);
+    if (e.tie) { if (!groups.has(e.tie)) groups.set(e.tie, []); groups.get(e.tie).push(e); }
+  }
+  for (const [t, es] of groups) {
+    near(bwd.tie[t], es.reduce((s, e) => s + bwd.edge[e.id], 0), 1e-12, `tie ${t} is the sum of its edges`);
+    near(bwd.tie[t], fd(net, y, loss, () => es[0].w, v => es.forEach(e => { e.w = v; })), tol, `dL/d(${t})`);
+  }
+  for (const n of net.nodes) {
+    const l = M.nodeLayerIndex(net, n.id);
+    const fdB = () => fd(net, y, loss, () => n.bias, v => { n.bias = v; });
+    if (l === 0) near(bwd.node[n.id].da, fd(net, y, loss, () => n.value, v => { n.value = v; }), tol, `dL/dx ${n.id}`);
+    else if (net.layers[l].kind === 'attention') near(fdB(), 0, 1e-12, `attention bias ${n.id} is unused`);
+    else {
+      near(bwd.node[n.id].dz, fdB(), tol, `dL/db ${n.id}`);
+      if (n.tie) { if (!bgroups.has(n.tie)) bgroups.set(n.tie, []); bgroups.get(n.tie).push(n); }
+    }
+  }
+  for (const [t, ns] of bgroups) {
+    near(bwd.tie[t], ns.reduce((s, n) => s + bwd.node[n.id].dz, 0), 1e-12, `bias tie ${t}`);
+    near(bwd.tie[t], fd(net, y, loss, () => ns[0].bias, v => ns.forEach(n => { n.bias = v; })), tol, `dL/d(${t})`);
+  }
+  net.layers.forEach((layer, l) => {
+    if (layer.kind === 'attention') assert.ok(bwd.db[l].every(v => v === 0), `db[${l}] is 0 on an attention layer`);
+  });
+  return { fwd, bwd };
+}
+
+// A hand-wired token net covering the corners: X (n x dIn) -> tied Q, K, V -> attention (heads,
+// causal, scale) -> H, a dense untied mix across every token with a per-token activation
+// (softmax by default) -> Y (n x dOut), tokenwise tied from H, plus untied skip edges from the
+// Q, K, V layer and fixed edges from X. Y's act is per token too (softmax + xent by default).
+function tokenNet({ n = 3, dIn = 2, d = 2, heads = 1, causal = false, scale, hidden = 'softmax', out = 'softmax', dOut = 3, loss = 'xent', seed = 5 } = {}) {
+  const r = M.rng(seed), w = () => 2 * r() - 1;
+  const net = M.emptyNet();
+  net.meta.loss = loss;
+  const [lx, ly] = ids(net.layers);
+  const lq = M.addLayer(net, 1, { size: 0, act: 'identity' });
+  const lz = M.addLayer(net, 2, { size: 0, act: 'identity' });
+  const lh = M.addLayer(net, 3, { size: 0, act: hidden });
+  for (let k = 0; k < n * dIn; k++) M.addNode(net, lx, { value: w() });
+  for (let k = 0; k < 3 * n * d; k++) M.addNode(net, lq, {});
+  for (let k = 0; k < n * d; k++) M.addNode(net, lz, {});
+  for (let k = 0; k < n * d; k++) M.addNode(net, lh, {});
+  for (let k = 0; k < n * dOut; k++) M.addNode(net, ly, {});
+  Object.assign(net.layers[0], { tokens: n });
+  Object.assign(net.layers[1], { tokens: n, groups: ['Q', 'K', 'V'] });
+  Object.assign(net.layers[2], { tokens: n, kind: 'attention', heads, causal }, scale === undefined ? {} : { scale });
+  Object.assign(net.layers[3], { tokens: n });
+  Object.assign(net.layers[4], { tokens: n, act: out });
+  const X = M.nodesIn(net, 0), QKV = M.nodesIn(net, 1), Z = M.nodesIn(net, 2), H = M.nodesIn(net, 3), Y = M.nodesIn(net, 4);
+  const edge = (a, b, wv, extra = {}) => net.edges.push({ id: M.uid(net, 'e'), from: a.id, to: b.id, w: wv, ...extra });
+  ['Q', 'K', 'V'].forEach((g, gi) => {
+    const W = Array.from({ length: dIn }, () => Array.from({ length: d }, w));
+    const b = Array.from({ length: d }, () => 0.3 * w());
+    for (let t = 0; t < n; t++) {
+      for (let j = 0; j < d; j++) {
+        const q = QKV[gi * n * d + t * d + j];
+        q.bias = b[j]; q.tie = `b_${g}:${j + 1}`;
+        for (let i = 0; i < dIn; i++) edge(X[t * dIn + i], q, W[i][j], { tie: `W_${g}:${i + 1},${j + 1}` });
+      }
+    }
+  });
+  for (const h of H) { h.bias = 0.2 * w(); for (const z of Z) edge(z, h, w()); }
+  const WY = Array.from({ length: d }, () => Array.from({ length: dOut }, w));
+  const bY = Array.from({ length: dOut }, () => 0.3 * w());
+  for (let t = 0; t < n; t++) {
+    for (let j = 0; j < dOut; j++) {
+      const o = Y[t * dOut + j];
+      o.bias = bY[j]; o.tie = `b_Y:${j + 1}`;
+      for (let i = 0; i < d; i++) edge(H[t * d + i], o, WY[i][j], { tie: `W_Y:${i + 1},${j + 1}` });
+    }
+  }
+  edge(QKV[0], Y[0], 0.7); edge(QKV[n * d + 1], Y[1], -0.4); edge(QKV[2 * n * d], Y[dOut], 0.5);   // skips from Q, K, V
+  edge(X[0], Y[2], 1, { fixed: true }); edge(X[1], Y[dOut + 1], -0.5, { fixed: true });
+  // per-token one-hot targets (class t % dOut for token t), or soft targets for mse
+  Y.forEach((o, k) => { o.target = loss === 'xent' ? (k % dOut === Math.floor(k / dOut) % dOut ? 1 : 0) : 0.4 * w(); });
+  valid(net, 'tokenNet');
+  return net;
+}
+
+describe('tokens: shapes, reshape, positions', () => {
+  test('tokenShape / tokenPos: group-major, then token-major, then feature', () => {
+    const net = M.PRESETS.attention.build(1);
+    assert.deepEqual(M.tokenShape(net, 0), { tokens: 3, d: 2, groups: null });
+    assert.deepEqual(M.tokenShape(net, 1), { tokens: 3, d: 2, groups: ['Q', 'K', 'V'] });
+    assert.deepEqual(M.tokenShape(net, net.layers[2].id), { tokens: 3, d: 2, groups: null });
+    M.nodesIn(net, 1).forEach((n, k) => {
+      assert.deepEqual(M.tokenPos(net, n.id), { l: 1, index: k, g: Math.floor(k / 6), group: 'QKV'[Math.floor(k / 6)], token: Math.floor(k / 2) % 3, feature: k % 2 });
+    });
+    assert.deepEqual(M.tokenShape(M.PRESETS.xor.build(1), 1), { tokens: 1, d: 4, groups: null }, 'a plain layer is one token');
+    assert.equal(M.tokenPos(net, 'ghost'), null);
+    const s = M.tokenShape(net, 1);
+    s.groups.push('W');
+    assert.deepEqual(net.layers[1].groups, ['Q', 'K', 'V'], 'a copy');
+  });
+
+  test('reshape: tokens x d matrices per group, X for a layer without groups', () => {
+    const net = M.PRESETS.attention.build(1), f = M.forward(net);
+    const x = M.reshape(net, 0, f.a[0]);
+    assert.deepEqual(Object.keys(x), ['X']);
+    assert.deepEqual(x.X, [f.a[0].slice(0, 2), f.a[0].slice(2, 4), f.a[0].slice(4, 6)]);
+    const qkv = M.reshape(net, 1, f.a[1]);
+    assert.deepEqual(Object.keys(qkv), ['Q', 'K', 'V']);
+    assert.deepEqual(qkv.Q, f.attn[2].heads[0].Q);
+    assert.deepEqual(qkv.K, f.attn[2].heads[0].K);
+    assert.deepEqual(qkv.V, f.attn[2].heads[0].V);
+    assert.deepEqual(M.reshape(net, 2, f.a[2]).X, f.attn[2].heads[0].Z);
+    assert.deepEqual(M.reshape(net, 0, [1]).X, [[1, 0], [0, 0], [0, 0]], 'missing entries read 0');
+  });
+
+  test('attnSpec: defaults filled, null for anything else', () => {
+    assert.deepEqual(M.attnSpec(M.PRESETS.attention.build(1), 2), { l: 2, tokens: 3, d: 2, heads: 1, dh: 2, scale: 1 / Math.sqrt(2), causal: false });
+    assert.deepEqual(M.attnSpec(M.PRESETS.multihead.build(1), 2), { l: 2, tokens: 3, d: 2, heads: 2, dh: 1, scale: 1, causal: false });
+    assert.equal(M.attnSpec(M.PRESETS.causal.build(1), 2).causal, true);
+    assert.equal(M.attnSpec(M.PRESETS.causal.build(1), 1), null);
+    assert.equal(M.attnSpec(M.PRESETS.xor.build(1), 1), null);
+  });
+
+  test('matrices: an attention layer has no terms; dW stays parallel', () => {
+    const net = M.PRESETS.transformer.build(1), mats = M.matrices(net), f = M.forward(net);
+    const m = mats[1];
+    assert.deepEqual(m, { l: 2, id: net.layers[2].id, kind: 'attention', act: 'identity', rows: ids(M.nodesIn(net, 2)), b: [0, 0, 0, 0], terms: [] });
+    assert.ok(mats.filter(x => x.l !== 2).every(x => x.kind === 'dense'));
+    const b = M.backward(net, f, targets(net));
+    assert.deepEqual(b.dW[2], []);
+    mats.forEach(x => assert.equal(b.dW[x.l].length, x.terms.length));
+    assert.equal(M.collapse(net), null, 'attention is not affine');
+  });
+});
+
+describe('attention forward', () => {
+  test('every attention preset matches the formulas: S = QKᵀ/√d_k (+ mask), A = softmax(S), Z = AV', () => {
+    for (const k of ATT_KEYS) {
+      const net = M.PRESETS[k].build(3), l = attnLayer(net), spec = M.attnSpec(net, l);
+      const r = M.rng(4);
+      for (let s = 0; s < 5; s++) {
+        const x = M.nodesIn(net, 0).map(() => 2 * r() - 1), f = M.forward(net, x);
+        const { Q, K, V } = M.reshape(net, l - 1, f.a[l - 1]);
+        const ref = refAttention(Q, K, V, spec);
+        nearM(M.reshape(net, l, f.a[l]).X, ref.Z, 1e-12, `${k} Z`);
+        assert.deepEqual(f.z[l], f.a[l], `${k}: identity`);
+        assert.equal(f.attn[l].heads.length, spec.heads);
+        f.attn[l].heads.forEach((h, hi) => {
+          nearM(h.A, ref.heads[hi].A, 1e-12, `${k} A`);
+          h.S.forEach((row, i) => row.forEach((v, j) => {
+            if (ref.heads[hi].S[i][j] === -Infinity) { assert.equal(v, -Infinity, 'masked'); assert.equal(h.A[i][j], 0); }
+            else near(v, ref.heads[hi].S[i][j], 1e-12);
+          }));
+          h.A.forEach(row => near(row.reduce((a, b) => a + b, 0), 1, 1e-12, 'A rows sum to 1'));
+          nearM(h.Z, matmul(h.A, h.V), 1e-12, 'Z = A V');
+        });
+        f.attn.forEach((a, i) => assert.equal(a === null, i !== l));
+        nearV(M.predict(net, [x])[0], f.a.at(-1), 1e-12, 'predict');
+      }
+    }
+  });
+
+  test('causal: token i reads only tokens up to i; a later token cannot change an earlier output', () => {
+    const net = M.PRESETS.causal.build(1), f = M.forward(net);
+    const A = f.attn[2].heads[0].A;
+    assert.deepEqual(A[0], [1, 0, 0]);
+    assert.equal(A[1][2], 0);
+    const x = f.a[0].slice(), later = x.slice();
+    later[6] += 3;   // token 3's content
+    nearV(M.forward(net, later).a[3].slice(0, 2), f.a[3].slice(0, 2), 1e-15);
+  });
+
+  test('two heads read their own columns of Q, K, V and sit side by side in Z', () => {
+    const net = M.PRESETS.multihead.build(2), f = M.forward(net), [h1, h2] = f.attn[2].heads;
+    const { Q, V } = M.reshape(net, 1, f.a[1]);
+    assert.deepEqual(h1.Q, Q.map(row => [row[0]]));
+    assert.deepEqual(h2.Q, Q.map(row => [row[1]]));
+    assert.deepEqual(h2.V, V.map(row => [row[1]]));
+    assert.deepEqual(M.reshape(net, 2, f.a[2]).X, h1.Z.map((row, i) => [row[0], h2.Z[i][0]]));
+    assert.equal(f.attn[2].scale, 1);
+  });
+
+  test('softmax on a token layer runs per token; xent there is the mean over tokens', () => {
+    const net = tokenNet({ seed: 3 }), f = M.forward(net);
+    for (const [l, d] of [[3, 2], [4, 3]]) {
+      for (let t = 0; t < 3; t++) near(f.a[l].slice(t * d, t * d + d).reduce((a, b) => a + b, 0), 1, 1e-12, `layer ${l} token ${t}`);
+      near(f.a[l].reduce((a, b) => a + b, 0), 3, 1e-12);
+    }
+    const y = targets(net), p = f.a[4];
+    const want = [0, 1, 2].reduce((s, t) => s - [0, 1, 2].reduce((u, j) => u + y[t * 3 + j] * Math.log(p[t * 3 + j]), 0), 0) / 3;
+    const b = M.backward(net, f, y, 'xent');
+    near(b.loss, want, 1e-12);
+    b.dZ[4].forEach((dz, i) => near(dz, (p[i] - y[i]) / 3, 1e-12, 'dZ = (p - y) / tokens'));
+    assert.equal(b.note, null);
+  });
+});
+
+describe('attention and tied gradients match finite differences', () => {
+  for (const k of ATT_KEYS) {
+    test(`${k} preset: every edge, tie group, bias and input`, () => {
+      const net = M.PRESETS[k].build(2), y = targets(net);
+      const relu = net.layers.map((l, i) => (l.act === 'relu' ? i : -1)).filter(i => i >= 0);
+      const f = M.forward(net);
+      relu.forEach(l => {
+        assert.ok(f.z[l].every(z => Math.abs(z) > 1e-3), 'no ReLU sits on its kink');
+        assert.ok(f.z[l].some(z => z > 0), 'some ReLU is live');
+      });
+      gradCheckShared(net, y, net.meta.loss);
+    });
+  }
+
+  for (const [name, opts] of [
+    ['causal, 2 heads, custom scale, softmax token layers, xent', { heads: 2, causal: true, scale: 0.8 }],
+    ['non-causal, 1 head, tanh hidden, mse', { hidden: 'tanh', out: 'identity', loss: 'mse', seed: 9 }],
+    ['4 tokens, d = 4, 2 heads, sigmoid output, xent', { n: 4, d: 4, heads: 2, out: 'sigmoid', dOut: 2, hidden: 'leaky', seed: 12 }],
+  ]) {
+    test(`hand-wired token net: ${name}`, () => {
+      const net = tokenNet(opts);
+      if (opts.hidden === 'leaky') avoidKinks(net);
+      const y = targets(net);
+      const { fwd, bwd } = gradCheckShared(net, y, net.meta.loss);
+      // the attention formulas the matrix panel prints, with the model's numbers
+      const l = 2, spec = M.attnSpec(net, l);
+      bwd.attn[l].heads.forEach((g, hi) => {
+        const { A, Q, K, V } = fwd.attn[l].heads[hi];
+        nearM(g.dV, matmul(transpose(A), g.dZ), 1e-12, 'dV = Aᵀ dZ');
+        nearM(g.dA, matmul(g.dZ, transpose(V)), 1e-12, 'dA = dZ Vᵀ');
+        const dS = A.map((row, i) => row.map((a, j) => a * (g.dA[i][j] - row.reduce((s, b, m) => s + b * g.dA[i][m], 0))));
+        nearM(g.dS, dS, 1e-12, 'dS = A ⊙ (dA - rowsum(dA ⊙ A))');
+        nearM(g.dQ, matmul(g.dS, K).map(r => r.map(v => v * spec.scale)), 1e-12, 'dQ = dS K · scale');
+        nearM(g.dK, matmul(transpose(g.dS), Q).map(r => r.map(v => v * spec.scale)), 1e-12, 'dK = dSᵀ Q · scale');
+        g.dZ.forEach((row, i) => row.forEach((v, f) => near(v, bwd.dZ[l][i * spec.d + hi * spec.dh + f], 1e-15)));
+      });
+      // dL/d(Q, K, V layer) = the attention's own dQ, dK, dV + what the skip edges send back
+      const qkv = M.nodesIn(net, 1), own = [];
+      for (const key of ['dQ', 'dK', 'dV']) {
+        for (let t = 0; t < spec.tokens; t++) for (let h = 0; h < spec.heads; h++) own.push(...bwd.attn[l].heads[h][key][t]);
+      }
+      const flat = [];   // reorder own (key, token, head, f) into node order (key, token, head·dh + f)
+      for (let k = 0; k < 3; k++) for (let t = 0; t < spec.tokens; t++) for (let h = 0; h < spec.heads; h++) for (let f = 0; f < spec.dh; f++) {
+        flat[k * spec.tokens * spec.d + t * spec.d + h * spec.dh + f] = bwd.attn[l].heads[h][['dQ', 'dK', 'dV'][k]][t][f];
+      }
+      qkv.forEach((n, i) => {
+        const skip = net.edges.filter(e => e.from === n.id).reduce((s, e) => s + (M.nodeLayerIndex(net, e.to) > 2 ? e.w * bwd.node[e.to].dz : 0), 0);
+        near(bwd.dA[1][i], flat[i] + skip, 1e-12, `dL/da ${n.id}`);
+      });
+    });
+  }
+
+  test('an attention output layer (mse) and a causal row with a single allowed token', () => {
+    const net = M.PRESETS.causal.build(4);
+    const b = gradCheckShared(net, targets(net), 'mse').bwd;
+    const g = b.attn[2].heads[0];
+    assert.ok(g.dS[0].every(v => v === 0), 'row 1 attends only to itself: no score gradient');
+  });
+});
+
+describe('ties and fixed edges', () => {
+  test('trainStep: a tie group steps by the mean over samples of its summed gradient; fixed edges and attention biases stay', () => {
+    const net = tokenNet({ heads: 2, causal: true, seed: 21 });
+    const ds = [0, 1, 2].map(s => { const r = M.rng(40 + s); return { x: M.nodesIn(net, 0).map(() => 2 * r() - 1), y: targets(net).map((v, i) => (i + s) % 3 === 0 ? 1 : 0) }; });
+    const before = M.clone(net), lr = 0.4;
+    const per = ds.map(({ x, y }) => M.backward(net, M.forward(net, x), y, 'xent'));
+    const mean = M.trainStep(net, { X: ds.map(d => d.x), Y: ds.map(d => d.y) }, { lr });
+    near(mean, per.reduce((s, b) => s + b.loss, 0) / ds.length, 1e-12);
+    for (const e of before.edges) {
+      const g = e.tie ? per.reduce((s, b) => s + b.tie[e.tie], 0) : per.reduce((s, b) => s + b.edge[e.id], 0);
+      const want = e.fixed ? e.w : e.w - (lr * g) / ds.length;
+      near(M.edge(net, e.id).w, want, 1e-12, e.id);
+      if (e.fixed) assert.equal(M.edge(net, e.id).w, e.w, 'fixed');
+    }
+    for (const n of before.nodes) {
+      const l = M.nodeLayerIndex(before, n.id);
+      if (l === 0) continue;
+      const g = n.tie ? per.reduce((s, b) => s + b.tie[n.tie], 0) : per.reduce((s, b) => s + b.node[n.id].dz, 0);
+      const want = before.layers[l].kind === 'attention' ? 0 : n.bias - (lr * g) / ds.length;
+      near(M.node(net, n.id).bias, want, 1e-12, n.id);
+    }
+    valid(net, 'ties stay exactly equal');
+  });
+
+  test('setWeight / connect set the whole group; fixed edges refuse; attention layers take no edges', () => {
+    const net = M.PRESETS.transformer.build(1);
+    const tied = net.edges.find(e => e.tie === 'W_Q:1,2');
+    assert.equal(M.setWeight(net, tied.id, 0.625), true);
+    assert.ok(net.edges.filter(e => e.tie === 'W_Q:1,2').every(e => e.w === 0.625));
+    assert.equal(net.edges.filter(e => e.tie === 'W_Q:1,2').length, 2, 'one per token');
+    const other = net.edges.filter(e => e.tie === 'W_Q:1,2')[1];
+    assert.equal(M.connect(net, other.from, other.to, -0.25), other.id);
+    assert.ok(net.edges.filter(e => e.tie === 'W_Q:1,2').every(e => e.w === -0.25));
+    const fixed = net.edges.find(e => e.fixed);
+    assert.equal(M.setWeight(net, fixed.id, 3), false);
+    assert.equal(fixed.w, 1);
+    assert.equal(M.connect(net, fixed.from, fixed.to, 3), fixed.id);
+    assert.equal(fixed.w, 1, 'connect keeps a fixed weight');
+    const z = M.nodesIn(net, 2), x = M.nodesIn(net, 0);
+    assert.equal(M.connect(net, x[0].id, z[0].id, 1), null, 'nothing into an attention layer');
+    assert.deepEqual(M.connectDense(net, 1, 2), []);
+    assert.deepEqual(M.connectDense(net, 0, 2), []);
+    valid(net);
+  });
+
+  test('setNode: a bias sets its tie group; an attention node keeps bias 0', () => {
+    const net = M.PRESETS.attention.build(1);
+    const q = M.nodesIn(net, 1)[3];   // Q, token 2, feature 2
+    assert.equal(q.tie, 'b_Q:2');
+    M.setNode(net, q.id, { bias: 0.75 });
+    assert.deepEqual(M.nodesIn(net, 1).filter(n => n.tie === 'b_Q:2').map(n => n.bias), [0.75, 0.75, 0.75]);
+    assert.ok(M.nodesIn(net, 1).filter(n => n.tie === 'b_Q:1').every(n => n.bias !== 0.75));
+    const z = M.nodesIn(net, 2)[0];
+    M.setNode(net, z.id, { bias: 2 });
+    assert.equal(z.bias, 0);
+    valid(net);
+  });
+
+  test('randomize: one draw per tie group, fixed edges kept, attention biases 0, seeded', () => {
+    const a = M.PRESETS.transformer.build(1), b = M.clone(a);
+    const fixed = a.edges.filter(e => e.fixed).map(e => e.w);
+    M.randomize(a, { seed: 4, scheme: 'he', biases: 'small' });
+    M.randomize(b, { seed: 4, scheme: 'he', biases: 'small' });
+    assert.deepEqual(a, b);
+    valid(a, 'groups stay equal');
+    assert.deepEqual(a.edges.filter(e => e.fixed).map(e => e.w), fixed);
+    const draws = new Set(a.edges.filter(e => e.tie).map(e => e.w));
+    assert.equal(draws.size, new Set(a.edges.filter(e => e.tie).map(e => e.tie)).size, 'one value per group');
+    assert.ok(M.nodesIn(a, 2).every(n => n.bias === 0));
+    assert.ok(new Set(a.nodes.filter(n => n.tie).map(n => n.bias)).size > 1, 'bias groups drawn');
+  });
+
+  test('tiedMatrices: the small matrices in the X W convention, Q = X W_Q + b_Q', () => {
+    const net = M.PRESETS.attention.build(2), f = M.forward(net);
+    const T = M.tiedMatrices(net, 1);
+    assert.deepEqual(T.map(t => [t.name, t.k, t.fromGroup, t.toGroup, t.tokenwise, t.edges.length]),
+      [['W_Q', 0, null, 'Q', true, 12], ['W_K', 0, null, 'K', true, 12], ['W_V', 0, null, 'V', true, 12]]);
+    const X = M.reshape(net, 0, f.a[0]).X, qkv = M.reshape(net, 1, f.a[1]), B = M.reshape(net, 1, M.matrices(net)[0].b);
+    for (const t of T) {
+      const g = t.toGroup;
+      B[g].forEach(row => assert.deepEqual(row, B[g][0], 'tied bias rows are equal'));
+      nearM(qkv[g], matmul(X, t.W).map(row => row.map((v, j) => v + B[g][0][j])), 1e-12, `${g} = X W_${g} + b_${g}`);
+      assert.deepEqual(t.ties, [[`W_${g}:1,1`, `W_${g}:1,2`], [`W_${g}:2,1`, `W_${g}:2,2`]]);
+    }
+    // the layer matrix is I ⊗ Wᵀ: token 2's Q rows read token 2's x columns through W_Qᵀ
+    const m = M.matrices(net)[0].terms[0], W = T[0].W;
+    for (let i = 0; i < 2; i++) for (let j = 0; j < 2; j++) {
+      assert.equal(m.W[2 + i][2 + j], W[j][i]);
+      assert.equal(m.edge[2 + i][0 + j], null, 'off the block diagonal is masked');
+    }
+    // fixed residual edges are left out; untied layers and inputs give []
+    const tr = M.PRESETS.transformer.build(1);
+    assert.deepEqual(M.tiedMatrices(tr, 3).map(t => [t.name, t.k, t.tokenwise]), [['W_O', 2, true]]);
+    assert.deepEqual(M.tiedMatrices(tr, 5).map(t => [t.name, t.k, t.W.length, t.W[0].length]), [['W_2', 4, 4, 2]]);
+    assert.deepEqual(M.tiedMatrices(tr, 2), []);
+    assert.deepEqual(M.tiedMatrices(tr, 0), []);
+    assert.deepEqual(M.tiedMatrices(M.PRESETS.xor.build(1), 1), []);
+    const conv = M.tiedMatrices(M.PRESETS.conv1d.build(), 1);
+    assert.deepEqual(conv.map(t => [t.name, t.W, t.tokenwise]), [['k', [[-1, 2, -1]], false]]);
+  });
+});
+
+describe('retrofitted presets keep their weights shared', () => {
+  const kernelOf = (net, l) => M.tiedMatrices(net, l).find(t => /^k/.test(t.name)).W[0];
+  const train = (net, steps = 20, lr = 0.2) => {
+    const r = M.rng(6), n0 = M.nodesIn(net, 0).length, nL = M.nodesIn(net, last(net)).length;
+    for (let s = 0; s < steps; s++) {
+      M.trainStep(net, { X: [Array.from({ length: n0 }, () => 2 * r() - 1)], Y: [Array.from({ length: nL }, () => r())] }, { lr, loss: 'mse' });
+    }
+    valid(net);
+    return net;
+  };
+
+  for (const [k, l, stride] of [['conv1d', 1, 1], ['conv1d_s2', 1, 2], ['lenet', 1, 1]]) {
+    test(`${k}: every conv edge is a tap of one tied kernel; training keeps W Toeplitz`, () => {
+      const net = M.PRESETS[k].build();
+      const into = net.edges.filter(e => M.nodeLayerIndex(net, e.to) === l);
+      assert.ok(into.every(e => /^k:1,[123]$/.test(e.tie)));
+      assert.ok(M.nodesIn(net, l).every(n => n.tie === 'b:1'));
+      const k0 = kernelOf(net, l);
+      train(net);
+      const k1 = kernelOf(net, l), W = M.matrices(net)[l - 1].terms[0];
+      assert.notDeepEqual(k1, k0, 'the kernel moved');
+      W.edge.forEach((row, i) => row.forEach((e, j) => { if (e) assert.equal(W.W[i][j], k1[j - stride * i]); }));
+      assert.equal(new Set(M.matrices(net)[l - 1].b).size, 1, 'one bias');
+    });
+  }
+
+  test('lenet and avgpool: the pooling weights are fixed', () => {
+    for (const [k, l] of [['lenet', 2], ['avgpool', 1]]) {
+      const net = M.PRESETS[k].build(), pool = net.edges.filter(e => M.nodeLayerIndex(net, e.to) === l);
+      assert.ok(pool.length && pool.every(e => e.fixed === true && e.w === 0.5), k);
+      train(net);
+      assert.ok(pool.every(e => e.w === 0.5), `${k}: unchanged`);
+    }
+  });
+
+  test('wavenet: one tied kernel per dilation, taps (x_{t-d}, x_t)', () => {
+    const net = M.PRESETS.wavenet.build();
+    [1, 2, 4].forEach((d, i) => {
+      const l = i + 1;
+      assert.ok(net.edges.filter(e => M.nodeLayerIndex(net, e.to) === l).every(e => e.tie === `k^{(${l})}:1,${M.nodesIn(net, l).findIndex(n => n.id === e.to) === M.nodesIn(net, l - 1).findIndex(n => n.id === e.from) ? 2 : 1}`));
+    });
+    train(net, 10, 0.05);
+    [1, 2, 4].forEach((d, i) => {
+      const [back, now] = kernelOf(net, i + 1), t = M.matrices(net)[i].terms[0];
+      t.edge.forEach((row, r) => row.forEach((e, j) => { if (e) assert.equal(t.W[r][j], j === r ? now : back, `dilation ${d}`); }));
+    });
+  });
+});
+
+describe('validate and normalize: tokens, ties, attention', () => {
+  test('validate reports each new kind of damage, and normalize repairs it', () => {
+    const cases = [
+      [n => { n.layers[1].tokens = 2.5; }, /tokens must be an integer/],
+      [n => { n.layers[1].groups = ['Q', 'Q', 'V']; }, /groups must be distinct/],
+      [n => { n.layers[0].tokens = 4; }, /don't split into 4 tokens/],
+      [n => { n.layers[2].kind = 'conv'; }, /unknown kind/],
+      [n => { n.layers[2].act = 'relu'; }, /act must be identity/],
+      [n => { n.layers[2].heads = 3; }, /heads must be an integer that divides/],
+      [n => { n.layers[2].causal = 'yes'; }, /causal must be a boolean/],
+      [n => { n.layers[2].scale = 'big'; }, /scale must be a finite number/],
+      [n => { n.layers[2].groups = ['Q']; }, /attention layer has no groups/],
+      [n => { n.layers[1].groups = ['A', 'B', 'C']; }, /must have groups Q, K, V/],
+      [n => { n.layers[2].tokens = 2; }, /same tokens|don't split/],
+      [n => { M.nodesIn(n, 2)[0].bias = 0.5; }, /attention layer's bias must be 0/],
+      [n => { M.nodesIn(n, 2)[0].tie = 'b_Z:1'; }, /no bias to share/],
+      [n => { n.edges.push({ id: 'e999', from: M.nodesIn(n, 1)[0].id, to: M.nodesIn(n, 2)[0].id, w: 1 }); }, /no incoming edges/],
+      [n => { n.edges.find(e => e.tie).w += 1; }, /differing weights/],
+      [n => { n.edges[0].tie = 7; }, /tie must be a non-empty string/],
+      [n => { n.edges[0].tie = ''; }, /tie must be a non-empty string/],
+      [n => { n.edges[0].fixed = 'no'; }, /fixed must be a boolean/],
+      [n => { n.edges[0].fixed = true; }, /both fixed and tied/],
+      [n => { M.nodesIn(n, 1)[0].bias += 1; }, /differing biases/],
+      [n => { M.nodesIn(n, 1)[0].tie = n.edges[0].tie; }, /also an edge tie/],
+      [n => { M.nodesIn(n, 0)[0].tie = 'b_X:1'; }, /input node has no bias to share/],
+      [n => { n.layers[2].kind = 'attention'; n.layers.reverse(); }, /cannot be the input layer|before an attention layer/],
+    ];
+    for (const [breakIt, re] of cases) {
+      const net = M.PRESETS.attention.build(1);
+      breakIt(net);
+      const errs = M.validate(net);
+      assert.ok(errs.some(e => re.test(e)), `${re}: ${errs.join(' | ')}`);
+      const fixed = M.normalize(net);
+      valid(fixed, `normalize fixes ${re}`);
+      assert.ok(allFinite(M.forward(fixed).a));
+    }
+  });
+
+  test('normalize: specific repairs', () => {
+    const base = M.PRESETS.attention.build(1);
+    const n1 = M.clone(base);
+    n1.edges.push({ id: 'stray', from: M.nodesIn(n1, 0)[0].id, to: M.nodesIn(n1, 2)[0].id, w: 1 });
+    M.nodesIn(n1, 2)[1].bias = 3;
+    n1.layers[2].act = 'tanh';
+    const r1 = M.normalize(n1);
+    assert.deepEqual(r1, base, 'edges into attention dropped, biases zeroed, act identity');
+
+    const n2 = M.clone(base);
+    const tied = n2.edges.filter(e => e.tie === 'W_K:2,1');
+    tied[1].w = 9; tied[2].w = -9;
+    assert.deepEqual(M.normalize(n2), base, 'a tie group takes its first member\'s weight');
+
+    const n3 = M.clone(base);
+    Object.assign(n3.layers[1], { tokens: '3' });
+    Object.assign(n3.layers[2], { kind: ' Attention ', heads: '1', causal: 'false' });
+    n3.edges[0].fixed = 'false';
+    const r3 = M.normalize(n3);
+    assert.deepEqual([r3.layers[1].tokens, r3.layers[2].kind, r3.layers[2].heads, r3.layers[2].causal, r3.edges[0].fixed], [3, 'attention', 1, false, false]);
+    valid(r3);
+
+    const n4 = M.clone(base);
+    n4.edges[0].fixed = true;   // fixed wins over tie
+    const r4 = M.normalize(n4);
+    assert.equal(r4.edges[0].fixed, true);
+    assert.ok(!('tie' in r4.edges[0]));
+    valid(r4);
+
+    const n5 = M.clone(base);
+    n5.nodes = n5.nodes.filter(n => n !== M.nodesIn(n5, 1)[17]);   // Q, K, V loses a node
+    const r5 = M.normalize(n5);
+    valid(r5);
+    assert.ok(!('groups' in r5.layers[1]) && !('tokens' in r5.layers[1]), 'plain vector');
+    assert.ok(!('kind' in r5.layers[2]) && !('heads' in r5.layers[2]), 'attention demoted to dense');
+    assert.equal(r5.layers[2].tokens, 3, 'but still 3 tokens');
+
+    const n6 = M.clone(base);
+    M.nodesIn(n6, 1)[0].tie = 5;
+    assert.equal(M.normalize(n6).nodes.find(n => n.id === M.nodesIn(n6, 1)[0].id).tie, '5');
+  });
+
+  test('old nets load unchanged; token nets survive a save', () => {
+    for (const k of Object.keys(M.PRESETS)) {
+      const net = M.PRESETS[k].build(1);
+      assert.deepEqual(M.normalize(JSON.parse(JSON.stringify(net))), net, k);
+    }
+    const legacy = { v: 1, layers: [{ id: 'L1', name: 'In', act: 'identity' }, { id: 'L2', name: 'Out', act: 'sigmoid' }],
+      nodes: [{ id: 'n3', layer: 'L1', x: 1, y: 2, label: 'x_{1}', bias: 0, value: 1, target: null, params: {} },
+        { id: 'n4', layer: 'L2', x: 3, y: 2, label: '\\hat y_{1}', bias: 0.5, value: 0, target: 1, params: {} }],
+      edges: [{ id: 'e5', from: 'n3', to: 'n4', w: -2 }], meta: { title: 'Old', loss: 'xent', nextId: 6, train: {} } };
+    assert.deepEqual(M.normalize(M.clone(legacy)), legacy);
+    for (const e of M.normalize(M.clone(legacy)).edges) assert.ok(!('tie' in e) && !('fixed' in e), 'no fields added');
+  });
+});
+
+describe('edits never break a token net', () => {
+  test('removing or adding a Q, K, V node turns the layer plain and the attention layer dense', () => {
+    for (const edit of [
+      n => M.removeNode(n, M.nodesIn(n, 1)[4].id),
+      n => M.addNode(n, 1, { connect: true, seed: 2 }),
+      n => M.setNode(n, M.nodesIn(n, 1)[0].id, { layer: 0 }),
+    ]) {
+      const net = M.PRESETS.attention.build(1);
+      edit(net);
+      valid(net);
+      assert.equal(net.layers[1].groups, undefined);
+      assert.equal(net.layers[2].kind, undefined);
+      assert.ok(allFinite(M.forward(net).a));
+    }
+  });
+
+  test('a layer between Q, K, V and attention demotes it; removing Q, K, V too; removing attention is clean', () => {
+    const a = M.PRESETS.attention.build(1);
+    const id = M.addLayer(a, 2, { size: 3, dense: true, seed: 1 });
+    valid(a);
+    assert.equal(a.layers[3].kind, undefined);
+    assert.equal(M.nodesIn(a, 3).length, 6);
+    assert.ok(a.edges.some(e => M.nodeLayerIndex(a, e.from) === 2 && M.nodeLayerIndex(a, e.to) === 3), 'wired densely');
+    assert.equal(a.layers[2].id, id);
+
+    const b = M.PRESETS.causal.build(1);
+    M.removeLayer(b, b.layers[1].id, { bridge: true, seed: 3 });
+    valid(b);
+    assert.equal(b.layers[1].kind, undefined);
+
+    const c = M.PRESETS.transformer.build(1);
+    M.removeLayer(c, c.layers[2].id, { bridge: true, seed: 3 });
+    valid(c);
+    assert.deepEqual(c.layers[1].groups, ['Q', 'K', 'V'], 'Q, K, V stays a token layer');
+    assert.ok(M.tiedMatrices(c, 1).length === 3);
+
+    const d = M.PRESETS.attention.build(1);
+    M.addNode(d, 0, {});
+    valid(d);
+    assert.equal(d.layers[0].tokens, undefined, 'X becomes a plain vector');
+    assert.equal(d.layers[2].kind, 'attention', 'the attention layer is untouched');
+  });
+
+  test('setLayer on an attention layer: causal, heads (only if they divide d), scale; act stays identity', () => {
+    const net = M.PRESETS.attention.build(1), id = net.layers[2].id;
+    assert.equal(M.setLayer(net, id, { act: 'relu', causal: true, scale: 0.5 }), true);
+    assert.deepEqual([net.layers[2].act, net.layers[2].causal, net.layers[2].scale], ['identity', true, 0.5]);
+    M.setLayer(net, id, { heads: 2 });
+    assert.equal(net.layers[2].heads, 2);
+    M.setLayer(net, id, { heads: 3 });
+    assert.equal(net.layers[2].heads, 2, 'heads must divide d');
+    M.setLayer(net, id, { scale: null });
+    assert.equal('scale' in net.layers[2], false);
+    assert.equal(M.attnSpec(net, 2).scale, 1);
+    valid(net);
+    assert.equal(M.forward(net).attn[2].heads.length, 2);
+  });
+
+  test('fuzz: 500 random edits on the transformer never produce an invalid net', () => {
+    const r = M.rng(77);
+    const pick = a => a[Math.floor(r() * a.length)];
+    const net = M.PRESETS.transformer.build(1);
+    const acts = Object.keys(M.ACTS);
+    const ops = [
+      () => M.addLayer(net, Math.floor(r() * (net.layers.length + 1)), { size: Math.floor(r() * 4), act: pick(acts), dense: r() < 0.5, seed: 1 }),
+      () => net.layers.length > 3 && M.removeLayer(net, pick(net.layers).id, { bridge: r() < 0.5, seed: 2 }),
+      () => M.setLayer(net, pick(net.layers).id, { act: pick(acts), heads: 1 + Math.floor(r() * 3), causal: r() < 0.5, scale: r() < 0.3 ? null : r() * 2 }),
+      () => r() < 0.3 && M.addNode(net, Math.floor(r() * net.layers.length), { connect: r() < 0.5 }),
+      () => r() < 0.3 && net.nodes.length && M.removeNode(net, pick(net.nodes).id),
+      () => net.nodes.length && M.setNode(net, pick(net.nodes).id, { bias: r() - 0.5, layer: r() < 0.1 ? Math.floor(r() * net.layers.length) : undefined }),
+      () => net.nodes.length > 1 && M.connect(net, pick(net.nodes).id, pick(net.nodes).id, r() * 2 - 1),
+      () => net.edges.length && M.disconnect(net, pick(net.edges).id),
+      () => net.edges.length && M.setWeight(net, pick(net.edges).id, r() * 4 - 2),
+      () => M.connectDense(net, Math.floor(r() * net.layers.length), Math.floor(r() * net.layers.length), { seed: 3 }),
+      () => M.randomize(net, { seed: Math.floor(r() * 100), scheme: pick(['xavier', 'he', 'small']), biases: pick(['zero', 'small']) }),
+      () => M.trainStep(net, { X: [M.nodesIn(net, 0).map(() => r())], Y: [M.nodesIn(net, last(net)).map(() => r())] }, { lr: 0.05, loss: 'mse' }),
+      () => M.autoLayout(net),
+    ];
+    for (let step = 0; step < 500; step++) {
+      pick(ops)();
+      assert.deepEqual(M.validate(net), [], `after step ${step}`);
+      const f = M.forward(net);
+      const y = targets(net);
+      if (y.length && y.every(Number.isFinite)) assert.equal(M.backward(net, f, y, 'mse').dW.length, net.layers.length);
+    }
+    assert.deepEqual(M.normalize(M.clone(net)), net);
+  });
+});
+
+describe('sequence datasets', () => {
+  const SEQ = { seq_max: [3, 2, 2], seq_minmax: [3, 2, 2], seq_prev: [3, 3, 1], seq_addmax: [2, 2, 2] };
+  const tok = (row, n) => Array.from({ length: n }, (_, t) => row.slice((t * row.length) / n, ((t + 1) * row.length) / n));
+  for (const [k, [n, dIn, dOut]] of Object.entries(SEQ)) {
+    test(`${k}: kind seq, ${n} tokens x ${dIn} -> ${dOut}, deterministic, targets follow the (noisy) tokens`, () => {
+      const d = M.DATASETS[k];
+      assert.deepEqual([d.kind, d.tokens, d.inputs, d.outputs], ['seq', n, n * dIn, n * dOut]);
+      assert.equal(typeof d.label, 'string');
+      for (const noise of [0, 0.1]) {
+        const { X, Y } = d.make(150, 3, noise);
+        assert.equal(X.length, 150);
+        assert.ok(X.every(x => x.length === n * dIn && x.every(Number.isFinite)) && Y.every(y => y.length === n * dOut && y.every(Number.isFinite)));
+        assert.deepEqual(d.make(150, 3, noise), { X, Y });
+        X.forEach((x, s) => {
+          const T = tok(x, n), y = tok(Y[s], n), a = T.map(t => t[0]), top = T[a.indexOf(Math.max(...a))];
+          if (k === 'seq_max') y.forEach(row => assert.deepEqual(row, top));
+          if (k === 'seq_minmax') y.forEach(row => assert.deepEqual(row, [Math.max(...a), Math.min(...a)]));
+          if (k === 'seq_addmax') y.forEach((row, t) => assert.deepEqual(row, T[t].map((v, f) => Math.max(0, v + top[f]))));
+          if (k === 'seq_prev') {
+            y.forEach((row, t) => assert.deepEqual(row, [T[Math.max(0, t - 1)][0]]));
+            T.forEach((t, j) => { near(Math.hypot(t[1], t[2]), 1, 1e-12); near(Math.atan2(t[2], t[1]), [0, 2 * Math.PI / 3, -2 * Math.PI / 3][j], 1e-12); });
+          }
+          if (k !== 'seq_prev' && !noise) {
+            assert.ok(a.every((u, i) => a.every((v, j) => i === j || Math.abs(u - v) >= 0.3)), 'first features at least 0.3 apart');
+            assert.ok(x.every(v => Math.abs(v) <= 1));
+          }
+        });
+      }
+      assert.notDeepEqual(d.make(50, 4, 0).X, d.make(50, 3, 0).X);
+      assert.notDeepEqual(d.make(50, 3, 0.2).X, d.make(50, 3, 0).X);
+    });
+  }
+
+  test('the maximum and minimum really vary (no constant answers)', () => {
+    const { Y } = M.DATASETS.seq_minmax.make(300, 1, 0);
+    const sd = v => Math.sqrt(v.reduce((s, x) => s + x * x, 0) / v.length - (v.reduce((s, x) => s + x, 0) / v.length) ** 2);
+    assert.ok(sd(Y.map(y => y[0])) > 0.2 && sd(Y.map(y => y[1])) > 0.2);
+    // nor are they the mean plus a constant (uniform attention would get those)
+    const { X } = M.DATASETS.seq_minmax.make(300, 1, 0);
+    const gap = X.map((x, s) => Y[s][0] - (x[0] + x[2] + x[4]) / 3);
+    assert.ok(sd(gap) > 0.1);
+  });
+});
+
+describe('attention presets train on their datasets', () => {
+  // As the Train panel runs them: 200 points, noise 0.1, batches of 10, the preset's own lr.
+  function run(k, steps = 3000) {
+    const p = M.PRESETS[k], net = p.build(1);
+    assert.equal(net.meta.train.lr, p.lr);
+    const d = M.DATASETS[p.dataset].make(200, 1, 0.1), test = M.DATASETS[p.dataset].make(200, 7, 0);
+    const r = M.rng(3);
+    const lossOn = D => D.X.reduce((s, x, i) => s + M.backward(net, M.forward(net, x), D.Y[i], 'mse').loss, 0) / D.X.length;
+    const before = lossOn(test);
+    for (let s = 0; s < steps; s++) {
+      const idx = Array.from({ length: 10 }, () => Math.floor(r() * 200));
+      M.trainStep(net, { X: idx.map(i => d.X[i]), Y: idx.map(i => d.Y[i]) }, { lr: p.lr });
+    }
+    valid(net);
+    // mean attention weight on the token each head should find, over the held-out set
+    const on = [0, 0], onMin = [0, 0];
+    let rows = 0;
+    test.X.forEach(x => {
+      const at = M.forward(net, x).attn.find(Boolean), n = at.tokens, a = Array.from({ length: n }, (_, j) => x[(j * x.length) / n]);
+      const jmax = a.indexOf(Math.max(...a)), jmin = a.indexOf(Math.min(...a));
+      at.heads.forEach((h, hi) => h.A.forEach((row, i) => {
+        on[hi] += k === 'causal' ? (i ? row[i - 1] : row[0]) : row[jmax];
+        onMin[hi] += row[jmin];
+        if (!hi) rows++;
+      }));
+    });
+    return { net, before, after: lossOn(test), on: on.map(v => v / rows), onMin: onMin.map(v => v / rows) };
+  }
+
+  test('attention: every token learns to look at the largest x₁', () => {
+    const t = run('attention');
+    assert.ok(t.after < 2e-3 && t.after < t.before / 50, `${t.before} -> ${t.after}`);
+    assert.ok(t.on[0] > 0.9, `A on the max: ${t.on[0]}`);
+  });
+
+  test('causal: token i looks at token i - 1, and W_Q W_Kᵀ turns the positions by one', () => {
+    const t = run('causal');
+    assert.ok(t.after < 1e-3 && t.after < t.before / 50, `${t.before} -> ${t.after}`);
+    assert.ok(t.on[0] > 0.9, `A on the previous token: ${t.on[0]}`);
+    // the positional block of W_Q W_Kᵀ scores token j - 1's position highest for token j
+    const T = M.tiedMatrices(t.net, 1), Wq = T[0].W, Wk = T[1].W;
+    const pos = [[1, 0], [-0.5, Math.sqrt(3) / 2], [-0.5, -Math.sqrt(3) / 2]];
+    const P = pos.map(p => [0, ...p]);
+    const Sq = matmul(matmul(P, Wq), transpose(matmul(P, Wk)));
+    for (const i of [1, 2]) assert.equal(Sq[i].indexOf(Math.max(...Sq[i].slice(0, i + 1))), i - 1, `row ${i}`);
+  });
+
+  test('multihead: one head finds the largest x₁, the other the smallest', () => {
+    const t = run('multihead');
+    assert.ok(t.after < 2e-3 && t.after < t.before / 50, `${t.before} -> ${t.after}`);
+    const [a, b] = t.on[0] > t.on[1] ? [0, 1] : [1, 0];
+    assert.ok(t.on[a] > 0.6 && t.onMin[b] > 0.6, `max head ${t.on[a]}, min head ${t.onMin[b]}`);
+    assert.ok(t.onMin[a] < 0.15 && t.on[b] < 0.15);
+  });
+
+  test('transformer: attention finds the max token, the FFN clips at 0; fixed residuals stay 1', () => {
+    const t = run('transformer');
+    assert.ok(t.after < 5e-3 && t.after < t.before / 20, `${t.before} -> ${t.after}`);
+    assert.ok(t.on[0] > 0.8, `A on the max: ${t.on[0]}`);
+    assert.ok(t.net.edges.filter(e => e.fixed).every(e => e.w === 1));
   });
 });
 

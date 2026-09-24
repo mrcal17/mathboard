@@ -28,12 +28,21 @@ Modules talk through the store, `ctx` and the handles listed below.
 ```js
 net = {
   v: 1,
-  layers: [{ id, name, act }],   // array order = layer index. layers[0] = inputs, last = outputs
-  nodes:  [{ id, layer, x, y, label, bias, value, target, params }],
-  edges:  [{ id, from, to, w }],
+  layers: [{ id, name, act, tokens?, groups?, kind?, heads?, causal?, scale? }],   // array order = layer index.
+                                 //   layers[0] = inputs, last = outputs. Optional fields: docs/NN_ATTENTION.md
+  nodes:  [{ id, layer, x, y, label, bias, value, target, params, tie? }],
+  edges:  [{ id, from, to, w, tie?, fixed? }],
   meta:   { title, loss: 'mse' | 'xent', nextId, train: {...} },   // meta.train: see below
 }
 ```
+
+The optional fields (all absent in older nets, which load unchanged):
+- `layer.tokens` (int >= 1) and `layer.groups` (distinct strings, e.g. `['Q','K','V']`) shape a layer
+  as token rows: node k is group `floor(k / (tokens·d))`, token `floor(k / d) % tokens`, feature
+  `k % d`. `layer.kind` is `'dense'` (the default) or `'attention'`, with `heads`, `causal` and `scale`.
+- `edge.tie` (string or null): edges with the same tie share one weight. `edge.fixed` (bool): never
+  trained, randomized or re-weighted. `node.tie` (string or null): nodes with the same tie share one
+  bias (not on the input layer or an attention layer).
 
 A valid net always has at least 2 layers. `emptyNet()` is an empty Input and an empty Output layer.
 
@@ -53,6 +62,9 @@ A valid net always has at least 2 layers. `emptyNet()` is an empty Input and an 
   a numeric target, the store also runs the backward pass.
 - `params` is a user-defined `{ key: string | number }` map shown in the inspector. The maths
   ignores it.
+- `tie` (optional string, e.g. `b_Q:2`): nodes with the same `tie` share one bias. `setNode`'s
+  `bias` sets the whole group, `randomize` draws once per group and `trainStep` steps it by the
+  summed gradient (`bwd.tie[tie]`). Never on the input layer or an attention layer.
 
 **Edges**
 - Edges only go forward: `layerIndex(from) < layerIndex(to)`.
@@ -61,7 +73,8 @@ A valid net always has at least 2 layers. `emptyNet()` is an empty Input and an 
 
 **Activations**
 - `act` is one of `identity relu leaky sigmoid tanh softmax`.
-- `softmax` acts on the whole layer.
+- `softmax` acts on the whole layer, or per token (and group) on a token layer.
+- An attention layer's `act` is always `identity`.
 
 ## `meta.train` (train.js)
 
@@ -85,12 +98,14 @@ adapt or play frame.
 | `steps` | int >= 0 | 0 | gradient steps taken |
 | `hist` | number[] | `[]` | full-dataset loss (4 significant digits), one entry per `every` epochs; entry 0 is before training |
 | `every` | int >= 1 | 1 | epochs per `hist` entry; past 400 entries `hist` is halved and `every` doubled |
-| `maps` | bool | true | per-neuron maps on |
-| `space` | string | `''` | plot: `''` = input space, or the id of a hidden layer with exactly 2 neurons |
+| `maps` | bool | true | per-neuron maps on (always off with a `seq` dataset; the setting comes back with a plain one) |
+| `space` | string | `''` | plot: `''` = input space, or the id of a hidden layer with exactly 2 neurons. With a `seq` dataset: `'<attention layer id>#<head>'`, the attention matrix of that layer and head (0-based; `''` or an unknown value picks the first) |
 
 - Default `dataset`: the preset's `PRESETS[k].dataset` (a net is matched to its preset by
   `meta.title`) if its shape fits, else the first dataset whose inputs and outputs match the net,
   else `xor`.
+- A preset may also record `lr` (`PRESETS[k].lr`, one of the listed rates): the attention presets
+  need more than the default 0.1 to learn their pattern in a few thousand steps.
 - Changing `dataset`, `n`, `noise` or `seed` resets `seen`, `steps`, `hist` and `every`.
 - The loss choice stays in `meta.loss`.
 - The panel's own UI state is not in the net: localStorage `mathboard.nn.train` =
@@ -103,12 +118,16 @@ adapt or play frame.
 ACTS            // { name: { label, tex, f(z), df(z, a), vector?, slope? } }. softmax is { vector: true }:
                 //   forward/backward special-case it; its scalar f is sigmoid (softmax([z, 0])_1), for plots only.
                 //   leaky.slope = 0.1
-activate(act, z[], out?) -> a[]                  // a whole layer, softmax included
+activate(act, z[], out?, seg?) -> a[]            // a whole layer, softmax included; seg: softmax per run of seg entries
 uid(net, prefix)
-emptyNet(), clone(net), validate(net) -> string[], normalize(net) -> net   // normalize repairs loaded JSON
+emptyNet(), clone(net), validate(net) -> string[], normalize(net) -> net   // normalize repairs loaded JSON, token /
+                //   tie / attention fields included: bad fields dropped, tie groups equalized (first member wins),
+                //   fixed beats tie, edges into an attention layer dropped and its biases zeroed, a layer whose size
+                //   doesn't split into tokens x groups made plain, a broken attention layer made dense
 relabel(net, { onlyEmpty }), defaultLabel(net, nodeId)
-PRESETS         // { key: { label, group, note, dataset: DATASETS key | null, build(seed = 1) -> net } }; build() also
-                //   records the dataset in meta.train.dataset. Listed in menu order: the shell's New net picker has
+PRESETS         // { key: { label, group, note, dataset: DATASETS key | null, lr: number | null, build(seed = 1) -> net } };
+                //   build() also records the dataset in meta.train.dataset, and lr (when set) in meta.train.lr.
+                //   Listed in menu order: the shell's New net picker has
                 //   one <optgroup> per group (in first-seen order), shows note as the option's tooltip and toasts
                 //   it for 5 s when the preset loads from the picker (not on a #nn= preload). note is one line on
                 //   what to notice, matrix panel first. Presets with hand-set weights ignore the seed. meta.title is unique per preset.
@@ -117,50 +136,99 @@ PRESETS         // { key: { label, group, note, dataset: DATASETS key | null, bu
                 //   MLPs: mlp, deep, classifier (2-4-3 softmax), wide, narrow_deep (49 parameters each), funnel,
                 //     uat (hand-built ReLU hinges on the sine)
                 //   Skip connections: residual, bottleneck, ffn, densenet, unet, wide_deep
-                //   Structure in W: conv1d, conv1d_s2, avgpool, maxpool (b + ReLU(a - b)), lenet, gnn (hand-set),
+                //   Structure in W: conv1d, conv1d_s2 (tied kernel k:1,o and bias b:1), avgpool (fixed edges),
+                //     maxpool (b + ReLU(a - b)), lenet (tied conv, fixed pool), gnn (hand-set),
                 //     towers (block-diagonal), multitask (shared trunk, block-diagonal heads)
-                //   Sequences: rnn (unrolled, same initial weights per step), wavenet (dilated causal conv)
+                //   Sequences: rnn (unrolled; tied W_{hh}, w_x, b_h), wavenet (dilated causal conv, a tied kernel k^{(l)} per layer)
+                //   Attention (token nets, mse, see docs/NN_ATTENTION.md): attention (3 tokens x 2 -> tied QKV -> Z, seq_max,
+                //     lr 0.3), causal (seq_prev, lr 0.3), multihead (2 heads, seq_minmax, lr 1), transformer (2 tokens:
+                //     QKV, Z, H = X + Z W_O, ReLU FFN d -> 2d, Y = H + FFN; seq_addmax, lr 0.3). The three 3-token presets
+                //     lay X and Q, K, V out as tokens x d grids (a row per token, a column per feature, groups stacked,
+                //     X between the Q and K blocks), so they fit a 1600 x 900 window at 0.63 to 0.73 zoom; later layers are columns
                 //   Embeddings & autoencoders: autoencoder, embedding (one-hot lookup), pca_ae (linear, on cloud)
                 //   Teaching demos: vanishing (sigmoid chain), gan (D(G(z)) as one net)
 layerIndex(net, layerId), nodeLayerIndex(net, nodeId), nodesIn(net, layerIdOrIndex) -> nodes[]
 node(net, id), edge(net, id), edgeBetween(net, a, b)   // edgeBetween matches either direction
 
 // edits: mutate net in place and keep validate(net) empty (removing a node removes its edges, a layer its nodes)
+//   Token nets: edits never refuse on token grounds. A layer whose node count no longer splits into its tokens x
+//   groups loses tokens / groups, and an attention layer whose Q, K, V input breaks (a node added to or removed
+//   from Q, K, V, a layer inserted between them, Q, K, V removed) becomes a plain dense layer. Only wiring INTO
+//   an attention layer refuses (connect -> null, connectDense -> []).
 addLayer(net, at, { name, act, size = 2, dense = false, seed }) -> id   // nodes in a column between the neighbours;
                                                                         //   dense: also wire it to both neighbours
 removeLayer(net, id, { bridge, seed }) -> bool  // refuses (false) at 2 layers. bridge: wire the two
                                                 //   neighbours densely if nothing joins them (the shell's Delete uses it)
-setLayer(net, id, { name, act }) -> bool
+setLayer(net, id, { name, act, causal, heads, scale }) -> bool   // an attention layer's act stays identity; heads
+                                                //   only if it divides d; scale: a number, or null for 1/sqrt(d_k / heads)
 addNode(net, layer, { x, y, label, bias, value, target, params, index, connect, seed }) -> id | null
                 // index = order within the layer; connect: wire it to every node of both neighbour layers
                 //   (seeded Xavier). A new output gets target 0 when every other output has a target
 removeNode(net, id), moveNode(net, id, toIndex)
 setNode(net, id, patch) -> bool                 // x y label bias value target params layer. Numeric strings are
-                                                //   accepted, bad values ignored; a new layer drops sideways/backward edges
-connect(net, from, to, w?) -> id | null         // reuses an existing edge, swaps a backward pair, null within a layer;
-                                                //   no w: a seeded random weight in (-1, 1)
-disconnect(net, edgeId), setWeight(net, edgeId, w)
+                                                //   accepted, bad values ignored; a new layer drops sideways/backward edges.
+                                                //   bias sets the node's whole bias tie group; ignored on an attention layer
+connect(net, from, to, w?) -> id | null         // reuses an existing edge, swaps a backward pair, null within a layer
+                                                //   or into an attention layer; no w: a seeded random weight in (-1, 1).
+                                                //   w on an existing tied edge sets its group; a fixed edge keeps its w
+disconnect(net, edgeId), setWeight(net, edgeId, w) -> bool   // setWeight: a tied edge sets its group; false on a fixed edge
 connectDense(net, fromLayer, toLayer, { seed, scheme = 'xavier', w }) -> edgeId[]   // existing edges keep their w
-randomize(net, { seed, scheme: 'xavier' | 'he' | 'small', biases: 'zero' | 'small' | 'keep' })   // biases default 'zero'
-autoLayout(net, { width, height })              // nodes in evenly spaced columns, centred
+randomize(net, { seed, scheme: 'xavier' | 'he' | 'small', biases: 'zero' | 'small' | 'keep' })   // biases default 'zero'.
+                                                //   Fixed edges kept, one draw per tie group, attention biases stay 0
+autoLayout(net, { width, height })              // nodes in evenly spaced columns, centred; token layers leave an
+                                                //   extra quarter row between tokens and another between groups
+
+// tokens, ties, attention (docs/NN_ATTENTION.md)
+tokenShape(net, layer) -> { tokens, d, groups: string[] | null }   // a plain layer is 1 token of d = its size
+tokenPos(net, nodeId) -> { l, index, g, group, token, feature } | null   // 0-based; group null without groups
+reshape(net, layer, vec) -> { [group | 'X']: number[][] }        // tokens x d matrices of any layer vector
+                                                                 //   (a, z, b, dA...); missing entries read 0
+attnSpec(net, layer) -> { l, tokens, d, heads, dh, scale, causal } | null   // a working attention layer, defaults
+                                                                 //   filled (d = d_k = d_v, dh = d / heads)
+tiedMatrices(net, l) -> [{ name, W, ties, k, fromGroup, toGroup, edges, tokenwise }]   // [] unless every non-fixed
+                // edge into l is tied as '<name>:<i>,<j>'. W is in the X W convention (rows = input feature): Q = X W_Q,
+                // an edge from feature i to feature j has weight W[i-1][j-1], the per-token receiving-row matrix is Wᵀ.
+                // ties[i][j] = tie id | null; k = source layer (null if mixed); tokenwise: the layer matrix is exactly
+                // I_tokens ⊗ Wᵀ. Fixed (residual) edges are left out: find them by edge.fixed
 
 // maths
-matrices(net) -> [ per layer l >= 1: { l, id, act, rows: nodeId[], b: number[],
+matrices(net) -> [ per layer l >= 1: { l, id, kind: 'dense', act, rows: nodeId[], b: number[],
                    terms: [{ k, cols: nodeId[], W: number[][], edge: (edgeId|null)[][] }] } ]
-                 // matrices()[l - 1].l === l. The k = l-1 term always exists; other k only when a skip edge exists. Sorted k desc
-forward(net, x?) -> { z: (number[]|null)[], a: number[][], node: { [id]: { z, a } } }   // x defaults to layer-0 values
+                 // matrices()[l - 1].l === l. The k = l-1 term always exists; other k only when a skip edge exists. Sorted k desc.
+                 // Tied entries simply repeat values. An attention layer: { l, id, kind: 'attention', act: 'identity',
+                 //   rows, b: all 0, terms: [] } (its z is not b + Σ W a: read fwd.attn)
+forward(net, x?) -> { z: (number[]|null)[], a: number[][], node: { [id]: { z, a } }, attn }   // x defaults to layer-0 values
+                 // attn[l] (null except on attention layers) = { heads: [{ Q, K, V, Z (tokens x dh), S, A (tokens x tokens) }],
+                 //   tokens, dk: dh, scale, causal }. S is the scaled score QKᵀ·scale with masked cells -Infinity; A = softmax(S)
 backward(net, fwd, y, loss) -> { loss, note, dA: number[][], dZ: number[][], dW, db: number[][],
-                                 node: { [id]: { da, dz } }, edge: { [id]: dw } }
+                                 node: { [id]: { da, dz } }, edge: { [id]: dw }, attn, tie }
+                 // attn[l] = { heads: [{ dZ, dQ, dK, dV (tokens x dh), dA, dS (tokens x tokens) }] }: dV = Aᵀ dZ, dA = dZ Vᵀ,
+                 //   dS = A ⊙ (dA - rowsum(dA ⊙ A)), dQ = dS K · scale, dK = dSᵀ Q · scale (this layer's own share of
+                 //   the Q, K, V layer's dA). tie[tieId] = a shared weight's or bias's gradient, the sum of its members'
+                 //   (edge[id] and node[id].dz stay per member). db is all 0 on an attention layer; dW[l] is []
 trainStep(net, { X, Y }, { lr = 0.1, loss }) -> mean loss   // one step over the given batch (gradients averaged);
-                                                            //   the loss is from before the update. Non-finite: no update
+                                                            //   the loss is from before the update. Non-finite: no update.
+                                                            //   A tie group steps by its summed gradient (members stay
+                                                            //   equal); fixed edges and attention biases never move
 predict(net, X, { layer }) -> number[][]       // outputs; layer = index | id (that layer's a) | 'all' (every layer per sample)
 collapse(net) -> { W, b, rows, cols } | null   // the affine map y = W x + b when every non-input layer is identity
-DATASETS        // { key: { label, inputs, outputs, kind: 'class' | 'reg', make(n = 200, seed = 1, noise = 0) -> { X, Y } } }
+                                               //   (null with an attention layer)
+DATASETS        // { key: { label, inputs, outputs, kind: 'class' | 'reg' | 'seq', tokens?, make(n = 200, seed = 1, noise = 0) -> { X, Y } } }
                 //   xor, circles, spiral, blobs, moons (2 -> 1), three (2 -> 3 one-hot), line, sine (1 -> 1),
                 //   cloud (3 -> 3 regression, target = input: a flat 3-D cloud, for pca_ae).
-                //   noise is Gaussian, on the inputs (class) or the targets (reg)
+                //   noise is Gaussian, on the inputs (class) or the targets (reg).
+                //   Sequence tasks (kind 'seq', regression, mse): X and Y rows are token-major, inputs = tokens · d_in,
+                //   outputs = tokens · d_out; noise goes on the token features and the targets follow the noisy tokens.
+                //     seq_max (3 tokens x 2 -> 3 x 2): every position outputs the token with the largest x₁
+                //     seq_minmax (3 x 2 -> 3 x 2): every position outputs (max x₁, min x₁)
+                //     seq_prev (3 x 3 -> 3 x 1): tokens (c, cos θ, sin θ), θ = 0, 120°, 240°; y_i = c_{i-1} (y_1 = c_1)
+                //     seq_addmax (2 x 2 -> 2 x 2): y_i = ReLU(x_i + the token with the largest x₁)
+                //   In seq_max / seq_minmax / seq_addmax the x₁ are uniform on [-0.9, 0.9], at least 0.3 apart
 rng(seed) -> () => [0, 1)                      // mulberry32; no seed = a random one
 fmt(x, digits = 2) -> string                   // ASCII minus, never -0.00, 'NaN' / 'inf' / '-inf'. KaTeX-safe
+fmtg(x, digits = 2) -> string                  // for gradients: fmt from |x| >= 0.01; below, two significant figures:
+                                               //   '0.0034' down to 0.001, then '3.4e-4'; |x| < 1e-9 (rounding noise) reads fmt(0).
+                                               //   In KaTeX write the exponent as \mathrm{e}{-4}
 ```
 
 **Indexing**
@@ -174,7 +242,8 @@ fmt(x, digits = 2) -> string                   // ASCII minus, never -0.00, 'NaN
 **Losses**
 - `mse`: `½·mean over outputs of (a - y)²`.
 - `xent` with a softmax output: `-Σ y_i log p_i`; the gradient is `p·Σy - y` (`p - y` for a
-  proper distribution).
+  proper distribution). On a token layer (softmax per token): the mean over its tokens (and groups)
+  of each one's `-Σ y log p`, so the gradient is divided by that count.
 - `xent` with sigmoid outputs: binary cross-entropy, mean over outputs.
 - `xent` on any other output layer: fall back to mse and say so in `backward().note`.
 
@@ -207,7 +276,17 @@ store.load(net | json, { history = true })   // swap in a whole net (normalized)
   - `{ kind: 'pair', from, to }` (a masked matrix entry);
   - `{ kind: 'row', layer, i }` / `{ kind: 'col', layer, k, j }` (whole matrix row/column).
     `layer` and `k` are layer indices (the view also accepts ids), and `i` / `j` are 0-based.
-  The view emits node, edge and layer; the inspector and the matrix panel emit every kind.
+  - `{ kind: 'token', layer, t, g?, h? }`: token `t` (0-based) of a token layer, `layer` an index
+    (the view, the matrix panel and the inspector also accept an id). `g` limits it to one group
+    (0 = Q, 1 = K, 2 = V on a Q, K, V layer); `h` to one head, on an attention layer or on the
+    Q, K, V layer before it. Without them it means the whole token. The view lights the token's
+    box, neurons and edges; on an attention layer (or a query token) it also shows the token's
+    row of A, and for a key or value token its column. The matrix panel lights the token's cells
+    and that row or column of S and A; the inspector lights the matching row, column or bar of
+    an attention layer's or neuron's card.
+  The view emits node, edge, layer and token (a token box, and a heatmap cell or attention edge
+  as its row of A); the inspector and the matrix panel emit every kind (the matrix panel's `t_i`
+  headers and S / A cells, and the inspector's A tables, emit token).
 - `anim`: see below.
 - `train`: `{ epoch, loss, running }`, emitted by `train.js` on play, pause, step, reset and every
   frame while training. `loss` is the full-dataset loss, or null. Nothing listens to it yet.
@@ -215,22 +294,30 @@ store.load(net | json, { history = true })   // swap in a whole net (normalized)
 **`state.anim`** (step-through, owned by `matrix.js`)
 - `null | { dir: 'fwd' | 'bwd', l, i, phase }`. `l` is a layer index >= 1 (the view also accepts
   a layer id) and `i` the 0-based row in that layer.
-- `phase` is `'dot'` on every forward step (row i of W times the input, plus b_i, then the
-  activation) and `'delta'` on every backward step (δ_i, row i of ∂L/∂W, ∂L/∂b_i). matrix.js
-  sets no other values.
-- Order: every row of layers 1..L forward, then, only when `state.bwd` exists, every row of
-  layers L..1 backward. From null, S starts at the first forward row (the first backward row
-  when Backward is on) and Shift+S at the last step. Stepping past either end, or ■, sets null.
+- `phase` is one of `'dot' | 'scores' | 'softmax' | 'sum' | 'delta'`. On a dense or token layer
+  every forward step is `'dot'` (row i of W times the input, plus b_i, then the activation) and
+  every backward step `'delta'` (δ_i, row i of ∂L/∂W, ∂L/∂b_i). A working attention layer steps
+  a token at a time, and `i` is that token's first neuron: forward in three phases, `'scores'`
+  (q_i · k_j for every j), `'softmax'` (row i of A) and `'sum'` (z_i = Σ_j A_ij v_j), then one
+  `'delta'` step per token backward (∂z_i, ∂A, ∂S, ∂q_i, ∂k_i, ∂v_i). matrix.js sets no other values.
+- Order: every row (or attention token and phase) of layers 1..L forward, then, only when
+  `state.bwd` exists, every row (or attention token) of layers L..1 backward. From null, S starts
+  at the first forward step (the first backward step when Backward is on) and Shift+S at the last
+  step. Stepping past either end, or ■, sets null.
 - A step switches Batch off; a bwd step switches Backward on. matrix.js resets `anim` to null
   when it no longer fits the net (row gone, or `bwd` without `state.bwd`), when Batch is turned
   on, and when Backward is turned off during a bwd step.
 - view.js lights neuron i of layer l (class `lit`). For fwd it also lights its incoming edges and
   their sources, for bwd its outgoing edges and their targets; everything else dims, and a pulse
   runs along the lit edges (source to target for fwd, reversed for bwd). `phase` only restarts
-  the pulse when it changes.
+  the pulse when it changes. On an attention layer it lights the token's Z neurons: `'scores'`
+  its query and the keys it may see, `'softmax'` its row of attention edges with their A_ij,
+  `'sum'` the same edges with pulses from the values; backward, all of them plus the token's
+  outgoing edges.
 - matrix.js highlights row i of W, b_i and (z_i, a_i) for fwd, or the backward row for bwd, plus
-  the input vector. It shows the step's arithmetic in a box under layer l, and its toolbar reads
-  `forward · layer l · row i/n`.
+  the input vector (on an attention layer: the token's row of Q, S, A or Z, by phase). It shows
+  the step's arithmetic in a box under layer l, and its toolbar reads `forward · layer l · row i/n`
+  (`forward · layer l · token i/n · scores`, and so on, on an attention layer).
 
 **Performance**
 - `net` / `values` can fire every animation frame while training.
@@ -262,6 +349,12 @@ store.load(net | json, { history = true })   // swap in a whole net (normalized)
   1 POS, then 5 extra colours), alpha by the margin over the runner-up. Per-neuron maps: sigmoid
   and softmax on [0, 1], tanh on [-1, 1], anything else on ± that neuron's max |a| over the
   grid, alpha as `colorFor`. `HI` rings the current sample.
+
+**Numbers**
+- Values show `model.fmt(x, 2)` (the inspector's gradient lines 3 decimals), with a Unicode minus
+  in HTML. Gradients (δ, ∂L/∂a, ∂L/∂W, ∂L/∂b, attention's ∂ matrices and the step-through's
+  backward numbers) use `model.fmtg`, the same way in the matrix panel, the cards and the view's
+  δ and ∂L/∂w labels, so a small gradient reads 0.0034 or 3.4e−4 rather than 0.00.
 
 ## DOM and module interface (shell)
 
@@ -313,7 +406,9 @@ ctx.inspector = {
   closeAll(), cards -> [{ target, pinned, el }],
 }
 ctx.matrix = { step(±1), toggle(key), opt, render(), update() }   // not a contract: for tests and the console.
-               // opt = { mode: 'fwd' | 'bwd', bias, batch, collapse, labels }; render() forces a rebuild
+               // opt = { mode: 'fwd' | 'bwd', bias, batch, collapse, labels, expand }; render() forces a rebuild.
+               //   expand: a comma-separated string of the token layer ids whose "Flattened: z = W a" form is
+               //   open (a string, so the audience mirror compares it by value)
 ```
 
 - Toolbar: the shell's groups `net` (New net…, + Layer, Layout, Fit, Randomize), `edit` (↶ ↷) and
@@ -324,10 +419,21 @@ ctx.matrix = { step(±1), toggle(key), opt, render(), update() }   // not a cont
   while that window is open (`audience.isOpen`, checked every second while the tab is shown).
   Toolbar buttons never take focus, so Space stays with training.
 - train.js sets no `ctx` field. Its named exports are `readSettings(net, model)`, `netShape`,
-  `defaultDataset`, `forwardMany(net, model, X, n, from, M)`, `datasetLoss` and
-  `adaptNet(net, model, ds, { seed })`; matrix.js imports `readSettings` for its Batch view. Test
-  handle: `document.querySelector('.nn-train').nnTrain` =
-  `{ play, pause, step, reset, adapt, loadSample(i), running, eval, point(i) }`.
+  `defaultDataset`, `forwardMany(net, model, X, n, from, M)`,
+  `datasetLoss(P, Y, n, K, loss, outAct, segments = 1)` and `adaptNet(net, model, ds, { seed })`;
+  matrix.js and inspector.js import `readSettings`. `datasetLoss`'s `segments` is the number of
+  softmax blocks of a token output layer (tokens × groups): its cross-entropy is their mean, as in
+  `backward`. `adaptNet` returns a sentence saying what it did, or throws an `Error` whose message
+  says why it can't (a token net on a plain dataset, another token count, an attention output of
+  the wrong width, shared or fixed weights laid out for other inputs), leaving the net untouched.
+  Test handle: `document.querySelector('.nn-train').nnTrain` =
+  `{ play, pause, step, reset, adapt, loadSample(i), stepSample(±1), running, eval, point(i) }`.
+  `stepSample` loads the next or previous dataset sample (from the one the inputs hold, else the
+  first or last), as the ◀ ▶ buttons under a sequence plot do.
+- The shell's **Delete** and **+ Layer** keep token layers whole, by view.js's rules (its
+  double-click and wiring code), and toast why instead of editing: Delete refuses one neuron of a
+  token, Q, K, V or attention layer, a fixed edge, and the Q, K, V layer an attention layer reads;
+  + Layer refuses to go right before an attention layer or next to a token layer.
 
 **Keys in the Net tab** (only when `ctx.active(e)`; never while typing)
 
@@ -364,7 +470,9 @@ nn.js publishes `window.mathboardNet = { store, ctx, audience, ready, mirrorStat
 onMirror(fn) -> off }`. `ready` turns true, and `window` gets the `mathboard:nn-ready` event, once
 every module has installed.
 - `mirrorState()` -> `{ net, sel, hover, anim, split, matrixHidden, matrix, weights }`, where
-  `matrix` is a copy of `ctx.matrix.opt` (or null) and `weights` the W labels toggle.
+  `matrix` is a copy of `ctx.matrix.opt` (or null, `expand` included) and `weights` the W labels
+  toggle. `hover` carries token hovers too, so the audience sees the token and attention row the
+  presenter points at.
 - `onMirror(fn)` fires on the store's `net`, `layout`, `sel`, `hover` and `anim` events, when
   the split changes, and one frame after any click in the toolbar or the matrix panel or a key
   up in the tab (the matrix toggles and W have no store event).

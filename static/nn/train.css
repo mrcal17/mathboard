@@ -79,6 +79,14 @@ body.clean .nn-train { display: none; }
 .nt-chart { height: 56px; }
 .nt-plot { aspect-ratio: 1 / 1; }
 
+/* sequence datasets: step through the samples (replaces click-a-point) */
+.nt-steps { display: flex; align-items: center; gap: 6px; margin-top: -2px; }
+.nt-steps[hidden] { display: none; }
+.nt-steps button { padding: 2px 10px; border-color: var(--ui-line); font-size: 11px; }
+.nt-steps-lab { flex: 1; text-align: center; color: var(--ui-muted); font-variant-numeric: tabular-nums; }
+/* the audience mirror and clean view (H, whose other rules live in nn.css) keep the label only */
+.nn-train.ro .nt-steps button, body.clean #nn .nn-train .nt-steps button { visibility: hidden; }
+
 .nt-cap { display: flex; flex-direction: column; gap: 2px; min-height: 30px; color: var(--ui-muted); }
 .nt-axes { font-size: 13px; color: var(--ui-fg); }
 .nt-axes .katex { font-size: 1em; }

@@ -5,6 +5,12 @@
 // Plots: the input space (decision boundary for 2-input nets, fitted curve for 1-input nets),
 // a hidden 2-neuron layer's activation space, and per-neuron heatmaps drawn into the nodes
 // through ctx.view.setNodeImage (throttled).
+//
+// Sequence datasets (kind 'seq', docs/NN_ATTENTION.md): the plot is the current sample instead,
+// one row per token (its features, its row of the chosen attention matrix, its outputs against
+// its targets), a ◀ ▶ sample stepper replaces click-a-point, and neuron maps are off. Nets with
+// attention are evaluated through model.predict (attention multiplies activations, which the
+// matrices can't express); Adapt network keeps token structure or refuses (see adaptNet).
 
 import { colorFor, HI } from './store.js';
 
@@ -31,20 +37,21 @@ export function netShape(net, model) {
   };
 }
 
-// Presets record their dataset in meta.train.dataset, which readSettings reads directly. Nets
-// saved before that carry only the preset's title, so for them (and only when meta.train names
-// no dataset) the title still picks the preset's dataset.
+// Presets record their dataset (and learning rate) in meta.train, which readSettings reads
+// directly. Nets saved before that carry only the preset's title, so for them (and only when
+// meta.train names none) the title still picks the preset's dataset and lr.
 let legacyTitles = null;
-function legacyPresetDataset(net, model) {
+function legacyPreset(net, model) {
   if (!legacyTitles) {
     legacyTitles = new Map();
     for (const p of Object.values(model.PRESETS || {})) {
-      if (!p.dataset) continue;
-      try { legacyTitles.set(p.build(1).meta.title, p.dataset); } catch { /* skip */ }
+      if (!p.dataset && !Number.isFinite(p.lr)) continue;
+      try { legacyTitles.set(p.build(1).meta.title, p); } catch { /* skip */ }
     }
   }
-  return legacyTitles.get(net.meta && net.meta.title);
+  return legacyTitles.get(net.meta && net.meta.title) || null;
 }
+const legacyPresetDataset = (net, model) => legacyPreset(net, model)?.dataset || undefined;
 
 // The dataset for a net whose meta.train.dataset is missing or unknown.
 export function defaultDataset(net, model) {
@@ -69,7 +76,7 @@ export function readSettings(net, model) {
     n: Math.round(num(raw.n, 200, 4, 5000)),
     noise: num(raw.noise, 0.1, 0, 10),
     seed: Math.round(num(raw.seed, 1)),
-    lr: num(raw.lr, 0.1, 1e-7, 1000),
+    lr: num(raw.lr, Number.isFinite(raw.lr) ? 0.1 : num(legacyPreset(net, model)?.lr, 0.1, 1e-7, 1000), 1e-7, 1000),
     batch: Math.round(num(raw.batch, 10, 0, 1e6)),
     speed: Math.round(num(raw.speed, 5, 1, 1000)),
     initSeed: Math.round(num(raw.initSeed, 1)),
@@ -87,6 +94,9 @@ export function readSettings(net, model) {
 // Returns acts[l] (Float64Array n x size_l, null below `from`), or null when a skip edge
 // bypasses layer `from` (then later layers are not a function of it alone).
 export function forwardMany(net, model, X, n, from = 0, M = model.matrices(net)) {
+  // Attention multiplies activations together, which the matrices can't express: the model's own
+  // forward pass then does every sample (only from the inputs).
+  if (M.some(m => m.kind === 'attention')) return from === 0 ? predictMany(net, model, X, n) : null;
   const L = net.layers.length;
   const sizes = [], pos = Object.create(null);
   for (let l = 0; l < L; l++) {
@@ -121,12 +131,12 @@ export function forwardMany(net, model, X, n, from = 0, M = model.matrices(net))
     }
     const act = net.layers[l].act;
     if (act === 'softmax') {
-      for (let s = 0; s < n; s++) {
-        const o = s * R;
+      const B = softmaxBlock(net.layers[l], R);   // per token (and group) on a token layer
+      for (let o = 0; o < n * R; o += B) {
         let mx = -Infinity, sum = 0;
-        for (let i = 0; i < R; i++) mx = Math.max(mx, Z[o + i]);
-        for (let i = 0; i < R; i++) { Z[o + i] = Math.exp(Z[o + i] - mx); sum += Z[o + i]; }
-        for (let i = 0; i < R; i++) Z[o + i] /= sum;
+        for (let i = 0; i < B; i++) mx = Math.max(mx, Z[o + i]);
+        for (let i = 0; i < B; i++) { Z[o + i] = Math.exp(Z[o + i] - mx); sum += Z[o + i]; }
+        for (let i = 0; i < B; i++) Z[o + i] /= sum;
       }
     } else {
       const f = model.ACTS && model.ACTS[act] && model.ACTS[act].f;
@@ -137,17 +147,50 @@ export function forwardMany(net, model, X, n, from = 0, M = model.matrices(net))
   return acts;
 }
 
+// ---- token layers (docs/NN_ATTENTION.md): tokens x d nodes per group, token-major
+
+const layerTokens = ly => (ly && Number.isInteger(ly.tokens) && ly.tokens > 1 ? ly.tokens : 1);
+const layerGroups = ly => (ly && Array.isArray(ly.groups) && ly.groups.length ? ly.groups.length : 1);
+const isTokenLayer = ly => !!ly && (layerTokens(ly) > 1 || layerGroups(ly) > 1 || ly.kind === 'attention');
+function softmaxBlock(ly, R) {
+  const k = layerTokens(ly) * layerGroups(ly);
+  return k > 1 && R % k === 0 ? R / k : R;
+}
+
+// forwardMany through model.predict: acts[l] = Float64Array n x size_l, acts[0] = X.
+function predictMany(net, model, X, n) {
+  const sizes = net.layers.map((_, l) => model.nodesIn(net, l).length), d0 = sizes[0];
+  const rows = new Array(n);
+  for (let s = 0; s < n; s++) rows[s] = X.subarray ? X.subarray(s * d0, (s + 1) * d0) : X.slice(s * d0, (s + 1) * d0);
+  const per = model.predict(net, rows, { layer: 'all' });
+  const acts = sizes.map(sz => new Float64Array(n * sz));
+  for (let s = 0; s < n; s++) {
+    const all = per[s];
+    if (!all) return null;
+    for (let l = 1; l < sizes.length; l++) {
+      const a = all[l], o = s * sizes[l];
+      if (!a) return null;
+      for (let i = 0; i < sizes[l]; i++) acts[l][o + i] = a[i];
+    }
+  }
+  acts[0] = X;
+  return acts;
+}
+
 // Mean loss over a dataset, per the contract's definitions (xent falls back to mse unless the
-// output layer is softmax or sigmoid). P: n x K predictions, Y: rows of targets.
-export function datasetLoss(P, Y, n, K, loss, outAct) {
+// output layer is softmax or sigmoid). P: n x K predictions, Y: rows of targets. segments: the
+// softmax blocks of a token output layer (tokens x groups); its cross-entropy is their mean.
+export function datasetLoss(P, Y, n, K, loss, outAct, segments = 1) {
   const eps = 1e-12;
   const xent = loss === 'xent' && (outAct === 'softmax' || outAct === 'sigmoid');
+  const m = segments > 1 && K % segments === 0 ? segments : 1;
   let sum = 0;
   for (let s = 0; s < n; s++) {
     const y = Y[s], o = s * K;
     let e = 0;
     if (xent && outAct === 'softmax') {
       for (let k = 0; k < K; k++) e -= y[k] * Math.log(Math.max(P[o + k], eps));
+      e /= m;
     } else if (xent) {
       for (let k = 0; k < K; k++) {
         const a = Math.min(1 - eps, Math.max(eps, P[o + k]));
@@ -166,7 +209,21 @@ export function datasetLoss(P, Y, n, K, loss, outAct) {
 // Resize the input and output layers to fit a dataset; hidden layers are kept. New nodes are
 // wired densely to the neighbouring layer with small Xavier weights. The output activation and
 // the loss are set to suit the task. Returns a sentence describing the result.
+//
+// Token nets (docs/NN_ATTENTION.md) are adapted token by token instead, so their structure survives:
+// - a sequence dataset on a plain net: the input and output are resized flat, then marked as
+//   `tokens` rows (the hidden layers stay dense, an MLP on the whole sequence);
+// - a net with attention, groups, token hidden layers, shared or fixed edges: only the number of
+//   features per token changes. A new feature copies the wiring of its token's last feature,
+//   with a new entry of each shared matrix (one draw per entry, so the copies stay tied) and no
+//   fixed edges (a residual has no partner for it).
+// Anything else (a token net on a plain dataset, another token count, an attention output of the
+// wrong width) throws an Error whose message says why, and leaves the net untouched.
 export function adaptNet(net, model, ds, { seed = 1 } = {}) {
+  if (ds.kind === 'seq' || net.layers.some(isTokenLayer)) {
+    const msg = adaptTokens(net, model, ds, seed);
+    if (msg) return msg;   // null: a plain net again, adapted below
+  }
   const rand = model.rng(seed);
   const outAct = ds.kind === 'class' ? (ds.outputs > 1 ? 'softmax' : 'sigmoid') : 'identity';
   if (!net.layers.length) model.addLayer(net, 0, { name: 'input', act: 'identity', size: 0 });
@@ -179,6 +236,119 @@ export function adaptNet(net, model, ds, { seed = 1 } = {}) {
   net.meta.loss = ds.kind === 'class' ? 'xent' : 'mse';
   const sizes = net.layers.map((_, l) => model.nodesIn(net, l).length).join(' → ');
   return `Adapted to ${sizes}: ${outAct} output, ${net.meta.loss === 'xent' ? 'cross-entropy' : 'MSE'} loss`;
+}
+
+// The output activation and loss a sequence dataset asks for (identity + mse unless it says).
+function seqHead(ds) {
+  const act = typeof ds.outAct === 'string' ? ds.outAct : ds.loss === 'xent' ? 'softmax' : 'identity';
+  return { act, loss: ds.loss === 'xent' || ds.loss === 'mse' ? ds.loss : act === 'identity' ? 'mse' : 'xent' };
+}
+
+function adaptTokens(net, model, ds, seed) {
+  const name = ds.label || 'this dataset';
+  const L = net.layers.length, last = L - 1;
+  const tokenHidden = net.layers.some((ly, l) => ly.kind === 'attention' || layerGroups(ly) > 1 || (l > 0 && l < last && layerTokens(ly) > 1));
+  const structured = tokenHidden || net.edges.some(e => e.tie || e.fixed);
+  if (ds.kind !== 'seq') {
+    if (tokenHidden) {
+      throw new Error(`This net works on token sequences and ${name} is not one: pick a sequence dataset, or load a preset made for ${name}.`);
+    }
+    for (const l of [0, last]) delete net.layers[l].tokens;   // a flat vector again
+    return null;
+  }
+  const T = Math.max(1, ds.tokens | 0 || 1);
+  const dIn = ds.inputs / T, dOut = ds.outputs / T;
+  if (!Number.isInteger(dIn) || !Number.isInteger(dOut)) throw new Error(`${name} does not split into ${T} tokens.`);
+  const head = seqHead(ds);
+  const rand = model.rng(seed);
+  const outLayer = net.layers[last];
+  if (structured && !tokenHidden) {
+    throw new Error(`This net's shared or fixed weights are laid out for its own inputs, so Adapt can't rewire it for ${T} tokens × ${dIn} features: load a preset made for ${name}.`);
+  }
+  if (!structured) {
+    resizeLayer(net, model, 0, ds.inputs, rand);
+    resizeLayer(net, model, last, ds.outputs, rand);
+    for (const l of [0, last]) { if (T > 1) net.layers[l].tokens = T; else delete net.layers[l].tokens; }
+    model.setLayer(net, outLayer.id, { act: head.act });
+  } else {
+    const bad = net.layers.find(ly => isTokenLayer(ly) && layerTokens(ly) !== T);
+    if (bad) {
+      throw new Error(`This net has ${layerTokens(bad)} tokens and ${name} has ${T}. Every token layer is built for its token count: load a preset made for ${name}.`);
+    }
+    const plan = [[0, dIn], [last, dOut]];
+    for (const [l, d1] of plan) {
+      const ly = net.layers[l], n = model.nodesIn(net, l).length, d0 = n / T;
+      if (d0 === d1) continue;
+      if (ly.kind === 'attention') throw new Error(`The output is an attention layer, whose width comes from V: it can't be resized to ${d1} features per token.`);
+      if (layerGroups(ly) > 1 || !Number.isInteger(d0) || d0 < 1) throw new Error(`Layer ${l} can't be resized token by token.`);
+    }
+    for (const [l, d1] of plan) {
+      const d0 = model.nodesIn(net, l).length / T;
+      if (d0 !== d1) resizeTokenLayer(net, model, l, T, d0, d1, rand);
+      if (T > 1) net.layers[l].tokens = T;
+    }
+    if (outLayer.kind !== 'attention') model.setLayer(net, outLayer.id, { act: head.act });
+  }
+  net.meta = net.meta || {};
+  net.meta.loss = head.loss;
+  const act = net.layers[last].act;
+  return `Adapted to ${T}×${dIn} → … → ${T}×${dOut} tokens: ${act} output, ${head.loss === 'xent' ? 'cross-entropy' : 'MSE'} loss`;
+}
+
+// Change the features per token of layer l from d0 to d1, keeping T tokens (token-major order).
+function resizeTokenLayer(net, model, l, T, d0, d1, rand) {
+  const lay = net.layers[l];
+  const nodes = model.nodesIn(net, l);
+  // A tokens × d grid (a row per token, a column per feature, as the 3-token attention presets lay
+  // out their inputs) stays a grid: the same rows, the columns at the same step.
+  const grid = d0 > 1 && new Set(nodes.map(n => n.x)).size === d0 && nodes.every((n, k) => n.y === nodes[k - (k % d0)].y);
+  const gx = grid ? nodes[0].x : 0, fx = grid ? nodes[1].x - nodes[0].x : 0;
+  const rows = grid ? Array.from({ length: T }, (_, t) => nodes[t * d0].y) : null;
+  const ys = nodes.map(n => n.y), cy = ys.reduce((s, y) => s + y, 0) / (ys.length || 1);
+  const gap = ys.length > 1 ? Math.max(30, (Math.max(...ys) - Math.min(...ys)) / (ys.length - 1)) : 60;
+  if (d1 < d0) {
+    for (let t = 0; t < T; t++) for (let f = d1; f < d0; f++) model.removeNode(net, nodes[t * d0 + f].id);
+  } else {
+    const tieRe = /^(.*):\s*(\d+)\s*,\s*(\d+)\s*$/;
+    const drawn = new Map();                 // new tie id -> its one weight
+    const lim = Math.sqrt(3 / d1);
+    for (let t = 0; t < T; t++) {
+      const tmpl = nodes[t * d0 + d0 - 1];   // the token's last feature: new ones copy its wiring
+      const wiring = net.edges.filter(e => (e.from === tmpl.id || e.to === tmpl.id) && !e.fixed).map(e => ({ ...e }));
+      const lab = /^(.*)_\{\s*(\d+)\s*,\s*(\d+)\s*\}$/.exec(tmpl.label || '');
+      const btie = typeof tmpl.tie === 'string' ? /^(.*):\s*(\d+)\s*$/.exec(tmpl.tie) : null;   // shared bias 'b_Q:f'
+      for (let f = d0; f < d1; f++) {
+        const id = model.addNode(net, lay.id, {
+          index: t * d1 + f, x: tmpl.x, y: tmpl.y,
+          label: lab ? `${lab[1]}_{${t + 1},${f + 1}}` : undefined,
+        });
+        if (id == null) continue;
+        if (btie) {
+          const nd = model.node(net, id);
+          nd.tie = `${btie[1]}:${f + 1}`;
+          nd.bias = 0;
+        }
+        for (const e of wiring) {
+          const out = e.from === tmpl.id, other = out ? e.to : e.from;
+          const m = e.tie ? tieRe.exec(e.tie) : null;
+          const tie = m ? (out ? `${m[1]}:${f + 1},${m[3]}` : `${m[1]}:${m[2]},${f + 1}`) : e.tie || null;
+          let w = tie && drawn.has(tie) ? drawn.get(tie) : (rand() * 2 - 1) * lim;
+          if (tie) drawn.set(tie, w);
+          const eid = out ? model.connect(net, id, other, w) : model.connect(net, other, id, w);
+          const ne = eid != null ? model.edge(net, eid) : null;
+          if (ne && tie) ne.tie = tie;
+        }
+      }
+    }
+  }
+  const now = model.nodesIn(net, l), dn = now.length / T, extra = gap * 0.35;
+  if (grid && dn > 1) {
+    now.forEach((n, k) => { n.x = gx + (k % dn) * fx; n.y = rows[Math.floor(k / dn)]; });
+    return;
+  }
+  // even spacing around the old centre, a little extra between tokens
+  const span = (now.length - 1) * gap + (T - 1) * extra;
+  now.forEach((n, k) => { n.y = Math.round((cy - span / 2 + k * gap + Math.floor(k / dn) * extra) * 10) / 10; });
 }
 
 function resizeLayer(net, model, l, size, rand) {
@@ -284,7 +454,7 @@ export function install(ctx) {
         <label>noise <input type="number" data-k="noise" min="0" max="10" step="0.05"></label>
         <label>seed <input type="number" data-k="seed" step="1"></label>
       </div>
-      <div class="nt-warn" hidden><span></span><button data-act="adapt" title="Resize the input and output layers to fit the dataset; hidden layers are kept">Adapt network</button></div>
+      <div class="nt-warn" hidden><span></span><button data-act="adapt" title="Resize the input and output layers to fit the dataset; hidden layers are kept. A token net keeps its structure: it changes the features per token, or says why it can't">Adapt network</button></div>
       <div class="nt-grid nt-g4">
         <label>loss <select data-k="loss"><option value="mse">MSE</option><option value="xent">x-entropy</option></select></label>
         <label>rate <select data-k="lr"></select></label>
@@ -311,6 +481,11 @@ export function install(ctx) {
         <label class="nt-check" title="Each neuron's activation over the input domain, drawn inside its node"><input type="checkbox" data-k="maps"> neuron maps</label>
       </div>
       <canvas class="nt-plot"></canvas>
+      <div class="nt-steps" hidden>
+        <button data-act="prev" title="Load the previous sample">&#9664;</button>
+        <span class="nt-steps-lab"></span>
+        <button data-act="next" title="Load the next sample">&#9654;</button>
+      </div>
       <div class="nt-cap"><span class="nt-axes"></span><span class="nt-info"></span></div>
     </div>`;
   stage.appendChild(panel);
@@ -322,10 +497,15 @@ export function install(ctx) {
   const warn = $('.nt-warn'), hint = $('.nt-hint'), mini = $('.nt-mini');
   const axesEl = $('.nt-axes'), infoEl = $('.nt-info');
   const goBtns = [...panel.querySelectorAll('.nt-go')], stepBtn = $('[data-act="step"]');
+  const steps = $('.nt-steps'), stepsLab = $('.nt-steps-lab');
   const HINT = ro ? '' : 'click a point to load it as the current sample';
+  const SEQ_HINT = ro ? '' : 'hover a cell for its value; ◀ ▶ load the samples';
 
+  // A sequence dataset's shape reads tokens × features: 3×2 → 3×2.
+  const dsShape = v => (v.kind === 'seq' && v.tokens > 1
+    ? `${v.tokens}&times;${v.inputs / v.tokens}&rarr;${v.tokens}&times;${v.outputs / v.tokens}` : `${v.inputs}&rarr;${v.outputs}`);
   K('dataset').innerHTML = Object.entries(model.DATASETS || {})
-    .map(([k, v]) => `<option value="${k}">${esc(v.label || k)} (${v.inputs}&rarr;${v.outputs})</option>`).join('');
+    .map(([k, v]) => `<option value="${k}">${esc(v.label || k)} (${dsShape(v)})</option>`).join('');
   K('lr').innerHTML = LRS.map(v => `<option value="${v}">${v}</option>`).join('');
   K('batch').innerHTML = BATCHES.map(v => `<option value="${v}">${v || 'all'}</option>`).join('');
   K('speed').innerHTML = SPEEDS.map(v => `<option value="${v}">${v}&times;</option>`).join('');
@@ -372,7 +552,10 @@ export function install(ctx) {
     if (data && data.key === key) return data;
     hover = -1;   // the hovered index belonged to the old samples
     const ds = model.DATASETS[t.dataset];
-    const { X, Y } = ds.make(t.n, t.seed, t.noise);
+    let { X, Y } = ds.make(t.n, t.seed, t.noise);
+    // A sequence sample may come as tokens x features rows: the net reads it flat, token-major.
+    const flat = r => (Array.isArray(r) && r.some(Array.isArray) ? r.flat(Infinity) : r);
+    if (ds.kind === 'seq') { X = X.map(flat); Y = Y.map(flat); }
     const n = X.length, dim = ds.inputs, Kout = ds.outputs;
     const Xf = new Float64Array(n * dim);
     X.forEach((x, s) => { for (let j = 0; j < dim; j++) Xf[s * dim + j] = x[j]; });
@@ -386,7 +569,9 @@ export function install(ctx) {
     });
     // Plot domain: square box around the points (2-D), padded range (1-D).
     let dom;
-    if (dim === 2) {
+    if (ds.kind === 'seq') {
+      dom = null;   // no input-space plot: drawSeq shows the sample's tokens instead
+    } else if (dim === 2) {
       let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
       for (const x of X) { x0 = Math.min(x0, x[0]); x1 = Math.max(x1, x[0]); y0 = Math.min(y0, x[1]); y1 = Math.max(y1, x[1]); }
       const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, h = (Math.max(x1 - x0, y1 - y0) / 2 || 1) * 1.1;
@@ -397,7 +582,8 @@ export function install(ctx) {
       const px = (x1 - x0 || 1) * 0.06, py = (hi - lo || 1) * 0.18;
       dom = { x0: x0 - px, x1: x1 + px, y0: lo - py, y1: hi + py };
     }
-    data = { key, ds, X, Y, Xf, n, dim, K: Kout, cls, mid, half, dom, kind: ds.kind, grid: null, curve: null, lines: null };
+    const T = ds.kind === 'seq' ? Math.max(1, ds.tokens | 0 || 1) : 1;
+    data = { key, ds, X, Y, Xf, n, dim, K: Kout, cls, mid, half, dom, kind: ds.kind, grid: null, curve: null, lines: null, T };
     if (dom && dim === 2) {
       const g = new Float64Array(GRID * GRID * 2);
       for (let r = 0; r < GRID; r++) for (let c = 0; c < GRID; c++) {
@@ -426,9 +612,14 @@ export function install(ctx) {
     return data;
   }
 
+  // Sizes match; a net with token inputs must also have the dataset's token count.
+  const tokensOk = (net, ds) => {
+    const T0 = layerTokens(net.layers[0]);
+    return T0 === 1 || T0 === (ds.kind === 'seq' ? Math.max(1, ds.tokens | 0) : 1);
+  };
   const fits = (net, ds) => {
     const sh = netShape(net, model);
-    return !!ds && ds.inputs === sh.inputs && ds.outputs === sh.outputs;
+    return !!ds && ds.inputs === sh.inputs && ds.outputs === sh.outputs && tokensOk(net, ds);
   };
 
   function orderFor(d, t, epoch) {
@@ -448,7 +639,8 @@ export function install(ctx) {
     const acts = A || forwardMany(net, model, d.Xf, d.n);
     const out = acts && acts[L - 1];
     if (!out) return null;
-    const loss = datasetLoss(out, d.Y, d.n, d.K, net.meta?.loss || 'mse', net.layers[L - 1].act);
+    const lastL = net.layers[L - 1];
+    const loss = datasetLoss(out, d.Y, d.n, d.K, net.meta?.loss || 'mse', lastL.act, d.K / softmaxBlock(lastL, d.K));
     let acc = null;
     if (d.kind === 'class') {
       let hit = 0;
@@ -575,7 +767,13 @@ export function install(ctx) {
     if (running) pause();
     const net = store.net, t = readSettings(net, model), ds = model.DATASETS[t.dataset];
     if (!ds) return;
-    const msg = adaptNet(net, model, ds, { seed: t.initSeed });
+    // Token nets refuse what they can't do without breaking their structure: work on a copy, so
+    // a refusal leaves the live net exactly as it was.
+    const tmp = model.clone(net);
+    let msg;
+    try { msg = adaptNet(tmp, model, ds, { seed: t.initSeed }); } catch (err) { ctx.toast?.(err.message, 6000); return; }
+    for (const k of Object.keys(net)) delete net[k];
+    Object.assign(net, tmp);
     net.meta.train = { ...t, seen: 0, steps: 0, hist: [], every: 1 };
     store.commit('Adapt network');
     try { ctx.view?.fit?.(300); } catch { /* optional */ }
@@ -589,7 +787,31 @@ export function install(ctx) {
     const d = getData(t), L = net.layers.length;
     model.nodesIn(net, 0).forEach((nd, j) => model.setNode(net, nd.id, { value: d.X[i][j] }));
     if (ds.outputs === sh.outputs) model.nodesIn(net, L - 1).forEach((nd, j) => model.setNode(net, nd.id, { target: d.Y[i][j] }));
+    lastLoaded = i;
     if (!running) store.commit(`Load sample ${i + 1}`);
+    else { dirty = true; kick(); }
+  }
+
+  // Which dataset sample the net's inputs hold (-1: none of them). The stepper moves from there.
+  let lastLoaded = -1, curKey = '', curIdx = -1;
+  function currentSample(net, d) {
+    const ins = model.nodesIn(net, 0);
+    const key = d.key + '|' + ins.map(q => q.value).join(',');
+    if (key === curKey) return curIdx;
+    curKey = key;
+    const eq = s => d.X[s] && ins.every((q, j) => Math.abs(d.X[s][j] - q.value) < 1e-9);
+    if (lastLoaded >= 0 && lastLoaded < d.n && eq(lastLoaded)) return (curIdx = lastLoaded);
+    curIdx = -1;
+    for (let s = 0; s < d.n; s++) if (eq(s)) { curIdx = s; break; }
+    return curIdx;
+  }
+
+  function stepSample(dir) {
+    if (ro) return;
+    const net = store.net, t = readSettings(net, model), ds = model.DATASETS[t.dataset];
+    if (!ds) return;
+    const d = getData(t), cur = currentSample(net, d);
+    loadSample(cur < 0 ? (dir > 0 ? 0 : d.n - 1) : (cur + dir + d.n) % d.n);
   }
 
   function writeSettings(patch, label) {
@@ -615,10 +837,43 @@ export function install(ctx) {
     return out;
   }
 
+  // The attention layers (and heads) a sequence plot can show: values `${layerId}#${head}`.
+  function attnChoices(net) {
+    const out = [];
+    net.layers.forEach((ly, l) => {
+      if (ly.kind !== 'attention') return;
+      const H = Number.isInteger(ly.heads) && ly.heads > 0 ? ly.heads : 1;
+      for (let hd = 0; hd < H; hd++) {
+        out.push({ l, hd, value: `${ly.id}#${hd}`, label: `attention: ${ly.name || 'layer ' + l}${H > 1 ? ` · head ${hd + 1}` : ''}` });
+      }
+    });
+    return out;
+  }
+  const attnChoice = (net, t) => { const cs = attnChoices(net); return cs.find(c => c.value === t.space) || cs[0] || null; };
+
   function syncControls() {
     const net = store.net, t = readSettings(net, model);
+    const seq = model.DATASETS[t.dataset]?.kind === 'seq';
     for (const k of ['dataset', 'n', 'noise', 'seed', 'lr', 'batch', 'speed', 'initSeed', 'maps']) setVal(K(k), t[k]);
     setVal(K('loss'), net.meta?.loss === 'xent' ? 'xent' : 'mse');
+    const maps = K('maps');
+    maps.disabled = ro || seq;
+    if (seq) maps.checked = false;   // shown off; the saved setting comes back with a plain dataset
+    maps.parentElement.title = seq ? 'Neuron maps are off for sequence datasets: a neuron sees a whole sequence, not a point in a plane'
+      : 'Each neuron\'s activation over the input domain, drawn inside its node';
+    if (seq) {
+      const cs = attnChoices(net);
+      const sig = 'seq|' + cs.map(c => c.value + ':' + c.label).join(',');
+      const sel = K('space');
+      if (sig !== spaceSig) {
+        spaceSig = sig;
+        sel.innerHTML = cs.length ? cs.map(c => `<option value="${esc(c.value)}">${esc(c.label)}</option>`).join('')
+          : '<option value="">outputs vs targets</option>';
+        sel.title = cs.length ? 'Which attention matrix to show for the current sample' : 'This net has no attention layer';
+      }
+      setVal(sel, attnChoice(net, t)?.value ?? '');
+      return;
+    }
     const list = spaceLayers(net);
     const sig = list.map(l => net.layers[l].id + ':' + net.layers[l].name).join(',');
     const sel = K('space');
@@ -670,6 +925,8 @@ export function install(ctx) {
     else if (act === 'reset') reset();
     else if (act === 'dice') { const s = 1 + Math.floor(Math.random() * 9999); reset(s); }
     else if (act === 'adapt') adapt();
+    else if (act === 'prev') stepSample(-1);
+    else if (act === 'next') stepSample(1);
     b.blur();   // so Space goes to the shortcut, not the focused button
   });
 
@@ -801,7 +1058,18 @@ export function install(ctx) {
     const mis = !!ds && !ok;
     warn.hidden = !mis;
     if (mis) {
-      warn.firstChild.textContent = `This net is ${sh.inputs} → … → ${sh.outputs}; ${ds.label || t.dataset} needs ${ds.inputs} → … → ${ds.outputs}. `;
+      // token shapes read tokens × features on both sides
+      const T0 = layerTokens(net.layers[0]), TL = layerTokens(net.layers[net.layers.length - 1]);
+      const side = (n, T) => (T > 1 && n % T === 0 ? `${T}×${n / T}` : `${n}`);
+      const Td = ds.kind === 'seq' ? Math.max(1, ds.tokens | 0) : 1;
+      warn.firstChild.textContent = `This net is ${side(sh.inputs, T0)} → … → ${side(sh.outputs, TL)}; ` +
+        `${ds.label || t.dataset} needs ${side(ds.inputs, Td)} → … → ${side(ds.outputs, Td)}. `;
+    }
+    const seq = !!d && d.kind === 'seq';
+    steps.hidden = !seq;
+    if (seq) {
+      const cur = sh.inputs === ds.inputs ? currentSample(net, d) : -1;
+      stepsLab.textContent = cur >= 0 ? `sample ${cur + 1} of ${d.n}` : `not a sample (${d.n} in the set)`;
     }
     for (const b of goBtns) b.disabled = ro || !ok;
     stepBtn.disabled = ro || !ok;
@@ -934,11 +1202,161 @@ export function install(ctx) {
     g.stroke();
   }
 
+  // ---------------------------------------------------------------- sequence plot
+  // One row per token of the current sample (the net's live inputs): its features x_t, its row of
+  // the chosen attention matrix A (which tokens it reads), then its outputs ŷ_t as bars with the
+  // targets y_t as ticks. Canvas height follows the token count.
+
+  let seqCells = [];   // hover boxes { x, y, w, h, text } in canvas px
+  function drawSeq(net, t, d, ok, inOk) {
+    const S = size.plot;
+    pts = null;
+    seqCells = [];
+    if (!S) return;
+    const p = pal(), T = d.T, L = net.layers.length, fw = store.state.fwd;
+    const f2 = v => (model.fmt ? model.fmt(v, 2) : v.toFixed(2));
+    const font = (px, w = '') => `${w}${px}px system-ui, "Segoe UI", sans-serif`;
+    if (!inOk) {
+      const g = sizeCanvas(plot, S, 64);
+      g.fillStyle = p.bg; g.fillRect(0, 0, S, 64);
+      g.fillStyle = p.muted; g.font = font(12);
+      g.fillText('The network does not fit this dataset', 10, 36);
+      setAxes('seq', []);
+      return;
+    }
+    const ins = model.nodesIn(net, 0), outs = L > 1 ? model.nodesIn(net, L - 1) : [];
+    const dIn = Math.max(1, Math.round(ins.length / T)), dOut = ok ? Math.max(1, Math.round(outs.length / T)) : 0;
+    const ch = attnChoice(net, t);
+    const A = ch ? fw?.attn?.[ch.l]?.heads?.[ch.hd]?.A : null;
+    const causal = ch ? !!net.layers[ch.l].causal : false;
+    const nA = ch ? T : 0;
+    const pad = 8, lw = 20, gap = 9, head = 30, minOut = 66;
+    const fit = k => Math.floor((S - 2 * pad - lw - 2 * gap - minOut) / Math.max(1, k));
+    let showX = true, c = Math.min(36, fit(dIn + nA));
+    if (c < 15) { showX = false; c = Math.min(36, fit(nA || 1)); }
+    c = Math.max(12, c);
+    const H = pad + head + T * c + 26;
+    const g = sizeCanvas(plot, S, H);
+    g.fillStyle = p.bg; g.fillRect(0, 0, S, H);
+    g.textBaseline = 'middle';
+    const y0 = pad + head;
+    const xX = pad + lw, xA = showX ? xX + dIn * c + gap : xX, xO = xA + nA * c + (nA || showX ? gap : 0), wO = S - pad - xO;
+    const numPx = c >= 30 ? 10 : c >= 25 ? 9 : 8;   // cell values, when they fit in the cell
+    const title = (x, s) => { g.font = font(10.5, '600 '); g.fillStyle = p.fg; g.textAlign = 'left'; g.fillText(s, x, pad + 5); };
+    const colLab = (x, s) => { g.font = font(9.5); g.fillStyle = p.muted; g.textAlign = 'center'; g.fillText(s, x, pad + 20); };
+    const box = (x, y, v, max, txt, masked) => {
+      if (masked) {
+        g.save();
+        g.beginPath(); g.rect(x + 1, y + 1, c - 2, c - 2); g.clip();
+        g.strokeStyle = p.line; g.lineWidth = 1;
+        g.beginPath();
+        for (let k = -c; k < c; k += 5) { g.moveTo(x + k, y + c); g.lineTo(x + k + c, y); }
+        g.stroke();
+        g.restore();
+      } else {
+        g.fillStyle = Number.isFinite(v) ? colorFor(v, max, p.theme) : 'rgba(128,128,128,0.25)';
+        g.fillRect(x + 1, y + 1, c - 2, c - 2);
+      }
+      const s = masked ? '–' : txt;
+      g.font = font(numPx);
+      if (masked || g.measureText(s).width <= c - 3) {
+        g.fillStyle = masked ? p.muted : p.fg; g.textAlign = 'center';
+        g.fillText(s, x + c / 2, y + c / 2 + 0.5);
+      }
+    };
+    // row labels: token t
+    g.font = font(10); g.fillStyle = p.muted; g.textAlign = 'right';
+    for (let i = 0; i < T; i++) g.fillText(`t${i + 1}`, xX - 5, y0 + i * c + c / 2);
+    // x_t
+    if (showX) {
+      title(xX, 'x');
+      let mx = 0;
+      for (const q of ins) if (Number.isFinite(q.value)) mx = Math.max(mx, Math.abs(q.value));
+      for (let f = 0; f < dIn; f++) colLab(xX + f * c + c / 2, String(f + 1));
+      for (let i = 0; i < T; i++) for (let f = 0; f < dIn; f++) {
+        const v = ins[i * dIn + f]?.value, x = xX + f * c, y = y0 + i * c;
+        box(x, y, v, mx || 1, f2(v), false);
+        seqCells.push({ x, y, w: c, h: c, text: `x: token ${i + 1}, feature ${f + 1} = ${f2(v)}` });
+      }
+    }
+    // A: rows are queries (this token), columns the keys it reads
+    if (ch) {
+      title(xA, net.layers[ch.l].heads > 1 ? `A, head ${ch.hd + 1}` : 'A (attention)');
+      for (let j = 0; j < T; j++) colLab(xA + j * c + c / 2, `t${j + 1}`);
+      for (let i = 0; i < T; i++) for (let j = 0; j < T; j++) {
+        const a = A?.[i]?.[j], masked = causal && j > i, x = xA + j * c, y = y0 + i * c;
+        box(x, y, a, 1, Number.isFinite(a) ? f2(a) : '?', masked);
+        seqCells.push({ x, y, w: c, h: c, text: masked ? `A(${i + 1},${j + 1}): masked, token ${i + 1} can't read the later token ${j + 1}`
+          : `A(${i + 1},${j + 1}) = ${Number.isFinite(a) ? f2(a) : '?'}: how much token ${i + 1} reads token ${j + 1}` });
+      }
+    }
+    // outputs against targets
+    title(xO, ok ? 'ŷ vs y' : 'outputs');
+    if (!ok || wO < 30) {
+      g.font = font(10); g.fillStyle = p.muted; g.textAlign = 'left';
+      g.fillText(ok ? '' : 'outputs don\'t fit', xO, y0 + c / 2);
+    } else {
+      const yh = outs.map(q => fw?.node?.[q.id]?.a), ys = outs.map(q => q.target);
+      let vmax = 0.1;
+      for (const v of [...yh, ...ys]) if (Number.isFinite(v)) vmax = Math.max(vmax, Math.abs(v));
+      const x0 = xO + wO / 2, half = wO / 2 - 4, X = v => x0 + clamp(v / vmax, -1, 1) * half;
+      g.strokeStyle = p.muted; g.globalAlpha = 0.45; g.lineWidth = 1;
+      g.beginPath(); g.moveTo(Math.round(x0) + 0.5, y0); g.lineTo(Math.round(x0) + 0.5, y0 + T * c); g.stroke();
+      g.globalAlpha = 1;
+      g.font = font(9); g.fillStyle = p.muted;
+      g.textAlign = 'left'; g.fillText(`−${f2(vmax)}`, xO, pad + 20);
+      g.textAlign = 'right'; g.fillText(f2(vmax), xO + wO, pad + 20);
+      const lh = (c - 4) / dOut;
+      for (let i = 0; i < T; i++) {
+        if (i) { g.strokeStyle = p.line; g.beginPath(); g.moveTo(xO, y0 + i * c + 0.5); g.lineTo(xO + wO, y0 + i * c + 0.5); g.stroke(); }
+        for (let f = 0; f < dOut; f++) {
+          const k = i * dOut + f, a = yh[k], y = ys[k], ly = y0 + i * c + 2 + f * lh;
+          if (Number.isFinite(a)) {
+            g.fillStyle = css(a >= 0 ? p.pos : p.neg);
+            g.globalAlpha = 0.85;
+            const xa = X(a);
+            g.fillRect(Math.min(x0, xa), ly + 1, Math.abs(xa - x0), Math.max(1, lh - 2));
+            g.globalAlpha = 1;
+          }
+          if (typeof y === 'number' && Number.isFinite(y)) {
+            const xy = X(y);
+            g.strokeStyle = HI; g.lineWidth = 2.5;
+            g.beginPath(); g.moveTo(xy, ly - 0.5); g.lineTo(xy, ly + lh + 0.5); g.stroke();
+          }
+          seqCells.push({ x: xO, y: ly, w: wO, h: lh, text: `token ${i + 1}, output ${f + 1}: ŷ = ${Number.isFinite(a) ? f2(a) : '?'}, y = ${typeof y === 'number' ? f2(y) : 'none'}` });
+        }
+      }
+    }
+    // legend + this sample's loss
+    const ly = y0 + T * c + 14;
+    g.font = font(10); g.textAlign = 'left';
+    let x = pad;
+    if (ok) {
+      g.fillStyle = css(p.pos); g.fillRect(x, ly - 4, 12, 8); x += 16;
+      g.fillStyle = p.muted; g.fillText('output ŷ', x, ly); x += g.measureText('output ŷ').width + 12;
+      g.strokeStyle = HI; g.lineWidth = 2.5; g.beginPath(); g.moveTo(x + 2, ly - 6); g.lineTo(x + 2, ly + 6); g.stroke(); x += 8;
+      g.fillStyle = p.muted; g.fillText('target y', x, ly); x += g.measureText('target y').width + 12;
+    }
+    const bl = store.state.bwd?.loss;
+    if (Number.isFinite(bl)) { g.fillStyle = p.muted; g.textAlign = 'right'; g.fillText(`this sample: loss ${fmtLoss(bl)}`, S - pad, ly); }
+    setAxes('seq', [], ch ? '' : 'no attention layer: each token only mixes through the dense weights');
+    if (seqPtr) seqInfo();   // a resting pointer keeps its readout through training frames
+  }
+
+  let seqPtr = null;
+  function seqInfo() {
+    const q = seqPtr && seqCells.find(b => seqPtr.x >= b.x && seqPtr.x < b.x + b.w && seqPtr.y >= b.y && seqPtr.y < b.y + b.h);
+    const s = q ? q.text : infoNote || SEQ_HINT;
+    if (infoEl.textContent !== s) infoEl.textContent = s;
+  }
+
   let hover = -1;
   function drawPlot(net, t, d, sh, M, A, ok, inOk, grid) {
     const S = size.plot;
     pts = null;
     if (!S) return;
+    if (d && d.kind === 'seq') { drawSeq(net, t, d, ok, inOk); return; }
+    seqCells = [];
     const p = pal(), g = sizeCanvas(plot, S, S);
     g.fillStyle = p.bg;
     g.fillRect(0, 0, S, S);
@@ -1084,7 +1502,7 @@ export function install(ctx) {
 
   function showInfo(i) {
     const d = data;
-    let s = infoNote || HINT;
+    let s = infoNote || (d && d.kind === 'seq' ? SEQ_HINT : HINT);
     if (i >= 0 && d && i < d.n) {
       const f = v => (model.fmt ? model.fmt(v, 2) : v.toFixed(2));
       s = `#${i + 1}: (${d.X[i].map(f).join(', ')}) → ${d.Y[i].length > 1 ? 'class ' + (d.cls[i] + 1) : f(d.Y[i][0])}`;
@@ -1104,11 +1522,23 @@ export function install(ctx) {
     return best;
   }
   plot.addEventListener('pointermove', e => {
+    if (seqCells.length) {
+      // sequence plot: read the cell under the pointer (no points to load)
+      const r = plot.getBoundingClientRect(), k = r.width ? size.plot / r.width : 1;
+      seqPtr = { x: (e.clientX - r.left) * k, y: (e.clientY - r.top) * k };
+      seqInfo();
+      plot.style.cursor = '';
+      return;
+    }
     const i = pick(e);
     plot.style.cursor = i >= 0 && !ro ? 'pointer' : '';
     if (i !== hover) { hover = i; showInfo(i); dirty = true; kick(); }
   });
-  plot.addEventListener('pointerleave', () => { if (hover >= 0) { hover = -1; showInfo(-1); dirty = true; kick(); } });
+  plot.addEventListener('pointerleave', () => {
+    seqPtr = null;
+    if (seqCells.length) showInfo(-1);
+    if (hover >= 0) { hover = -1; showInfo(-1); dirty = true; kick(); }
+  });
   plot.addEventListener('click', e => {
     if (ro) return;
     const i = pick(e);
@@ -1176,7 +1606,9 @@ export function install(ctx) {
 
   function drawMaps(net, t, d, M, grid) {
     if (!ctx.view || !ctx.view.setNodeImage) return;
-    const acts = t.maps && M && d ? (d.dim === 2 ? grid() : d.dim === 1 ? forwardMany(net, model, d.curve, CURVE, 0, M) : null) : null;
+    // off for sequences: a neuron there sees a whole sequence, not a point of a 1-D or 2-D domain
+    const acts = t.maps && M && d && d.kind !== 'seq'
+      ? (d.dim === 2 ? grid() : d.dim === 1 ? forwardMany(net, model, d.curve, CURVE, 0, M) : null) : null;
     if (!acts) { clearMaps(); return; }
     const keep = new Set();
     net.layers.forEach((layer, l) => {
@@ -1205,7 +1637,7 @@ export function install(ctx) {
   kick();
   // Handle for tests and the console.
   panel.nnTrain = {
-    play, pause, step, reset, adapt, loadSample,
+    play, pause, step, reset, adapt, loadSample, stepSample,
     get running() { return running; }, get eval() { return lastEval; },
     point: i => (pts && i >= 0 && 2 * i < pts.length ? [pts[2 * i], pts[2 * i + 1]] : null),
   };

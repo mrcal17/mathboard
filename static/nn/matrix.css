@@ -96,6 +96,14 @@
 [data-theme="light"] .nm-c.nm-strong { color: #fff; }
 .nm-c.nm-mask { opacity: 0.3; background: none !important; }
 .nm-c.nm-faint { opacity: 0.4; }
+/* shared (tied) parameter: a dotted underline; fixed edge: italic with a dashed frame; masked −∞ */
+.nm-c.nm-tied { box-shadow: inset 0 -2px 0 -0.5px rgba(128, 128, 128, 0.55); }
+.nm-c.nm-fixedc { font-style: italic; outline: 1px dashed var(--ui-muted); outline-offset: -2px; }
+.nm-c.nm-inf { font-style: italic; }
+.nm-c.nm-mask.nm-inf { opacity: 0.6; }
+.nm-c.nm-zero { opacity: 0.45; }
+.nm-c.nm-heat { text-align: center; min-width: 3em; border-radius: 2px; }
+.nm-c.nm-one { min-width: 1.4em; text-align: center; color: var(--ui-muted); }
 .nm-c.nm-augc { box-shadow: -4px 0 0 -2.5px var(--ui-muted); margin-left: 6px; }
 .nm-c.nm-augr { box-shadow: 0 -4px 0 -2.5px var(--ui-muted); margin-top: 6px; }
 .nm-c.nm-hi2, .nm-c.nm-an2 { outline: 1px dashed var(--nm-hi); outline-offset: -1px; }
@@ -112,3 +120,23 @@
   overflow-x: auto;
 }
 .nm-step > div { padding: 2px 0; }
+
+/* token layers and attention (docs/NN_ATTENTION.md) */
+.nm-sub { margin: 10px 0 -2px; font-size: 11px; color: var(--ui-muted); letter-spacing: 0.02em; }
+.nm-sub.nm-head { margin-top: 12px; font-size: 12px; font-weight: 600; color: var(--ui-fg); }
+.nm-notex { overflow-x: auto; overflow-y: hidden; white-space: nowrap; }
+.nm-expand { margin: 6px 0 2px; }
+.nm-expand.open { padding: 2px 0 4px 8px; border-left: 2px solid var(--ui-line); }
+.nm .nm-exp-btn {
+  font: inherit;
+  font-size: 12px;
+  color: var(--ui-muted);
+  background: transparent;
+  border: 1px dashed var(--ui-line);
+  border-radius: 5px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.nm .nm-exp-btn:hover { color: var(--ui-fg); border-color: var(--ui-muted); }
+.nm-expand.open .nm-exp-btn { border-style: solid; }
+body.clean .nm-expand:not(.open), .nm-audience .nm-expand:not(.open) { display: none; }

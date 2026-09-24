@@ -141,7 +141,11 @@ help:
 - **Framing the 3D view.** `#graph=...&view=iso` loads the rows; then
   `mathboardGraph.scene.setExtent(e)` and a `getPose()` / `setPose(pose, 0)` with a larger `zoom`.
 - **Net tab.** `#nn=<preset>` loads a preset. `mathboardNet.store` and `mathboardNet.ctx.view.nodeRect(id)`
-  give you nodes to click; `store.set('hover', {kind: 'edge', id})` lights an edge everywhere.
+  give you nodes to click; `store.set('hover', {kind: 'edge', id})` lights an edge everywhere, and
+  `{kind: 'token', layer, t}` a token (on an attention layer, with its row of A). For
+  `docs/media/net-transformer.png` the transformer preset was trained with the Train panel's handle
+  (`document.querySelector('.nn-train').nnTrain.play()`, speed 100, about 6000 steps), then
+  `loadSample(0)`, a fit, and the matrix panel scrolled to the attention layer.
 - **Animated GIF.** With the flags above, screenshots of the Net tab took about 2 s each. Adding
   `--disable-gpu-compositing` brings that under 0.1 s, fast enough to grab a frame every
   100 ms while training runs. Then:

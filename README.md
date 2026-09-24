@@ -10,8 +10,9 @@ and a moment after you stop, each expression is replaced in place by typeset LaT
 model reads the handwriting on your own GPU through [Ollama](https://ollama.com/), so nothing
 you write is sent to a cloud service. Two more tabs cover what is slow to draw by hand: a 3D
 linear-algebra grapher you drive by typing expressions, and a neural network you can edit, read
-as matrix products and train live. It's a local web app with a standard-library Python server
-and plain JavaScript. There is no build step and nothing to `npm install`.
+as matrix products and train live, from a single neuron up to a one-block transformer with
+self-attention. It's a local web app with a standard-library Python server and plain JavaScript.
+There is no build step and nothing to `npm install`.
 
 - [Tour](#tour)
 - [Quick start](#quick-start)
@@ -79,9 +80,24 @@ The left image above is `transform(A, t)` with `eigen(A)`; the right one is
 An editable network for teaching. The canvas on the left and the matrix panel on the right show
 the same numbers: each layer is written out as `z = W a + b`, and hovering a weight anywhere
 lights it everywhere. Click a neuron, edge or layer for a card with its arithmetic and its
-gradients. The Train panel fits the net to a toy dataset while you watch.
+gradients. The Train panel fits the net to a toy dataset while you watch. The 41 presets run
+from logic gates and MLPs to convolutions, an unrolled RNN and attention.
 
 ![Training a 2-6-4-1 ReLU network on the circles dataset: the decision region forms, the edges change colour and the matrices update](docs/media/net-train.gif)
+
+#### Attention
+
+![Net tab: a one-block transformer after training. On the canvas, attention edges run from the value tokens to Z and the residual edges are dashed; the matrix panel shows the attention layer in three stages, S = QKᵀ/√2, A = softmax(S) and Z = AV](docs/media/net-transformer.png)
+
+The Attention presets build self-attention from three parts: token layers (a row of features per
+token), weights shared by every token, and an attention layer with no weights of its own. The
+canvas draws each attention weight A_ij as an edge from value token j to output token i, with A
+as a small heatmap over the layer. The matrix panel writes the layer out as `S = QKᵀ/√d_k`,
+`A = softmax(S)`, `Z = AV` with the real numbers, and **Backward** adds its gradients.
+Step-through goes one token at a time: the scores, the softmax, then the weighted sum. Hovering a
+token lights it on the canvas, in the matrix panel and in the cards. Above is the transformer
+block after training on "ReLU(own + max token)": both tokens attend to token 1, the one with the
+larger x₁.
 
 ## Quick start
 
@@ -355,7 +371,7 @@ the right edge, to hide the panel; double-click again to bring it back. The firs
 | | |
 |---|---|
 | **New net…** | Start from a [preset](#presets) or **Blank**. Undoable |
-| **+ Layer** | Inserts a fully connected hidden layer of 3 after the selected layer (or the selected neuron's layer, or just before the outputs), moving later columns right if there is no room. The direct edges between its neighbours are removed |
+| **+ Layer** | Inserts a fully connected hidden layer of 3 after the selected layer (or the selected neuron's layer, or just before the outputs), moving later columns right if there is no room. The direct edges between its neighbours are removed. It says so and adds nothing next to a token layer or right before an attention layer |
 | **Layout**, **Fit** | Evenly spaced columns; zoom to fit |
 | **Randomize** | New weights (He when a layer uses ReLU, Xavier otherwise) and biases back to 0. Shift+click gives small weights |
 | **↶ ↷** | Undo / redo |
@@ -381,6 +397,8 @@ trick, Space play / pause training, T one training step.
   layer. The dashed line turns red over a neuron in the same layer; dropping on one that is
   already connected selects that edge. A target that isn't in a neighbouring layer makes a skip edge.
 - **Deleting:** removing a hidden layer reconnects its neighbours. A net keeps at least two layers.
+  A token layer can't lose a single neuron, and fixed edges can't be deleted (see
+  [attention](#attention-reference)); Delete says why instead.
 - **Moving:** drag a neuron (it snaps onto its column; Alt turns that off) or a layer header (the
   whole column). Positions are only the picture: moving never changes a neuron's row in `W`.
 - **Pan / zoom:** drag empty space or middle-drag anywhere; mouse wheel to zoom (Ctrl+wheel is
@@ -396,7 +414,8 @@ trick, Space play / pause training, T one training step.
 - **W:** the weight on every edge, with ∂L/∂w under it once targets are set. The hovered or
   selected edge always shows its numbers.
 - **Hover** dims everything unrelated. Hovering in the matrix panel or a card lights the same
-  neurons and edges here (a bias shows `b = …` beside its neuron), and the other way round.
+  neurons and edges here (a bias shows `b = …` beside its neuron), and the other way round. On a
+  token layer, hovering a token's box lights the whole token.
 - **Skip edges** (layer 0 → 2, say) bow around the columns they jump over and add their own
   `W a` term to the layer's sum.
 
@@ -413,8 +432,9 @@ each drag is one undo step. Hovering a row lights that weight or neuron everywhe
 | Card | Shows and edits |
 |---|---|
 | **Neuron** | Label (KaTeX) and where it sits (row of `W`, entry of `b`, column of the next `W`); incoming weights in column order, a missing one as "no edge: fixed 0" with **+ connect**, skip terms and the bias; the arithmetic `z = Σ w a + b` and `a = f(z)` with the real numbers; activation picker and a plot marking the current `(z, a)` (not for softmax); on outputs the target `y`, `a − y` and the loss; the gradients ∂L/∂z = ∂L/∂b and ∂L/∂a; outgoing weights; **Params**, free key/value notes (`$…$` renders as TeX). Input neurons get an input-value slider instead |
-| **Edge** | Its entry `W_{i,j}` (row = target, column = source), a weight slider, its contribution `w·a` to `z`, the gradient ∂L/∂w = δ·a and the update `w − η ∂L/∂w` with the Train panel's rate, **remove edge** |
-| **Layer** | Name; size **−** / **+** (a new neuron is wired like its neighbours); the shapes of `W` and `b` with masked and skip counts; activation picker with every neuron on the plot; **← connect previous** / **connect next →** (fills in missing edges); **randomize** this layer (xavier / he / small); the bias vector (input values on the input layer) with a slider per neuron |
+| **Edge** | Its entry `W_{i,j}` (row = target, column = source), a weight slider, its contribution `w·a` to `z`, the gradient ∂L/∂w = δ·a and the update `w − η ∂L/∂w` with the Train panel's rate, **remove edge**. A shared weight names its parameter (`W_Q(1,2)`), lists the edges that use it, and its slider and summed gradient cover all of them; a fixed edge is read-only |
+| **Layer** | Name; size **−** / **+** (a new neuron is wired like its neighbours; a token layer shows tokens × features instead); the shapes of `W` and `b` with masked and skip counts; activation picker with every neuron on the plot; **← connect previous** / **connect next →** (fills in missing edges); **randomize** this layer (xavier / he / small); the bias vector (input values on the input layer) with a slider per neuron |
+| **Attention** | A neuron of an attention layer: its scores `q_i · k_j`, its row of A as bars and `z = Σ_j A_ij V_jf` with the numbers. The layer: tokens, heads, the causal mask, the scale, and A for the current sample |
 
 </details>
 
@@ -440,7 +460,12 @@ Hover any cell, header or vector entry to light it on the canvas; click it to op
   edges. With targets set it carries on into the backward pass from the output layer (δ_i, a row
   of ∂L/∂W, ∂L/∂b_i), pulsing backwards along the outgoing edges. Shift+S (**◀**) steps back and
   **■** stops. If you switched **Backward** on yourself, S starts at the backward pass. Stepping
-  turns Batch off.
+  turns Batch off. An attention layer steps a token at a time, in three steps: its scores, the
+  softmax and the weighted sum (one step per token going back).
+- **Token layers** read as tokens × d matrices (`X`, `Q`, `K`, `V`, `Z`, `H`); see
+  [attention](#attention-reference).
+- **Gradients** smaller than 0.01 keep two significant figures (0.0034, 3.4e−4), here, in the
+  cards and on the canvas.
 - **→ 3D:** a layer whose `W` is at most 3×3 can be sent to the 3D tab, from the button in its
   header or the one in the matrix panel's toolbar (the selected layer, else the first that fits).
   A square `W` arrives as `W1 = [[…]]`, the layer's input as a vector (`a0 = (…)` for the first
@@ -458,10 +483,12 @@ Hover any cell, header or vector entry to light it on the canvas; click it to op
 back, and ▾ folds it (the folded header still shows the epoch, the loss and a play button).
 
 - **Data:** XOR, circles, spiral, two blobs, moons (2 inputs → 1 class), three classes (2 → 3,
-  one-hot), line and sine (1 → 1, regression), with **points**, **noise** and **seed**. A preset
-  picks the dataset that suits it. If the net's inputs and outputs don't match the dataset,
-  **Adapt network** resizes the input and output layers (hidden layers are kept) and sets a
-  matching output activation and loss; until then Play and Step are disabled.
+  one-hot), line and sine (1 → 1, regression), a flat 3-D cloud (3 → 3, for the PCA preset) and
+  four token sequences for the attention presets, with **points**, **noise** and **seed**. A
+  preset picks the dataset that suits it. If the net's inputs and outputs don't match the
+  dataset, **Adapt network** resizes the input and output layers (hidden layers are kept; a token
+  net changes its features per token, or says why it can't) and sets a matching output
+  activation and loss; until then Play and Step are disabled.
 - **Settings:** **loss** (MSE / x-entropy), **rate**, **batch** (1 to 128, or all) and
   **speed** (training steps per frame).
 - **Play** (Space) trains live, **Step** (T) does one mini-batch step, **Reset** re-draws the
@@ -480,9 +507,47 @@ back, and ▾ folds it (the folded header still shows the epoch, the loss and a 
 
 </details>
 
+<a name="attention-reference"></a>
+<details>
+<summary>Tokens, shared weights and attention</summary>
+
+The Attention presets add three things to the plain `z = W a + b` layers. The full spec is
+[docs/NN_ATTENTION.md](docs/NN_ATTENTION.md).
+
+- **Token layers** hold `tokens` rows of `d` features, optionally split into named groups such as
+  Q, K and V. The canvas boxes each token (t₁, t₂, …) inside a band per group, and the 3-token
+  presets draw their input and Q, K, V layers as grids, a row per token and a column per feature.
+  The matrix panel shows these layers as tokens × d matrices.
+- **Shared (tied) weights** are one parameter used by several edges, such as `W_Q(1,2)` once per
+  token. Hovering or selecting one lights the whole group, its card's slider moves all of them,
+  and its gradient is the sum of the per-token terms, which is the step training takes. A tied
+  layer reads compactly as `Q = X W_Q`; **▸ Flattened: z = W a** under it opens the same layer as
+  one block-diagonal `I ⊗ W_Qᵀ` product. Biases can be shared the same way (`1 b_Qᵀ`).
+- **Fixed edges** are dashed: residual connections (`+ X` in the matrix panel) and fixed pooling
+  weights. Training and Randomize never change them, Delete leaves them alone, and their card is
+  read-only.
+- **Attention layers** have no weights of their own. From the Q, K, V layer before them they
+  compute `Z = softmax(QKᵀ/√d_k + M) V` for each head, where `M` is the causal mask when it is on.
+  The canvas draws each A_ij as an edge from value token j to output token i, with width and
+  opacity from A_ij, and A as a heatmap above the layer. Hovering a token, a heatmap cell or an
+  attention edge shows that token's row of A with its numbers (a value or key token shows its
+  column). The matrix panel shows the three stages with the real numbers, and under Backward the
+  gradients ∂V, ∂A, ∂S, ∂Q and ∂K.
+- **Editing keeps token layers whole.** A double-click adds a feature to every token (or says why
+  it can't), and a new edge between two layers joined by a shared matrix becomes a new shared
+  entry for every token. Delete and **+ Layer** refuse, with a message, edits that would break a
+  token layer or leave attention without its Q, K and V.
+- **Training.** Four sequence datasets go with the presets: copy the max token, max and min of
+  x₁ (two heads), the previous token (causal) and ReLU(own + max token) for the transformer
+  block. The plot then shows the current sample's tokens, its attention matrix (pick the layer
+  and head under **plot**) and ŷ against y per token, with ◀ ▶ to step through the samples.
+  Neuron maps are off for these datasets.
+
+</details>
+
 <a name="presets"></a>
 <details>
-<summary>Presets (37, in 7 groups)</summary>
+<summary>Presets (41, in 8 groups)</summary>
 
 **Basics**
 
@@ -525,11 +590,11 @@ back, and ▾ folds it (the folded header still shows the epoch, the loss and a 
 
 | Preset | Net | Dataset | What to notice |
 |---|---|---|---|
-| 1D convolution (banded W) (`conv1d`) | 8 → 6 | none | W is banded Toeplitz: every row is the kernel (−1, 2, −1) moved one column right, and everything off the band is masked. The box input lights up only at its two edges. |
-| 1D convolution, stride 2 (`conv1d_s2`) | 9 → 4 | none | Stride 2: every row is the kernel (¼, ½, ¼) moved two columns right, so W is 4×9 and the signal comes out half as long. |
-| Average pooling (fixed weights) (`avgpool`) | 8 → 4 | none | Each row of W is ½, ½ over its own pair of inputs, masked elsewhere: pooling is a fixed linear map. |
+| 1D convolution (banded W) (`conv1d`) | 8 → 6 | none | W is banded Toeplitz: every row is one tied kernel (−1, 2, −1) moved one column right, off-band masked. Training moves every copy together. The box input lights up only at its two edges. |
+| 1D convolution, stride 2 (`conv1d_s2`) | 9 → 4 | none | Stride 2: every row is the same tied kernel (¼, ½, ¼) moved two columns right, so W is 4×9 and the signal comes out half as long. |
+| Average pooling (fixed weights) (`avgpool`) | 8 → 4 | none | Each row of W is ½, ½ over its own pair of inputs, masked elsewhere: pooling is a fixed linear map (dashed edges never train). |
 | Max pooling from ReLUs (exact) (`maxpool`) | 4 → 2 ReLU → 2 | none | max(a, b) = b + ReLU(a − b): the rows of W⁽¹⁾ take differences (1, −1), and the output adds b back through a skip term. Exact, with no max anywhere in the model. |
-| Tiny LeNet: conv, pool, dense, softmax (`lenet`) | 8 → 6 ReLU → 3 → 3 Softmax | none | Three kinds of W in one net: the conv is banded (kernel ½, 1, ½), the pool is fixed ½ pairs, the last is dense. A bump in the middle of the 8 pixels comes out as mid. |
+| Tiny LeNet: conv, pool, dense, softmax (`lenet`) | 8 → 6 ReLU → 3 → 3 Softmax | none | Three kinds of W in one net: the conv is banded with one tied kernel (½, 1, ½), the pool is fixed ½ pairs (dashed), the last is dense. A bump in the middle of the 8 pixels comes out as mid. |
 | Graph convolution (W = adjacency) (`gnn`) | 5 → 5 ReLU → 5 ReLU | none | W is the graph: row i averages node i and its neighbours (A + I, each row divided by its count) and every non-edge is masked. Two layers are two hops: node 1's signal reaches node 4, not 5. |
 | Two towers (block-diagonal W) (`towers`) | 2 → 6 tanh → 4 tanh → 1 Sigmoid | Circles | W⁽¹⁾ and W⁽²⁾ are block-diagonal: tower A sees only x₁, tower B only x₂, and the output adds them. f(x₁) + g(x₂) can still fit Circles, since x₁² + x₂² is a sum too. |
 | Multi-task: shared trunk, 3 heads (`multitask`) | 2 → 4 tanh → 6 tanh → 3 Sigmoid | Three classes | W⁽¹⁾ is the trunk every task shares; W⁽³⁾ is block-diagonal, so each sigmoid reads only its own head. Three yes/no tasks (is it class k?) train on one summed loss. |
@@ -538,8 +603,17 @@ back, and ▾ folds it (the folded header still shows the epoch, the loss and a 
 
 | Preset | Net | Dataset | What to notice |
 |---|---|---|---|
-| RNN unrolled over 4 steps (`rnn`) | 4 → 2 tanh → 2 tanh → 2 tanh → 2 tanh → 1 | none | Step t computes tanh(W_hh h⁽ᵗ⁻¹⁾ + w_x x_t + b), with x_t on a skip edge. Every step starts with the same W_hh and w_x, but there is no weight tying: training would move each copy on its own. |
-| Dilated causal conv (WaveNet-style) (`wavenet`) | 8 → 8 → 8 → 8 | none | Each W is lower-triangular with ½ on the diagonal and ½ at offset 1, 2, then 4: no row reads the future, and the receptive field doubles per layer. The last output is the mean of all 8 inputs. |
+| RNN unrolled over 4 steps (`rnn`) | 4 → 2 tanh → 2 tanh → 2 tanh → 2 tanh → 1 | none | Step t computes h⁽ᵗ⁾ = tanh(h⁽ᵗ⁻¹⁾W_hh + x_t w_x + b), x_t on a skip edge. W_hh, w_x and b are tied: one set of parameters shared by every step, so training moves all the copies together. |
+| Dilated causal conv (WaveNet-style) (`wavenet`) | 8 → 8 → 8 → 8 | none | Each W is lower-triangular: one tied kernel (½, ½) on the diagonal and at offset 1, 2, then 4, so no row reads the future and the receptive field doubles per layer. The last output is the mean of all 8. |
+
+**Attention**
+
+| Preset | Net | Dataset | What to notice |
+|---|---|---|---|
+| Self-attention (3 tokens × 2) (`attention`) | 3×2 → 3×2 Q, K, V → 3×2 attention | Copy the max token (3 tokens × 2) | Q = XW_Q, K = XW_K, V = XW_V, each one tied 2×2 matrix shared by all 3 tokens. Z = softmax(QKᵀ/√2)V; row i of A is where token i looks. Train: every token learns to look at the largest x₁. |
+| Causal attention: the previous token (`causal`) | 3×3 → 3×2 Q, K, V → 3×2 causal attention → 3×1 | Previous token, causal (3 tokens, c + position) | The mask sets S_ij = −∞ for j > i, so token i reads only tokens up to i. Positions come in as (cos θ, sin θ); to copy the previous token, W_Q W_Kᵀ has to learn a rotation by one position. |
+| Two heads: max and min (`multihead`) | 3×2 → 3×2 Q, K, V → 3×2 attention, 2 heads | Max and min of x₁ (3 tokens × 2) | heads = 2 splits Q, K and V by column: head 1 uses column 1 of each, head 2 column 2, and each head has its own A. Train: one head learns to find the largest x₁, the other the smallest. |
+| Transformer block (2 tokens) (`transformer`) | 2×2 → 2×2 Q, K, V → 2×2 attention → 2×2 → 2×4 ReLU → 2×2 | ReLU(own + max token) (2 tokens × 2) | One block, all weights tied: Z = softmax(QKᵀ/√2)V, H = X + ZW_O, Y = H + ReLU(HW₁)W₂, the + X and + H being fixed residual edges. No LayerNorm: with d = 2 it sends every token to (±1, ∓1). |
 
 **Embeddings & autoencoders**
 
@@ -560,7 +634,8 @@ Every preset comes with an input and targets, so the backward pass shows at once
 builds the same weights. **Randomize** (or **↻** in the Train panel) gives new ones. The
 New net menu groups them the same way, shows each note as a tooltip, and flashes it when the
 preset loads. A preset marked "none" has no dataset of its own: the Train panel picks one
-that fits its shape, or offers **Adapt network**.
+that fits its shape, or offers **Adapt network**. In the Net column, `3×2` is a token layer of
+3 tokens with 2 features each.
 
 </details>
 
@@ -613,7 +688,8 @@ and colours. `nn.js` is the shell (layout, toolbar, keys, persistence, module lo
 mirror API that `graph/features/lecture.js` carries to the audience window). It loads `view.js`
 (the canvas), `inspector.js` (the cards), `matrix.js` (the matrix panel and step-through) and
 `train.js` (datasets, training and plots), each with its own CSS and isolated so a broken one
-doesn't take the others down.
+doesn't take the others down. Token layers, shared weights and attention are specified in
+[docs/NN_ATTENTION.md](docs/NN_ATTENTION.md).
 
 ## Project layout
 
@@ -631,6 +707,7 @@ tests/                 node:test suites, plus draw_test.js (see Testing)
 docs/
   FEATURE_GUIDE.md     how 3D feature modules plug in, and the browser test recipe
   NN_CONTRACT.md       interfaces between the Net tab modules
+  NN_ATTENTION.md      tokens, shared weights and attention in the Net tab
   media/               the images in this README
 ```
 

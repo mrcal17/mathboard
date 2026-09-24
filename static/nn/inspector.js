@@ -5,7 +5,14 @@
 // opens another card. A card sits next to its target (ctx.view.nodeRect) until it is dragged by
 // its header; double-clicking the header puts it back. Card DOM is rebuilt only when the
 // selection or the structure changes. Everything else (training ticks at 60 fps, undo, edits made
-// in the view or the matrix) updates text and attributes in place through cached setters.
+// in the view or the matrix) updates text and attributes in place through cached setters. While
+// the Train panel runs, the KaTeX boxes refresh at 10 Hz (sliders and bars every frame).
+//
+// Token layers, shared (tied) and fixed weights and attention layers (docs/NN_ATTENTION.md) get
+// their own cards: an attention neuron shows its scores q_i . k_j, its row of A as bars and
+// z = sum_j A_ij V_jf; a tied edge is a shared parameter whose slider moves its whole group and
+// whose gradient is the sum over its edges; a fixed edge is read-only; an attention layer has
+// tokens, heads, the causal mask, the scale and this sample's A per head.
 
 import { colorFor } from './store.js';
 
@@ -120,7 +127,12 @@ const hoverKey = t => (!t ? ''
   : t.kind === 'pair' ? `pair:${t.from}>${t.to}`
   : t.kind === 'row' ? `row:${t.layer}:${t.i}`
   : t.kind === 'col' ? `col:${t.layer}:${t.k}:${t.j}`
+  : t.kind === 'token' ? `token:${t.layer}:${t.t}:${t.g ?? ''}:${t.h ?? ''}`
   : `${t.kind}:${t.id}`);
+// A hovered token { kind: 'token', layer (index), t, g?, h? } against an element's token spec: the
+// same layer and token, and the same group and head where both give one.
+const tokenMatch = (hv, s) => hv.layer === s.layer && hv.t === s.t
+  && (hv.g == null || s.g == null || hv.g === s.g) && (hv.h == null || s.h == null || hv.h === s.h);
 
 function pinIcon() {
   const s = sv('svg', { viewBox: '0 0 16 16', width: 14, height: 14, 'aria-hidden': 'true' });
@@ -162,6 +174,10 @@ export function install(ctx) {
   let visible = !document.body.dataset.view || document.body.dataset.view === 'nn';
   let raf = 0;
   let maxW = 1, maxB = 1, maxA = 1;   // the shared colour scales (contract): weights, biases, activations
+  // While the Train panel runs, the maths boxes (KaTeX: re-render + relayout) refresh at TEX_HZ;
+  // sliders, bars and heatmap cells still follow every frame, and a pause brings everything current.
+  const TEX_MS = 100;
+  let training = false, texTurn = true, texDue = 0;
 
   const sizer = typeof ResizeObserver === 'function'
     ? new ResizeObserver(() => { for (const c of cards) c.akey = ''; ensureLoop(); })
@@ -188,13 +204,90 @@ export function install(ctx) {
   const factor = s => (s.startsWith('-') ? `(${s})` : s);
   const select = t => { if (!ro) store.set('sel', t); };
 
+  // ---------------------------------------------------------------- tokens, ties, attention
+  // docs/NN_ATTENTION.md. The geometry is read straight from the layer fields, so a net that has
+  // no token layers takes none of these paths.
+
+  const layerAt = L => net().layers[L];
+  const isAttn = L => layerAt(L)?.kind === 'attention';
+  // Node k of a token layer is group floor(k / (tokens d)), token floor(k / d) % tokens, feature k % d.
+  function shapeOf(L) {
+    const lay = layerAt(L), size = M.nodesIn(net(), L).length;
+    const tokens = Number.isInteger(lay?.tokens) && lay.tokens > 1 ? lay.tokens : 1;
+    const groups = Array.isArray(lay?.groups) && lay.groups.length ? lay.groups : null;
+    const d = Math.max(1, Math.floor(size / (tokens * (groups ? groups.length : 1))));
+    return { tokens, d, groups, attn: lay?.kind === 'attention', size };
+  }
+  const isTok = L => { const s = shapeOf(L); return s.tokens > 1 || !!s.groups || s.attn; };
+  function tokPos(L, k) {
+    const s = shapeOf(L);
+    return { ...s, g: Math.floor(k / (s.tokens * s.d)), t: Math.floor(k / s.d) % s.tokens, f: k % s.d };
+  }
+  // The indices softmax normalizes over together: the node's token (and group) on a token layer.
+  function softBlock(L, i) {
+    if (!isTok(L)) return [0, M.nodesIn(net(), L).length];
+    const d = shapeOf(L).d, s = Math.floor(i / d) * d;
+    return [s, s + d];
+  }
+  // Matrix names, as in Q = X W_Q: X for the inputs, Z for an attention layer, else H^(l).
+  const matSym = L => (L === 0 ? 'X' : isAttn(L) ? 'Z' : L === lastIndex() ? '\\hat Y' : `H^{(${L})}`);
+  const grpSym = (s, g) => (s.groups ? `{${s.groups[g]}}` : null);
+
+  const headsOf = L => { const v = layerAt(L)?.heads; return Number.isInteger(v) && v > 0 ? v : 1; };
+  const causalOf = L => !!layerAt(L)?.causal;
+  // d_k per head, from the Q/K/V layer that feeds attention layer L.
+  const dkHead = L => shapeOf(L - 1).d / headsOf(L);
+  const scaleOf = L => {
+    const v = layerAt(L)?.scale;
+    return typeof v === 'number' && Number.isFinite(v) ? v : 1 / Math.sqrt(dkHead(L));
+  };
+  const customScale = L => typeof layerAt(L)?.scale === 'number' && Number.isFinite(layerAt(L).scale);
+  const scaleTex = L => (customScale(L) ? fmt(scaleOf(L), 3) : `\\tfrac{1}{\\sqrt{${+dkHead(L).toFixed(3)}}}`);
+  const scaleEq = L => (customScale(L) ? fmt(scaleOf(L), 3) : `${scaleTex(L)} = ${fmt(scaleOf(L), 3)}`);
+  const attnFwd = (L, hd) => store.state.fwd?.attn?.[L]?.heads?.[hd] || null;
+  const attnBwd = (L, hd) => store.state.bwd?.attn?.[L]?.heads?.[hd] || null;
+  // Node k of attention layer L: token i, feature f of Z; head hd, column fh inside that head.
+  function attnAt(L, k) {
+    const s = shapeOf(L), heads = headsOf(L), dh = Math.max(1, Math.floor(s.d / heads));
+    const i = Math.floor(k / s.d) % s.tokens, f = k % s.d;
+    return { T: s.tokens, d: s.d, heads, dh, i, f, hd: Math.min(heads - 1, Math.floor(f / dh)), fh: f % dh };
+  }
+  // The node of the Q/K/V layer before attention layer L: group g (0 Q, 1 K, 2 V), token t, feature f.
+  const qkvNode = (L, g, t, f) => {
+    const s = shapeOf(L - 1);
+    return M.nodesIn(net(), L - 1)[g * s.tokens * s.d + t * s.d + f] || null;
+  };
+  const hsup = (L, hd) => (headsOf(L) > 1 ? `^{(${hd + 1})}` : '');
+
+  const tieOf = e => (e && typeof e.tie === 'string' && e.tie ? e.tie : null);
+  const tieGroup = tie => net().edges.filter(e => e.tie === tie);
+  // 'W_Q:1,2' is entry (1, 2) of W_Q; a shared bias (model.js's node.tie) is 'b_Q:2', entry 2 of b_Q.
+  function tieParts(tie) {
+    const m = /^(.*):\s*(\d+)\s*(?:,\s*(\d+)\s*)?$/.exec(tie);
+    return m ? { name: m[1], i: +m[2], j: m[3] == null ? null : +m[3] } : { name: tie, i: null, j: null };
+  }
+  const tieIdx = p => (p.j == null ? `${p.i}` : `${p.i},${p.j}`);
+  const tieTex = tie => { const p = tieParts(tie); return p.i ? `{${p.name}}(${tieIdx(p)})` : `{${p.name}}`; };
+  const tieText = tie => { const p = tieParts(tie); return p.i ? `${p.name}(${tieIdx(p)})` : p.name; };
+  const biasTie = id => { const t = node(id)?.tie; return typeof t === 'string' && t ? t : null; };
+  const biasGroup = tie => net().nodes.filter(q => q.tie === tie);
+  // Every weight edit goes through here: a tied edge moves its whole group, a fixed one never moves.
+  function setW(eid, v) {
+    const e = edge(eid);
+    if (!e || e.fixed) return;
+    M.setWeight(net(), eid, v);
+    const t = tieOf(e);
+    if (t) for (const o of net().edges) if (o.tie === t && o !== e) o.w = e.w;
+  }
+
   // Notation, shared with the matrix panel: W^{(l)}_{i,j} has row i = receiving neuron and column
   // j = sending neuron, 1-based. A skip term from layer k is W^{(l,k)}. a^{(0)} = x.
   const wUp = (lt, lf) => (lf === lt - 1 ? `${lt}` : `${lt},${lf}`);
   const wSym = (lt, lf, i, j) => `W^{(${wUp(lt, lf)})}_{${i},${j}}`;
   const wText = (lt, lf, i, j) => `W^(${wUp(lt, lf)})_${i},${j}`;   // plain text, for tooltips
   const aSym = (l, j) => (l === 0 ? `x_{${j}}` : `a^{(${l})}_{${j}}`);
-  const g3 = v => fmt(v, 3);                                          // gradients: 3 decimals
+  // gradients: 3 decimals, and below 0.01 two significant figures (0.0034, 3.4e-4) as the matrix panel
+  const g3 = v => (!Number.isFinite(v) ? '?' : M.fmtg ? M.fmtg(v, 3).replace(/e(-?\d+)$/, '\\mathrm{e}{$1}') : fmt(v, 3));
   const aligned = lines => `\\begin{aligned} ${lines.join(' \\\\ ')} \\end{aligned}`;
   // A term "w · v" with a negative weight's minus pulled out front (it keeps its sign colour).
   const wTerm = (w, v) => {
@@ -219,8 +312,12 @@ export function install(ctx) {
     if (kind === 'bce') return `-${one ? '' : `\\tfrac{1}{${n}}`}${sum} \\big[${y} \\ln ${yh} + (1 - ${y}) \\ln (1 - ${yh})\\big]`;
     return `\\tfrac{1}{2}${one ? '' : `\\cdot\\tfrac{1}{${n}}`}${sum} (${yh} - ${y})^2`;
   }
-  // The Train panel's learning rate (train.js readSettings: default 0.1, clamped the same way).
+  // The Train panel's learning rate: train.js's readSettings once it has loaded (a preset's lr for
+  // an old net matched by title), else meta.train.lr with the same default and clamp.
+  let trainSettings = null;
+  import('./train.js').then(m => { if (typeof m.readSettings === 'function') trainSettings = m.readSettings; }).catch(() => {});
   function learningRate() {
+    if (trainSettings) try { return trainSettings(net(), M).lr; } catch { /* fall back */ }
     const lr = net().meta?.train?.lr;
     return typeof lr === 'number' && Number.isFinite(lr) ? Math.min(1000, Math.max(1e-7, lr)) : 0.1;
   }
@@ -568,7 +665,10 @@ export function install(ctx) {
     for (const vs of [...(f?.a || []), ...(f?.z || [])]) for (const v of vs || []) if (Number.isFinite(v)) a = Math.max(a, Math.abs(v));
     if (!f) for (const n of M.nodesIn(net(), 0)) if (Number.isFinite(n.value)) a = Math.max(a, Math.abs(n.value));
     maxA = a || 1;
-    for (const c of [...cards]) update(c);
+    const now = performance.now();
+    texTurn = !training || now >= texDue;
+    if (texTurn && training) texDue = now + TEX_MS;
+    try { for (const c of [...cards]) update(c); } finally { texTurn = true; }
   }
 
   function rebuildAll() {
@@ -582,9 +682,11 @@ export function install(ctx) {
     const t = store.state.hover;
     const k = hoverKey(t);
     const nodeId = t?.kind === 'node' ? t.id : null;
+    const tok = t?.kind === 'token' ? { ...t, layer: typeof t.layer === 'number' ? t.layer : M.layerIndex(net(), t.layer) } : null;
     for (const c of cards) {
       for (const el of c.hov) {
-        el.classList.toggle('hi', !!k && (el.dataset.hk === k || (!!nodeId && el.dataset.other === nodeId)));
+        el.classList.toggle('hi', (!!k && (el.dataset.hk === k || (!!nodeId && el.dataset.other === nodeId)))
+          || (!!tok && !!el._toks?.some(s => tokenMatch(tok, s))));
       }
     }
   }
@@ -601,7 +703,7 @@ export function install(ctx) {
     const body = h('div', { class: 'nn-sec-b' }, ...kids);
     const sec = h('section', { class: 'nn-sec' + (folded.has(key) ? ' folded' : ''), 'data-sec': key }, head, body);
     head.addEventListener('click', () => {
-      if (sec.classList.toggle('folded')) folded.add(key); else folded.delete(key);
+      if (sec.classList.toggle('folded')) folded.add(key); else { folded.delete(key); update(c); }   // folded maths is not kept current
     });
     c.body.append(sec);
     return { sec, head, body };
@@ -614,6 +716,11 @@ export function install(ctx) {
     if (ro) return;
     el.addEventListener('pointerenter', () => store.set('hover', key));
     el.addEventListener('pointerleave', () => clearHover(key));
+  }
+  // el also lights while one of these tokens is hovered ([{ layer, t, g?, h? }], see tokenMatch).
+  function tokenLit(c, el, specs) {
+    el._toks = specs;
+    if (!c.hov.includes(el)) c.hov.push(el);
   }
 
   // A labelled value slider with a number box. `set` writes into store.net; dragging calls
@@ -705,6 +812,8 @@ export function install(ctx) {
   function texBox(c, fn, display = false, cls = 'nn-math') {
     const el = h('div', { class: cls });
     c.binds.push(() => {
+      if (!texTurn && el._tex !== undefined) return;         // training: at TEX_MS, not every frame
+      if (el._tex !== undefined && el.closest('.nn-sec.folded')) return;
       const s = fn();
       setHidden(el, s == null);
       if (s != null) setTex(el, s, display);
@@ -810,7 +919,9 @@ export function install(ctx) {
 
   // Softmax output i as a function of z_i with the other logits held fixed.
   function softmaxSlice(L, i) {
-    const zs = store.state.fwd?.z?.[L] || [];
+    const [b0, b1] = softBlock(L, i);   // a token layer normalizes each token on its own
+    const zs = (store.state.fwd?.z?.[L] || []).slice(b0, b1);
+    i -= b0;
     let m = -Infinity;
     zs.forEach((z, k) => { if (k !== i && Number.isFinite(z)) m = Math.max(m, z); });
     if (m === -Infinity) return { f: () => 1, key: 'softmax|1' };
@@ -828,19 +939,35 @@ export function install(ctx) {
     const i = indexIn(id);
     const I = i + 1;
     const kind = L === 0 ? 'input' : L === last ? 'output' : 'hidden';
+    const attn = isAttn(L);                          // no incoming edges, no bias: z = sum_j A_ij V_jf
+    const tp = isTok(L) ? tokPos(L, i) : null;
+    const feedsAttn = L < last && isAttn(L + 1);     // a Q / K / V neuron
     c.binds.push(() => {
       setTex(c.title, label(id));
       const name = layerOf(layerId)?.name;
-      setText(c.kind, `${kind} · ${name && name.trim().toLowerCase() !== kind ? name : 'layer ' + L}`);
+      const k = attn && L < last ? 'attention' : kind;
+      setText(c.kind, `${k} · ${name && name.trim().toLowerCase() !== k ? name : 'layer ' + L}`);
     });
 
     // where it sits + label
     const where = L === 0
-      ? `\\text{entry } ${I} \\text{ of } x = a^{(0)}` + (last > 0 ? `,\\ \\text{column } ${I} \\text{ of } W^{(1)}` : '')
+      ? `\\text{entry } ${I} \\text{ of } x = a^{(0)}` + (last > 0 && !feedsAttn ? `,\\ \\text{column } ${I} \\text{ of } W^{(1)}` : '')
+      : attn ? `\\text{entry } (${tp.t + 1}, ${tp.f + 1}) \\text{ of } Z = AV` +
+        (L < last ? `;\\ \\text{column } ${I} \\text{ of } W^{(${L + 1})}` : `;\\ \\hat y_{${I}}`)
       : `\\text{row } ${I} \\text{ of } W^{(${L})},\\ b^{(${L})}_{${I}}` +
-        (L < last ? `;\\ \\text{column } ${I} \\text{ of } W^{(${L + 1})}` : `;\\ \\hat y_{${I}}`);
+        (L === last ? `;\\ \\hat y_{${I}}` : feedsAttn ? '' : `;\\ \\text{column } ${I} \\text{ of } W^{(${L + 1})}`);
     const whereEl = h('div', { class: 'nn-where' });
     setTex(whereEl, `${where}\\,`);   // the thin space holds \hat y's overhang (else a 2 px scrollbar)
+    // which token and which feature, on a token layer: row t, column f of X / Q / K / V / Z / H
+    let tokEl = null;
+    if (tp) {
+      const m = grpSym(tp, tp.g) || matSym(L);
+      const ah = attn ? attnAt(L, i) : null;
+      tokEl = h('div', { class: 'nn-where nn-tok' });
+      setTex(tokEl, `\\text{token } ${tp.t + 1},\\ \\text{feature } ${tp.f + 1}` +
+        `\\quad (\\text{row } ${tp.t + 1},\\ \\text{column } ${tp.f + 1} \\text{ of } ${m})` +
+        (ah && ah.heads > 1 ? `,\\ \\text{head } ${ah.hd + 1}` : ''));
+    }
     const chip = h('button', { class: 'nn-chip', title: 'Open the layer' });
     chip.addEventListener('click', () => select({ kind: 'layer', id: layerId }));
     c.binds.push(() => setText(chip, `${layerOf(layerId)?.name || 'layer ' + L} →`));
@@ -851,6 +978,7 @@ export function install(ctx) {
     });
     c.body.append(h('div', { class: 'nn-top' },
       h('div', { class: 'nn-grid2' }, h('span', { class: 'nn-k', text: 'label' }), lab),
+      tokEl,
       h('div', { class: 'nn-where-row' }, whereEl, chip)));
 
     if (L === 0) {
@@ -865,7 +993,8 @@ export function install(ctx) {
 
     // incoming: the row of W in column order, then skip terms, then the bias
     const incoming = [];
-    if (L > 0) {
+    if (attn) buildAttnNode(c, id, L, i);
+    else if (L > 0) {
       const byFrom = new Map(net().edges.filter(e => e.to === id).map(e => [e.from, e]));
       const rows = [];
       // j is the column: the sender's order in its whole layer (skip terms list only their edges)
@@ -875,14 +1004,7 @@ export function install(ctx) {
           const e = byFrom.get(p.id);
           if (e) {
             incoming.push({ eid: e.id, from: p.id, k, j });
-            list.push(slider(c, {
-              lab: el => setTex(el, label(p.id)),
-              get: () => edge(e.id)?.w,
-              set: v => M.setWeight(net(), e.id, v),
-              what: 'weight', hover: { kind: 'edge', id: e.id }, other: p.id,
-              onLabel: () => select({ kind: 'edge', id: e.id }),
-              labelTitle: `${wText(L, k, I, j + 1)}: open this weight`,
-            }));
+            list.push(weightRow(c, e.id, p.id, wText(L, k, I, j + 1)));
           } else if (k === L - 1) {
             list.push(maskedRow(c, p.id, id, p.id));
           }
@@ -896,20 +1018,27 @@ export function install(ctx) {
         }
       }
       if (!rows.length) rows.push(h('div', { class: 'nn-hint', text: 'No incoming edges.' }));
-      rows.push(h('div', { class: 'nn-bias' }, slider(c, {
-        lab: el => setTex(el, `b^{(${L})}_{${I}}`),
+      const bt = biasTie(id);   // a shared bias (one per feature, used by every token): setNode moves them all
+      const brow = slider(c, {
+        lab: el => setTex(el, bt ? tieTex(bt) : `b^{(${L})}_{${I}}`),
         get: () => node(id)?.bias,
         set: v => M.setNode(net(), id, { bias: v }),
         what: 'bias', hover: { kind: 'bias', id },
         scale: () => maxB,
-      })));
+        labelTitle: bt ? `b^(${L})_${I} = ${tieText(bt)}, shared by ${biasGroup(bt).length} neurons` : null,
+      });
+      if (bt) { brow.classList.add('tied'); brow.title = `Shared bias ${tieText(bt)}: moving it moves all ${biasGroup(bt).length} copies`; }
+      rows.push(h('div', { class: 'nn-bias' }, brow));
       const s = section(c, 'node.in', 'Weights in + bias', `\\text{row } ${I} \\text{ of } W^{(${L})},\\ b^{(${L})}_{${I}}`, ...rows);
       hoverable(c, s.head, { kind: 'row', layer: L, i });
     }
 
     // the arithmetic, then the activation with a plot marking the current z
-    const math = texBox(c, () => arithmetic(id, L, I, incoming), true);
-    if (L > 0) {
+    const math = texBox(c, () => (attn ? attnArith(id, L, I, i) : arithmetic(id, L, I, incoming)), true);
+    if (attn) {
+      section(c, 'node.math', 'Forward', null, math,
+        h('div', { class: 'nn-hint', text: 'An attention layer has no weights in and no bias, and its activation is the identity.' }));
+    } else if (L > 0) {
       const plot = makePlot();
       const def = h('div', { class: 'nn-def' });
       c.binds.push(() => {
@@ -972,39 +1101,177 @@ export function install(ctx) {
     });
     section(c, 'node.grad', 'Gradients', null, grad, gradHint);
 
-    // outgoing: column of the next W, then skip edges
+    // outgoing: column of the next W, then skip edges. A Q / K / V neuron has no edges into the
+    // attention layer: it enters through the scores or the weighted sum instead.
     if (L < last) {
       const byTo = new Map(net().edges.filter(e => e.from === id).map(e => [e.to, e]));
       const rows = [];
-      M.nodesIn(net(), L + 1).forEach((q, r) => {
-        const e = byTo.get(q.id);
-        rows.push(e ? edgeRow(c, e.id, q.id, `${wText(L + 1, L, r + 1, I)}: open this weight`) : maskedRow(c, id, q.id, q.id));
-      });
+      if (feedsAttn) {
+        const g = tp?.groups ? tp.g : -1, t = (tp?.t ?? 0) + 1;
+        const dh = Math.max(1, Math.floor((tp?.d ?? 1) / headsOf(L + 1))), hs = hsup(L + 1, Math.floor((tp?.f ?? 0) / dh));
+        const how = g === 0 ? `q${hs}_{${t}} \\text{ is scored against every key: } s${hs}_{${t},j} = q${hs}_{${t}} \\cdot k${hs}_{j}\\, c`
+          : g === 1 ? `k${hs}_{${t}} \\text{ is scored by every query: } s${hs}_{i,${t}} = q${hs}_{i} \\cdot k${hs}_{${t}}\\, c`
+          : g === 2 ? `v${hs}_{${t}} \\text{ is mixed into every } z_{i} \\text{ with weight } A${hs}_{i,${t}}`
+          : '\\text{feeds the attention layer}';
+        const el = h('div', { class: 'nn-math nn-inline' });
+        setTex(el, how);
+        rows.push(el);
+      } else {
+        M.nodesIn(net(), L + 1).forEach((q, r) => {
+          const e = byTo.get(q.id);
+          rows.push(e ? edgeRow(c, e.id, q.id, wText(L + 1, L, r + 1, I)) : maskedRow(c, id, q.id, q.id));
+        });
+      }
       for (let k = L + 2; k <= last; k++) {
         const all = M.nodesIn(net(), k);
         if (!all.some(q => byTo.has(q.id))) continue;
         rows.push(h('div', { class: 'nn-sub' }, texEl(`\\text{skip to ${texSafe(net().layers[k].name || 'layer ' + k)}: } W^{(${k},${L})}`)));
         all.forEach((q, r) => {
           const e = byTo.get(q.id);
-          if (e) rows.push(edgeRow(c, e.id, q.id, `${wText(k, L, r + 1, I)}: open this weight`));
+          if (e) rows.push(edgeRow(c, e.id, q.id, wText(k, L, r + 1, I)));
         });
       }
-      const s = section(c, 'node.out', 'Outgoing weights', `\\text{column } ${I} \\text{ of } W^{(${L + 1})}`, ...rows);
-      hoverable(c, s.head, { kind: 'col', layer: L + 1, k: L, j: i });
+      const s = section(c, 'node.out', feedsAttn ? 'Into attention' : 'Outgoing weights',
+        feedsAttn ? null : `\\text{column } ${I} \\text{ of } W^{(${L + 1})}`, ...rows);
+      if (!feedsAttn) hoverable(c, s.head, { kind: 'col', layer: L + 1, k: L, j: i });
     }
 
     buildParams(c, id);
   }
 
-  function edgeRow(c, eid, otherId, tip) {
-    return slider(c, {
+  const edgeRow = (c, eid, otherId, wt) => weightRow(c, eid, otherId, wt);
+
+  // One weight in a node's row or column: a slider, a shared-parameter slider (moves its whole tie
+  // group) or a read-only fixed value. wt names the matrix entry, for the tooltip.
+  function weightRow(c, eid, otherId, wt) {
+    const e = edge(eid), tie = tieOf(e);
+    if (e?.fixed) return fixedRow(c, eid, otherId, `${wt}: fixed. Open this weight`);
+    const n = tie ? tieGroup(tie).length : 0;
+    const row = slider(c, {
       lab: el => setTex(el, label(otherId)),
       get: () => edge(eid)?.w,
-      set: v => M.setWeight(net(), eid, v),
+      set: v => setW(eid, v),
       what: 'weight', hover: { kind: 'edge', id: eid }, other: otherId,
       onLabel: () => select({ kind: 'edge', id: eid }),
-      labelTitle: tip,
+      labelTitle: tie ? `${wt} = ${tieText(tie)}, shared by ${n} edges: open this weight` : `${wt}: open this weight`,
     });
+    if (tie) {
+      row.classList.add('tied');
+      row.title = `Shared parameter ${tieText(tie)}: moving it moves all ${n} edges`;
+    }
+    return row;
+  }
+
+  // A fixed edge (a residual identity, a pooling weight): shown, never edited.
+  function fixedRow(c, eid, otherId, tip) {
+    const sw = h('span', { class: 'nn-sw' });
+    const name = h('span', { class: 'nn-sl-lab link', title: tip });
+    const val = h('span', { class: 'nn-fixed-val' });
+    const row = h('div', { class: 'nn-sl fixed', title: 'Fixed weight: training, Randomize and connect never change it' },
+      sw, name, h('span', { class: 'nn-masked-txt', text: 'fixed' }), val);
+    hoverable(c, row, { kind: 'edge', id: eid }, otherId);
+    if (!ro) name.addEventListener('click', () => select({ kind: 'edge', id: eid }));
+    c.binds.push(() => {
+      setTex(name, label(otherId));
+      const w = edge(eid)?.w;
+      setText(val, numText(w));
+      setStyle(sw, 'background', Number.isFinite(w) ? colorFor(w, maxW, theme()) : 'transparent');
+    });
+    return row;
+  }
+
+  // ---------------------------------------------------------------- attention neuron
+
+  // a b, juxtaposed when b is a bracketed negative: (-0.12)(-0.19), 0.31(-0.24), but 0.31 · 0.24
+  const prod = (a, b) => { const fa = factor(a), fb = factor(b); return fb.startsWith('(') ? `${fa}${fb}` : `${fa} \\cdot ${fb}`; };
+  const cutTerms = xs => (xs.length > MAX_TERMS ? [...xs.slice(0, 4), '\\cdots', ...xs.slice(-2)] : xs);
+
+  // Scores s_ij = q_i . k_j c for this neuron's token i, then its attention row A_i as bars.
+  function buildAttnNode(c, id, L, k) {
+    const at = attnAt(L, k), { T, i, hd } = at;
+    const hs = hsup(L, hd);
+    const scores = texBox(c, () => {
+      const F = attnFwd(L, hd);
+      if (!F?.Q || !F?.K) return null;
+      const lhsW = texWidth(`s${hs}_{${i + 1},${T}}`);
+      const room = CARD_UNITS - lhsW;
+      const lines = [`s${hs}_{${i + 1},j} &= c\\; q${hs}_{${i + 1}} \\cdot k${hs}_{j}, \\quad c = ${scaleEq(L)}`];
+      const q = F.Q[i] || [];
+      for (let j = 0; j < T; j++) {
+        const sv = F.S?.[i]?.[j];
+        const lhs = `s${hs}_{${i + 1},${j + 1}} &= `;
+        if ((causalOf(L) && j > i) || sv === -Infinity) { lines.push(`${lhs}-\\infty \\quad \\text{masked: } ${j + 1} > ${i + 1}`); continue; }
+        const kj = F.K[j] || [];
+        let dot = 0;
+        const terms = q.map((qc, cc) => { dot += qc * (kj[cc] ?? NaN); return prod(fmt(qc), fmt(kj[cc])); });
+        const val = Number.isFinite(sv) ? sv : dot * scaleOf(L);
+        const shown = cutTerms(terms);
+        const body = `c\\,\\big(${shown.join(' + ')}\\big)`, res = `= ${fmt(val)}`;
+        if (texWidth(`${body} ${res}`) <= room) lines.push(`${lhs}${body} ${res}`);
+        else if (texWidth(body) <= room) lines.push(lhs + body, `&${res}`);
+        else {
+          const w = wrapSum(`${lhs}c\\,\\big(`, shown, room);
+          w[w.length - 1] += '\\big)';
+          lines.push(...w, `&${res}`);
+        }
+      }
+      return aligned(lines);
+    }, true);
+    const hint = h('div', { class: 'nn-hint' });
+    c.binds.push(() => {
+      const ok = !!attnFwd(L, hd);
+      setHidden(hint, ok);
+      setText(hint, ok ? '' : 'No attention values: the forward pass did not return them.');
+    });
+    section(c, 'node.scores', 'Scores', `q${hs}_{${i + 1}} \\cdot k${hs}_{j}`, scores, hint);
+
+    // the attention row: A_ij = softmax_j(s_ij), one bar per key token j, hover lights v_j
+    const def = h('div', { class: 'nn-def' });
+    setTex(def, `A${hs}_{${i + 1},j} = \\dfrac{e^{s${hs}_{${i + 1},j}}}{\\sum_{j'} e^{s${hs}_{${i + 1},j'}}}` +
+      (causalOf(L) ? `,\\quad A${hs}_{${i + 1},j} = 0 \\text{ for } j > ${i + 1}` : ''));
+    const bars = [];
+    for (let j = 0; j < T; j++) {
+      const lab = h('span', { class: 'nn-att-lab' });
+      setTex(lab, `A${hs}_{${i + 1},${j + 1}}`);
+      const fill = h('i');
+      const val = h('span', { class: 'nn-att-val' });
+      const row = h('div', { class: 'nn-att-row' }, lab, h('span', { class: 'nn-att-bar' }, fill), val);
+      const v = qkvNode(L, 2, j, at.f);
+      if (v) hoverable(c, row, { kind: 'node', id: v.id }, v.id);
+      tokenLit(c, row, [{ layer: L - 1, t: j, g: 2, h: at.heads > 1 ? hd : null }]);   // value token j (V is group 2)
+      row.title = `Token ${i + 1} attends to token ${j + 1} with this weight (hover: v${j + 1})`;
+      bars.push({ row, fill, val, j });
+    }
+    c.binds.push(() => {
+      const A = attnFwd(L, hd)?.A?.[i];
+      for (const b of bars) {
+        const a = A?.[b.j];
+        const masked = causalOf(L) && b.j > i;
+        b.row.classList.toggle('masked', masked);
+        setStyle(b.fill, 'width', Number.isFinite(a) ? `${Math.max(0, Math.min(1, a)) * 100}%` : '0%');
+        setText(b.val, masked ? '0 (masked)' : Number.isFinite(a) ? fmt(a) : '?');
+      }
+    });
+    const rowSec = section(c, 'node.attn', 'Attention row', `\\text{token } ${i + 1} \\text{ attends to}`, def, ...bars.map(b => b.row));
+    const hh = at.heads > 1 ? hd : null;   // lit by this token's row: its Z token, its query, a heatmap row
+    tokenLit(c, rowSec.head, [{ layer: L, t: i, h: hh }, { layer: L - 1, t: i, g: 0, h: hh }]);
+  }
+
+  // z_if = sum_j A_ij V_jf with numbers (a = z: the layer is identity).
+  function attnArith(id, L, I, k) {
+    const { T, i, hd, fh, f } = attnAt(L, k);
+    const F = attnFwd(L, hd), fw = fwdNode(id);
+    const hs = hsup(L, hd);
+    const zS = `z^{(${L})}_{${I}}`, aS = aSym(L, I);
+    const room = CARD_UNITS - Math.max(texWidth(zS), texWidth(aS));
+    const lines = [`${zS} &= Z_{${i + 1},${f + 1}} = \\sum_{j=1}^{${T}} A${hs}_{${i + 1},j}\\, V${hs}_{j,${fh + 1}}`];
+    if (F?.A && F?.V) {
+      const terms = [];
+      for (let j = 0; j < T; j++) terms.push(prod(fmt(F.A[i]?.[j]), fmt(F.V[j]?.[fh])));
+      lines.push(...wrapSum('&= ', cutTerms(terms), room));
+    }
+    lines.push(`&= ${fmt(fw?.z)}`, `${aS} &= ${zS} = ${fmt(fw?.a)}`);
+    return aligned(lines);
   }
 
   function texEl(src) {
@@ -1030,10 +1297,14 @@ export function install(ctx) {
     }
     // z^{(L)}_I = sum_j W^{(L)}_{I,j} a^{(L-1)}_j (+ skip terms) + b^{(L)}_I: existing edges only,
     // since a masked entry is a fixed 0. Factors are the senders' labels.
-    const terms = incoming.map(({ eid, from, k, j }) => ({
-      sym: `${wSym(L, k, I, j + 1)}\\,{${label(from)}}`,
-      w: edge(eid)?.w, a: fwdNode(from)?.a,
-    }));
+    // a shared weight is written by its parameter's name: q = x W_Q reads W_Q(i, j) x_i
+    const terms = incoming.map(({ eid, from, k, j }) => {
+      const tie = tieOf(edge(eid));
+      return {
+        sym: `${tie ? tieTex(tie) : wSym(L, k, I, j + 1)}\\,{${label(from)}}`,
+        w: edge(eid)?.w, a: fwdNode(from)?.a,
+      };
+    });
     const shown = terms.length > MAX_TERMS ? [...terms.slice(0, 4), null, ...terms.slice(-2)] : terms;
     const num = shown.map(t => (t ? wTerm(t.w, fmt(t.a)) : '\\cdots'));
     const b = Number.isFinite(n.bias) ? n.bias : 0;
@@ -1069,15 +1340,18 @@ export function install(ctx) {
       const outs = M.nodesIn(net(), L), n = outs.length, kind = lossKind();
       const y = node(id)?.target, a = fw?.a, yh = `\\hat y_{${I}}`, yy = `y_{${I}}`;
       const fr = n > 1 ? `\\tfrac{1}{${n}}` : '';
-      lines.push(`L &= ${lossTex(kind, n)}`, `&= ${fmt(b.loss, 4)}`);
+      // a token output layer normalizes each token: its cross-entropy is the mean over the m tokens
+      const [b0, b1] = softBlock(L, I - 1), m = kind === 'ce' ? Math.max(1, Math.round(n / (b1 - b0))) : 1;
+      const fm = m > 1 ? `\\tfrac{1}{${m}}` : '';
+      lines.push(`L &= ${m > 1 ? `\\tfrac{1}{${m}}\\sum_{\\text{tokens}}\\Big(${lossTex(kind, b1 - b0)}\\Big)` : lossTex(kind, n)}`, `&= ${fmt(b.loss, 4)}`);
       if (kind === 'ce') {
         // softmax + cross-entropy: delta = (sum_j y_j) yhat - y, i.e. yhat - y for a one-hot target
-        const S = outs.reduce((s, q) => s + (Number.isFinite(q.target) ? q.target : 0), 0);
+        const S = outs.slice(b0, b1).reduce((s, q) => s + (Number.isFinite(q.target) ? q.target : 0), 0);
         const one = Math.abs(S - 1) < 1e-9;
-        lines.push(`${dA} &= -\\frac{${yy}}{${yh}} = -\\frac{${fmt(y)}}{${fmt(a)}} = ${g3(g.da)}`);
-        lines.push(one ? `${dS} &= ${dZ} = ${yh} - ${yy}` : `${dS} &= ${dZ} = ${yh}\\textstyle\\sum_j y_j - ${yy}`);
-        lines.push(one ? `&= ${fmt(a)} - ${factor(fmt(y))} = ${g3(g.dz)}`
-          : `&= ${fmt(a)} \\cdot ${factor(fmt(S))} - ${factor(fmt(y))} = ${g3(g.dz)}`);
+        lines.push(`${dA} &= -${fm}\\frac{${yy}}{${yh}} = -${fm}\\frac{${fmt(y)}}{${fmt(a)}} = ${g3(g.da)}`);
+        lines.push(one ? `${dS} &= ${dZ} = ${fm}(${yh} - ${yy})` : `${dS} &= ${dZ} = ${fm}\\big(${yh}\\textstyle\\sum_j y_j - ${yy}\\big)`);
+        lines.push(one ? `&= ${fm}(${fmt(a)} - ${factor(fmt(y))}) = ${g3(g.dz)}`
+          : `&= ${fm}\\big(${fmt(a)} \\cdot ${factor(fmt(S))} - ${factor(fmt(y))}\\big) = ${g3(g.dz)}`);
         fused = true;
       } else if (kind === 'bce') {
         // sigmoid + binary cross-entropy: sigma'(z) = yhat (1 - yhat) cancels, delta = (yhat - y) / n
@@ -1089,6 +1363,10 @@ export function install(ctx) {
       } else {
         lines.push(`${dA} &= ${fr}(${yh} - ${yy})`, `&= ${fr}(${fmt(a)} - ${factor(fmt(y))}) = ${g3(g.da)}`);
       }
+    } else if (L < last && isAttn(L + 1)) {
+      // a Q / K / V neuron: dQ = dS K c, dK = dS^T Q c, dV = A^T dZ (docs/NN_ATTENTION.md)
+      lines.push(...attnGradLines(id, L, aS, dA));
+      lines.push(`&= ${g3(g.da)}`);
     } else {
       // dL/da = sum over this neuron's outgoing edges of W delta (column I of the next W, plus skips)
       const out = net().edges.filter(e => e.from === id)
@@ -1113,9 +1391,11 @@ export function install(ctx) {
       else if (isVec(act)) {
         // softmax couples the layer: delta_i = a_i (dL/da_i - sum_j a_j dL/da_j)
         const aj = `a^{(${L})}_{j}`, dAj = `\\frac{\\partial L}{\\partial ${aj}}`;
-        const as = store.state.fwd?.a?.[L] || [], das = b.dA?.[L] || [];
+        const [b0, b1] = softBlock(L, I - 1);   // per token on a token layer
+        const as = (store.state.fwd?.a?.[L] || []).slice(b0, b1), das = (b.dA?.[L] || []).slice(b0, b1);
         const s = as.reduce((t, v, j) => t + v * (das[j] ?? 0), 0);
-        lines.push(`${dS} &= ${dZ} = ${aS}\\Big(${dA} - \\sum_j ${aj}\\,${dAj}\\Big)`);
+        const over = isTok(L) ? `_{j \\in \\text{token}}` : '_j';
+        lines.push(`${dS} &= ${dZ} = ${aS}\\Big(${dA} - \\sum${over} ${aj}\\,${dAj}\\Big)`);
         lines.push(`&= ${fmt(a)}\\,\\big(${g3(g.da)} - ${factor(g3(s))}\\big) = ${g3(g.dz)}`);
       } else {
         const fn = FN[act] ?? `\\operatorname{${act}}`;
@@ -1127,8 +1407,51 @@ export function install(ctx) {
         lines.push(`&= ${factor(g3(g.da))} \\cdot ${factor(spT)} = ${g3(g.dz)}`);
       }
     }
-    if (L > 0) lines.push(`\\frac{\\partial L}{\\partial b^{(${L})}_{${I}}} &= ${dS} = ${g3(g.dz)}`);
+    if (L > 0 && !isAttn(L)) {
+      lines.push(`\\frac{\\partial L}{\\partial b^{(${L})}_{${I}}} &= ${dS} = ${g3(g.dz)}`);
+      const bt = biasTie(id);   // a shared bias steps by the sum over every neuron that uses it
+      const tot = bt ? b.tie?.[bt] : null;
+      if (bt && Number.isFinite(tot)) {
+        lines.push(`\\frac{\\partial L}{\\partial ${tieTex(bt)}} &= \\sum_{\\text{copies}} \\delta = ${g3(tot)}\\quad (${biasGroup(bt).length} \\text{ copies})`);
+      }
+    }
     return aligned(lines);
+  }
+
+  // dL/da for a neuron of the Q / K / V layer L, through attention layer L + 1, with numbers:
+  //   q_{t,c}: c sum_j dS_tj K_jc      k_{t,c}: c sum_i dS_it Q_ic      v_{t,c}: sum_i A_it dZ_ic
+  function attnGradLines(id, L, aS, dA) {
+    const k = indexIn(id), s = shapeOf(L), A = L + 1;
+    const g = s.groups ? Math.floor(k / (s.tokens * s.d)) : 2;
+    const t = Math.floor(k / s.d) % s.tokens, f = k % s.d;
+    const dh = Math.max(1, Math.floor(s.d / headsOf(A))), hd = Math.min(headsOf(A) - 1, Math.floor(f / dh)), ch = f % dh;
+    const F = attnFwd(A, hd), B = attnBwd(A, hd), hs = hsup(A, hd);
+    const T = s.tokens, room = CARD_UNITS - texWidth(`\\partial ${aS}`);
+    const dS = (p, q) => `\\mathrm{d}S${hs}_{${p},${q}}`;
+    let sym, terms = [], pre = '', post = '';
+    if (g === 0) {
+      sym = `(\\mathrm{d}Q${hs})_{${t + 1},${ch + 1}} = c \\sum_j ${dS(t + 1, 'j')}\\, K${hs}_{j,${ch + 1}}`;
+      if (F && B) for (let j = 0; j < T; j++) terms.push(prod(g3(B.dS?.[t]?.[j]), fmt(F.K?.[j]?.[ch])));
+      pre = 'c\\,\\big('; post = '\\big)';
+    } else if (g === 1) {
+      sym = `(\\mathrm{d}K${hs})_{${t + 1},${ch + 1}} = c \\sum_i ${dS('i', t + 1)}\\, Q${hs}_{i,${ch + 1}}`;
+      if (F && B) for (let i = 0; i < T; i++) terms.push(prod(g3(B.dS?.[i]?.[t]), fmt(F.Q?.[i]?.[ch])));
+      pre = 'c\\,\\big('; post = '\\big)';
+    } else {
+      sym = `(\\mathrm{d}V${hs})_{${t + 1},${ch + 1}} = \\sum_i A${hs}_{i,${t + 1}}\\, \\mathrm{d}Z${hs}_{i,${ch + 1}}`;
+      if (F && B) for (let i = 0; i < T; i++) terms.push(prod(fmt(F.A?.[i]?.[t]), g3(B.dZ?.[i]?.[ch])));
+    }
+    const lines = [`${dA} &= ${sym}`];
+    if (pre) lines.push(`&\\quad c = ${scaleEq(A)}`);
+    if (terms.length) {
+      const shown = cutTerms(terms);
+      const w = wrapSum(`&= ${pre}`, shown, room);
+      w[w.length - 1] += post;
+      lines.push(...w);
+    } else {
+      lines.push('&\\quad \\text{(no attention gradients from the backward pass)}');
+    }
+    return lines;
   }
 
   // The slope of an elementwise activation at this neuron, in terms students can check. ReLU and
@@ -1254,13 +1577,14 @@ export function install(ctx) {
   function buildEdge(c, eid) {
     const e0 = edge(eid);
     const from = e0.from, to = e0.to;
+    const tie = tieOf(e0), fixed = !!e0.fixed;
     const lt = M.nodeLayerIndex(net(), to), lf = M.nodeLayerIndex(net(), from);
     const i = indexIn(to), j = indexIn(from);
     const Wsym = wSym(lt, lf, i + 1, j + 1);
     const zS = `z^{(${lt})}_{${i + 1}}`;
     c.binds.push(() => {
       setTex(c.title, `{${label(from)}} \\to {${label(to)}}`);
-      setText(c.kind, 'weight');
+      setText(c.kind, fixed ? 'fixed weight' : tie ? 'shared weight' : 'weight');
     });
 
     const fromChip = h('button', { class: 'nn-chip', title: 'Open the source neuron' });
@@ -1273,16 +1597,31 @@ export function install(ctx) {
     const whereEl = h('div', { class: 'nn-where' });
     setTex(whereEl, `w = ${Wsym}` + `\\quad \\text{row } ${i + 1}\\ (\\text{to}),\\ \\text{column } ${j + 1}\\ (\\text{from})` +
       (lf === lt - 1 ? '' : `\\quad \\text{skip}`));
-    section(c, 'edge.where', 'Edge', null,
-      h('div', { class: 'nn-where-row' }, fromChip, h('span', { class: 'nn-arrow', text: '→' }), toChip),
-      whereEl);
+    const kids = [h('div', { class: 'nn-where-row' }, fromChip, h('span', { class: 'nn-arrow', text: '→' }), toChip), whereEl];
+    if (tie) {
+      // "shared parameter W_Q(1,2), used by n edges", then one chip per edge (per token)
+      const share = h('div', { class: 'nn-where nn-share' });
+      c.binds.push(() => setTex(share, `\\text{shared parameter } ${tieTex(tie)},\\ \\text{used by } ${tieGroup(tie).length} \\text{ edges}`));
+      kids.push(share, usedBy(c, eid, tie));
+    } else if (fixed) {
+      kids.push(h('div', { class: 'nn-hint', text: 'Fixed: a residual identity or pooling weight. Training, Randomize and connect never change it.' }));
+    }
+    section(c, 'edge.where', 'Edge', null, ...kids);
 
-    section(c, 'edge.w', 'Weight', null, slider(c, {
-      lab: el => setTex(el, 'w'),
-      get: () => edge(eid)?.w,
-      set: v => M.setWeight(net(), eid, v),
-      what: 'weight', hover: { kind: 'edge', id: eid },
-    }));
+    if (fixed) {
+      section(c, 'edge.w', 'Weight', '\\text{read-only}',
+        texBox(c, () => `w = ${wTex(edge(eid)?.w)}`, false, 'nn-math nn-inline'));
+    } else {
+      const row = slider(c, {
+        lab: el => setTex(el, tie ? tieTex(tie) : 'w'),
+        get: () => edge(eid)?.w,
+        set: v => setW(eid, v),
+        what: 'weight', hover: { kind: 'edge', id: eid },
+      });
+      if (tie) row.classList.add('tied', 'wide');
+      section(c, 'edge.w', tie ? 'Shared parameter' : 'Weight',
+        tie ? `\\text{moves all } ${tieGroup(tie).length} \\text{ edges}` : null, row);
+    }
 
     section(c, 'edge.contrib', 'Contribution', null, texBox(c, () => {
       const w = edge(eid)?.w, a = fwdNode(from)?.a, z = fwdNode(to)?.z;
@@ -1292,8 +1631,10 @@ export function install(ctx) {
       ]);
     }, true));
 
-    // dL/dw by the chain rule (z depends on w through the term w a), then one descent step
+    // dL/dw by the chain rule (z depends on w through the term w a), then one descent step. A shared
+    // parameter sums the terms of every edge that uses it; a fixed weight is never stepped.
     const grad = texBox(c, () => {
+      if (tie) return tieGradTex(tie);
       const dw = store.state.bwd?.edge?.[eid];
       if (!Number.isFinite(dw)) return null;
       const dz = bwdNode(to)?.dz, a = fwdNode(from)?.a, w = edge(eid)?.w;
@@ -1302,7 +1643,7 @@ export function install(ctx) {
         `&= ${factor(g3(dz))} \\cdot ${factor(fmt(a))} = ${g3(dw)}`,
       ];
       const lr = learningRate();
-      if (Number.isFinite(w)) {
+      if (Number.isFinite(w) && !fixed) {
         lines.push(`w_{\\text{new}} &= w - \\eta\\,\\frac{\\partial L}{\\partial w}`);
         lines.push(`&= ${fmt(w, 3)} - ${+lr.toPrecision(3)} \\cdot ${factor(g3(dw))} = ${fmt(w - lr * dw, 3)}`);
       }
@@ -1310,15 +1651,68 @@ export function install(ctx) {
     }, true);
     const hint = h('div', { class: 'nn-hint' });
     c.binds.push(() => {
-      const b = store.state.bwd;
+      const b = store.state.bwd, eta = +learningRate().toPrecision(3);
       setText(hint, !b ? targetsHint() : b.note
-        || `η = ${+learningRate().toPrecision(3)}, the Train panel's rate. Training averages ∂L/∂w over a mini-batch; this step uses the current sample alone.`);
+        || (fixed ? 'Fixed: training computes this gradient but never applies it.'
+          : tie ? `One term per edge that uses ${tieText(tie)}: training adds them up, so every copy takes the same step (η = ${eta}; training also averages over a mini-batch, this is the current sample alone).`
+            : `η = ${eta}, the Train panel's rate. Training averages ∂L/∂w over a mini-batch; this step uses the current sample alone.`));
     });
     section(c, 'edge.grad', 'Gradient', null, grad, hint);
 
-    const del = h('button', { class: 'nn-mini danger', title: 'Remove this edge (its entry becomes a fixed 0)' }, 'remove edge');
-    del.addEventListener('click', () => { M.disconnect(net(), eid); store.commit('disconnect'); });
-    c.body.append(h('div', { class: 'nn-row nn-actions' }, del));
+    if (!fixed) {
+      const del = h('button', {
+        class: 'nn-mini danger',
+        title: tie ? 'Remove this one edge (its entry becomes a fixed 0; the shared parameter keeps its other edges)' : 'Remove this edge (its entry becomes a fixed 0)',
+      }, 'remove edge');
+      del.addEventListener('click', () => { M.disconnect(net(), eid); store.commit('disconnect'); });
+      c.body.append(h('div', { class: 'nn-row nn-actions' }, del));
+    }
+  }
+
+  // The edges of a tie group as chips: by token when they all land in one token layer, else from -> to.
+  function usedBy(c, eid, tie) {
+    const es = tieGroup(tie);
+    const ls = new Set(es.map(e => M.nodeLayerIndex(net(), e.to)));
+    const tokL = ls.size === 1 ? [...ls][0] : -1;
+    const byTok = tokL > 0 && isTok(tokL);
+    const wrap = h('div', { class: 'nn-used' });
+    for (const e of es) {
+      const chip = h('button', { class: 'nn-chip nn-used-chip' + (e.id === eid ? ' on' : ''), title: 'Open this edge' });
+      const t = byTok ? tokPos(tokL, indexIn(e.to)).t : -1;
+      setTex(chip, (byTok ? `t_{${t + 1}}\\!:\\ ` : '') + `{${label(e.from)}} \\to {${label(e.to)}}`);
+      chip.addEventListener('click', () => select({ kind: 'edge', id: e.id }));
+      hoverable(c, chip, { kind: 'edge', id: e.id });
+      wrap.append(chip);
+    }
+    return wrap;
+  }
+
+  // dL/dW(i, j) of a shared parameter = the sum over its edges of delta_to a_from (one per token).
+  function tieGradTex(tie) {
+    const b = store.state.bwd;
+    if (!b) return null;
+    const es = tieGroup(tie);
+    const P = tieTex(tie), dP = `\\frac{\\partial L}{\\partial ${P}}`;
+    const room = CARD_UNITS - Math.max(texWidth(`\\partial ${P}`), texWidth('w_{new}'));
+    const syms = [], nums = [];
+    let sum = 0;
+    for (const e of es) {
+      const lt = M.nodeLayerIndex(net(), e.to), lf = M.nodeLayerIndex(net(), e.from);
+      const dz = bwdNode(e.to)?.dz, a = fwdNode(e.from)?.a, ge = b.edge?.[e.id];
+      syms.push(`\\delta^{(${lt})}_{${indexIn(e.to) + 1}}\\, ${aSym(lf, indexIn(e.from) + 1)}`);
+      nums.push(prod(g3(dz), fmt(a)));
+      sum += Number.isFinite(ge) ? ge : dz * a;
+    }
+    const total = Number.isFinite(b.tie?.[tie]) ? b.tie[tie] : sum;
+    const cut = xs => (xs.length > MAX_TERMS ? [...xs.slice(0, 4), '\\cdots', ...xs.slice(-2)] : xs);
+    const lines = [`${dP} &= \\sum_{e} \\delta_{\\text{to}(e)}\\, a_{\\text{from}(e)}`,
+      ...wrapSum('&= ', cut(syms), room), ...wrapSum('&= ', cut(nums), room), `&= ${g3(total)}`];
+    const w = es[0]?.w, lr = learningRate();
+    if (Number.isFinite(w) && Number.isFinite(total)) {
+      lines.push(`w_{\\text{new}} &= w - \\eta\\, ${dP}`);
+      lines.push(`&= ${fmt(w, 3)} - ${+lr.toPrecision(3)} \\cdot ${factor(g3(total))} = ${fmt(w - lr * total, 3)}`);
+    }
+    return aligned(lines);
   }
 
   // ---------------------------------------------------------------- layer card
@@ -1326,7 +1720,9 @@ export function install(ctx) {
   function buildLayer(c, lid) {
     const L = M.layerIndex(net(), lid);
     const last = lastIndex();
-    const kind = L === 0 ? 'input layer' : L === last ? 'output layer' : 'hidden layer';
+    const attn = isAttn(L), tok = isTok(L), sh = shapeOf(L);
+    const kind = attn ? (L === last ? 'attention output layer' : 'attention layer')
+      : L === 0 ? 'input layer' : L === last ? 'output layer' : 'hidden layer';
     const nodes = () => M.nodesIn(net(), L);
     c.binds.push(() => {
       setText(c.title, layerOf(lid)?.name || `layer ${L}`);
@@ -1343,14 +1739,22 @@ export function install(ctx) {
     const plus = h('button', { class: 'nn-mini', title: 'Add a neuron, wired like its neighbours' }, '+');
     minus.addEventListener('click', () => resize(lid, -1));
     plus.addEventListener('click', () => resize(lid, +1));
+    // A token layer holds tokens x features neurons (per group): one more neuron would break that.
+    const sizeRow = tok
+      ? h('span', { class: 'nn-size-row', title: 'tokens × features' + (sh.groups ? ' per group' : '') }, size)
+      : h('span', { class: 'nn-size-row' }, minus, size, plus);
     c.binds.push(() => {
-      const n = nodes().length;
-      setText(size, String(n));
+      const n = nodes().length, s = shapeOf(L);
+      setText(size, tok ? `${s.groups ? s.groups.length + ' × ' : ''}${s.tokens} × ${s.d} = ${n}` : String(n));
       minus.disabled = ro || n <= 1;
     });
     const shape = texBox(c, () => {
-      const m = nodes().length;
-      if (L === 0) return `x = a^{(0)} \\in \\mathbb{R}^{${m}}`;
+      const m = nodes().length, s = shapeOf(L);
+      if (attn) {
+        return `Z = \\operatorname{softmax}\\big(QK^{\\top} c${causalOf(L) ? ' + M' : ''}\\big)\\,V \\in \\mathbb{R}^{${s.tokens} \\times ${s.d}}`;
+      }
+      const tokTex = tok ? (s.groups ? s.groups.map(g => `{${g}}`).join(',\\ ') : matSym(L)) + ` \\in \\mathbb{R}^{${s.tokens} \\times ${s.d}}` : '';
+      if (L === 0) return tok ? `${tokTex}\\quad (x = a^{(0)} \\in \\mathbb{R}^{${m}})` : `x = a^{(0)} \\in \\mathbb{R}^{${m}}`;
       const n = M.nodesIn(net(), L - 1).length;
       const ids = new Set(nodes().map(q => q.id));
       const prev = new Set(M.nodesIn(net(), L - 1).map(q => q.id));
@@ -1360,21 +1764,23 @@ export function install(ctx) {
         if (prev.has(e.from)) have++; else skip++;
       }
       const masked = m * n - have;
-      return `W^{(${L})} \\in \\mathbb{R}^{${m} \\times ${n}},\\ b^{(${L})} \\in \\mathbb{R}^{${m}}` +
+      const flat = `W^{(${L})} \\in \\mathbb{R}^{${m} \\times ${n}},\\ b^{(${L})} \\in \\mathbb{R}^{${m}}` +
         (masked ? `\\quad ${masked} \\text{ masked}` : '') + (skip ? `\\quad ${skip} \\text{ skip}` : '');
+      return tok ? `\\begin{aligned} &${tokTex} \\\\ &${flat} \\end{aligned}` : flat;
     }, false, 'nn-math nn-inline');
     section(c, 'layer.main', 'Layer', null,
       h('div', { class: 'nn-field nn-grid2' }, h('span', { class: 'nn-k', text: 'name' }), name),
-      h('div', { class: 'nn-field nn-grid2' }, h('span', { class: 'nn-k', text: 'size' }),
-        h('span', { class: 'nn-size-row' }, minus, size, plus)),
+      h('div', { class: 'nn-field nn-grid2' }, h('span', { class: 'nn-k', text: 'size' }), sizeRow),
       shape);
+
+    if (attn) { buildAttnLayer(c, L, lid); return; }
 
     if (L > 0) {
       const def = h('div', { class: 'nn-def' });
       const plot = makePlot();
       c.binds.push(() => {
         const act = actOf(L);
-        setTex(def, actDef(act));
+        setTex(def, actDef(act) + (isVec(act) && tok ? '\\quad \\text{(per token)}' : ''));
         setHidden(plot.el, isVec(act));
         if (!isVec(act)) {
           const hv = store.state.hover;
@@ -1382,24 +1788,26 @@ export function install(ctx) {
         }
       });
       section(c, 'layer.act', 'Activation', null, h('div', { class: 'nn-act-row' }, actSelect(c, lid), def), plot.el);
+      sharedSection(c, L);
     }
 
-    // wiring
+    // wiring (never into an attention layer: it takes no edges)
     const acts = [];
+    const mix = t => (tok || (L > 0 && isTok(L - 1)) ? `${t}. Dense edges mix the tokens and are not shared.` : t);
     if (L > 0) {
-      const b = h('button', { class: 'nn-mini', title: 'Connect every neuron of the previous layer to every neuron here' }, '← connect previous');
+      const b = h('button', { class: 'nn-mini', title: mix('Connect every neuron of the previous layer to every neuron here') }, '← connect previous');
       b.addEventListener('click', () => dense(net().layers[L - 1].id, lid));
       acts.push(b);
     }
-    if (L < last) {
-      const b = h('button', { class: 'nn-mini', title: 'Connect every neuron here to every neuron of the next layer' }, 'connect next →');
+    if (L < last && !isAttn(L + 1)) {
+      const b = h('button', { class: 'nn-mini', title: mix('Connect every neuron here to every neuron of the next layer') }, 'connect next →');
       b.addEventListener('click', () => dense(lid, net().layers[L + 1].id));
       acts.push(b);
     }
     if (L > 0) {
       const scheme = h('select', { class: 'nn-scheme', title: 'Initialisation scheme' }, SCHEMES.map(s => h('option', { value: s }, s)));
       scheme.value = schemeFor(L);
-      const b = h('button', { class: 'nn-mini', title: 'Re-draw the incoming weights and biases of this layer' }, 'randomize');
+      const b = h('button', { class: 'nn-mini', title: 'Re-draw the incoming weights and biases of this layer (one value per shared parameter; fixed weights stay)' }, 'randomize');
       b.addEventListener('click', () => randomizeLayer(lid, scheme.value));
       acts.push(h('span', { class: 'nn-rand' }, b, scheme));
     }
@@ -1427,9 +1835,186 @@ export function install(ctx) {
       get: () => node(q.id)?.bias,
       set: v => M.setNode(net(), q.id, { bias: v }),
       what: 'bias', hover: { kind: 'bias', id: q.id }, other: q.id, scale: () => maxB,
-      onLabel: () => select({ kind: 'node', id: q.id }), labelTitle: 'Open this neuron',
+      onLabel: () => select({ kind: 'node', id: q.id }),
+      labelTitle: biasTie(q.id) ? `Shared bias ${tieText(biasTie(q.id))}: open this neuron` : 'Open this neuron',
     }));
+    rows.forEach((r, k) => { if (biasTie(nodes()[k]?.id)) r.classList.add('tied'); });
     section(c, 'layer.vec', L === 0 ? 'Inputs' : 'Biases', null, vec, ...rows);
+  }
+
+  // The shared parameters feeding layer L as small matrices (X W convention: rows = input feature,
+  // columns = output feature), and the layer as a matrix product: Q = X W_Q, H = ReLU(Z W_O + X).
+  function sharedSection(c, L) {
+    const s = shapeOf(L), pos = new Map(M.nodesIn(net(), L).map((q, k) => [q.id, k]));
+    const mats = new Map(), fixedFrom = new Set(), plainFrom = new Set();
+    for (const e of net().edges) {
+      if (!pos.has(e.to)) continue;
+      const lf = M.nodeLayerIndex(net(), e.from), t = tieOf(e);
+      if (e.fixed) { fixedFrom.add(lf); continue; }
+      if (!t) { plainFrom.add(lf); continue; }
+      const p = tieParts(t);
+      let m = mats.get(p.name);
+      if (!m) mats.set(p.name, m = { name: p.name, cell: new Map(), rows: 0, cols: 0, groups: new Set(), from: lf, n: 0 });
+      m.n++;
+      if (p.i && !m.cell.has(`${p.i},${p.j}`)) {
+        m.cell.set(`${p.i},${p.j}`, e.id);
+        m.rows = Math.max(m.rows, p.i);
+        m.cols = Math.max(m.cols, p.j);
+      }
+      if (s.groups) m.groups.add(Math.floor(pos.get(e.to) / (s.tokens * s.d)));
+    }
+    if (!mats.size) return;
+    const list = [...mats.values()];
+    // The layer as a product (Q = X W_Q) only when that is exactly what it computes: every shared
+    // matrix tokenwise (model.tiedMatrices: the layer matrix is I ⊗ Wᵀ), every other edge a fixed
+    // identity residual. A conv kernel or an RNN's x_t w_x is shared but not such a product.
+    const tw = typeof M.tiedMatrices === 'function' ? M.tiedMatrices(net(), L) : [];
+    const residual = [...fixedFrom].every(k => net().edges.every(e => {
+      if (!e.fixed || !pos.has(e.to) || M.nodeLayerIndex(net(), e.from) !== k) return true;
+      const a = tokPos(k, indexIn(e.from)), b = tokPos(L, pos.get(e.to));
+      return e.w === 1 && a.t === b.t && a.f === b.f;
+    }));
+    const exact = !plainFrom.size && residual && list.every(m => tw.some(t => t.name === m.name && t.tokenwise));
+    const rel = !exact ? null : texBox(c, () => {
+      const act = actOf(L), fn = FN[act] ?? `\\operatorname{${act}}`;
+      const anyB = M.nodesIn(net(), L).some(q => Number.isFinite(q.bias) && q.bias !== 0);
+      const wrap = x => (act === 'identity' ? x : `${fn}\\big(${x}\\big)`);
+      const bias = anyB ? ' + b' : '';
+      if (s.groups) {
+        return s.groups.map((g, gi) => {
+          const ms = list.filter(m => m.groups.has(gi));
+          return ms.length ? `{${g}} = ${wrap(ms.map(m => `${matSym(m.from)}\\,{${m.name}}`).join(' + ') + bias)}` : null;
+        }).filter(Boolean).join(',\\quad ');
+      }
+      const parts = [...list.map(m => `${matSym(m.from)}\\,{${m.name}}`), ...[...fixedFrom].map(k => matSym(k))];
+      return `${isTok(L) ? matSym(L) : `a^{(${L})}`} = ${wrap(parts.join(' + ') + bias)}`;
+    }, true);
+    const cut = (n, max = 6) => (n > max ? [0, 1, 2, 3, -1, n - 1] : [...Array(n).keys()]);   // -1 = dots
+    const boxes = list.map(m => texBox(c, () => {
+      if (!m.rows || !m.cols) return `{${m.name}}\\ \\text{(${m.n} edges)}`;
+      const rows = cut(m.rows).map(i => cut(m.cols).map(j => {
+        if (i < 0 || j < 0) return i < 0 && j < 0 ? '\\ddots' : i < 0 ? '\\vdots' : '\\cdots';
+        const eid = m.cell.get(`${i + 1},${j + 1}`);
+        return eid ? wTex(edge(eid)?.w) : '\\cdot';
+      }).join(' & '));
+      return `{${m.name}} = \\begin{bmatrix} ${rows.join(' \\\\ ')} \\end{bmatrix} \\in \\mathbb{R}^{${m.rows} \\times ${m.cols}}`;
+    }, false, 'nn-math nn-inline'));
+    const note = h('div', { class: 'nn-hint' });
+    const T = s.tokens;
+    note.textContent = exact && T > 1
+      ? `Each shared matrix is applied to every one of the ${T} tokens: in z = W a it is the block-diagonal I${sub(T)} ⊗ Wᵀ. Moving one entry moves all its copies.`
+      : 'Each shared entry is used by several edges: moving it moves all its copies.';
+    section(c, 'layer.shared', 'Shared weights', null, rel, ...boxes, note);
+  }
+  const SUBS = '₀₁₂₃₄₅₆₇₈₉';
+  const sub = n => String(n).split('').map(d => SUBS[+d] || d).join('');
+
+  // Tokens, heads, the causal mask and the scale, then this sample's attention matrix per head.
+  function buildAttnLayer(c, L, lid) {
+    const prevD = shapeOf(L - 1).d;
+    const divs = [];
+    for (let k = 1; k <= prevD; k++) if (prevD % k === 0) divs.push(k);
+    const tokEl = h('span', { class: 'nn-size' });
+    const heads = h('select', { class: 'nn-heads', title: 'Heads split d_k and d_v into equal slices, one softmax per slice' },
+      divs.map(k => h('option', { value: String(k) }, String(k))));
+    heads.addEventListener('change', () => setAttnLayer(lid, { heads: +heads.value }, 'heads'));
+    const causal = h('input', { type: 'checkbox', class: 'nn-check', title: 'Causal mask: token i only attends to tokens j ≤ i' });
+    causal.addEventListener('change', () => { setAttnLayer(lid, { causal: causal.checked }, 'causal'); causal.blur(); });
+    const scale = h('input', { type: 'number', step: '0.05', class: 'nn-num nn-scale', title: 'The factor c in S = Q Kᵀ c' });
+    scale.addEventListener('change', () => {
+      const v = parseNum(scale.value);
+      setAttnLayer(lid, { scale: v }, 'scale');
+    });
+    scale.addEventListener('keydown', e => { if (e.key === 'Enter') scale.blur(); });
+    const def = h('button', { class: 'nn-mini', title: 'Back to the default 1/√(d_k / heads)' }, 'default');
+    def.addEventListener('click', () => setAttnLayer(lid, { scale: null }, 'scale'));
+    const scaleNote = h('span', { class: 'nn-k nn-scale-note' });
+    c.binds.push(() => {
+      setText(tokEl, String(shapeOf(L).tokens));
+      setVal(heads, String(headsOf(L)));
+      if (document.activeElement !== causal) causal.checked = causalOf(L);
+      setVal(scale, numText(scaleOf(L)));
+      def.disabled = ro || !customScale(L);
+      setTex(scaleNote, customScale(L) ? '\\text{custom}' : `= 1/\\sqrt{${+dkHead(L).toFixed(3)}}`);
+    });
+    // what the Layer line's c, M and heads mean
+    const formula = texBox(c, () => {
+      const H = headsOf(L), lines = [];
+      if (causalOf(L)) lines.push('M_{i,j} = -\\infty \\text{ for } j > i, \\text{ else } 0');
+      const dh = +dkHead(L).toFixed(3);
+      if (H > 1) lines.push(`\\text{each head: its own } ${dh} \\text{ column${dh === 1 ? '' : 's'} of } Q, K, V`);
+      return lines.length ? aligned(lines.map(s => `&${s}`)) : null;
+    }, true);
+    const maps = h('div', { class: 'nn-amaps' });
+    let mapKey = '', cells = [];
+    c.binds.push(() => {
+      const T = shapeOf(L).tokens, H = headsOf(L), cz = causalOf(L);
+      const key = `${T}|${H}|${cz}`;
+      if (key !== mapKey) {
+        mapKey = key;
+        const old = new Set(maps.querySelectorAll('span'));
+        c.hov = c.hov.filter(el => !old.has(el));
+        cells = [];
+        maps.replaceChildren();
+        // Row i is token i's attention row, column j key / value token j: a cell or header hovers
+        // that token ({ kind: 'token' }), and lights with it (Q, K and V are groups 0, 1, 2).
+        for (let hd = 0; hd < H; hd++) {
+          const hh = H > 1 ? hd : null, tok = (layer, t, g = null) => ({ kind: 'token', layer, t, ...(g == null ? {} : { g }), ...(hh == null ? {} : { h: hh }) });
+          const grid = h('div', { class: 'nn-amap' });
+          grid.style.gridTemplateColumns = `auto repeat(${T}, minmax(0, 1fr))`;
+          grid.append(h('span', { class: 'nn-amap-c', text: H > 1 ? `h${hd + 1}` : 'A' }));
+          for (let j = 0; j < T; j++) {
+            const kh = h('span', { class: 'nn-amap-h', text: `k${j + 1}` });
+            hoverable(c, kh, tok(L - 1, j, 1));
+            tokenLit(c, kh, [{ layer: L - 1, t: j, g: 1, h: hh }, { layer: L - 1, t: j, g: 2, h: hh }]);
+            grid.append(kh);
+          }
+          for (let i = 0; i < T; i++) {
+            const qh = h('span', { class: 'nn-amap-h', text: `q${i + 1}` });
+            hoverable(c, qh, tok(L, i));
+            tokenLit(c, qh, [{ layer: L, t: i, h: hh }, { layer: L - 1, t: i, g: 0, h: hh }]);
+            grid.append(qh);
+            for (let j = 0; j < T; j++) {
+              const cell = h('span', { class: 'nn-amap-v' + (cz && j > i ? ' masked' : ''), title: `A(${i + 1},${j + 1}): how much token ${i + 1} reads token ${j + 1}` });
+              hoverable(c, cell, tok(L, i));
+              tokenLit(c, cell, [{ layer: L, t: i, h: hh }, { layer: L - 1, t: i, g: 0, h: hh },
+                { layer: L - 1, t: j, g: 1, h: hh }, { layer: L - 1, t: j, g: 2, h: hh }]);
+              grid.append(cell);
+              cells.push({ cell, hd, i, j });
+            }
+          }
+          maps.append(grid);
+        }
+        paintHover();
+      }
+      for (const q of cells) {
+        const a = attnFwd(L, q.hd)?.A?.[q.i]?.[q.j];
+        const masked = cz && q.j > q.i;
+        setText(q.cell, masked ? '–' : Number.isFinite(a) ? fmt(a) : '?');
+        setStyle(q.cell, 'background', masked || !Number.isFinite(a) ? 'transparent' : colorFor(a, 1, theme()));
+      }
+    });
+    section(c, 'layer.attn', 'Attention', null,
+      h('div', { class: 'nn-attn-grid' },
+        h('span', { class: 'nn-k', text: 'tokens' }), tokEl,
+        h('span', { class: 'nn-k', text: 'heads' }), heads,
+        h('span', { class: 'nn-k', text: 'causal' }), h('label', { class: 'nn-check-row' }, causal, h('span', { text: 'mask j > i' })),
+        h('span', { class: 'nn-k', text: 'scale' }), h('span', { class: 'nn-scale-row' }, scale, scaleNote, def)),
+      formula, maps,
+      h('div', { class: 'nn-hint', text: 'A for the current sample. No weights come in and there is no bias: Q, K and V come from the previous layer.' }));
+
+    if (L < lastIndex()) {
+      const b = h('button', { class: 'nn-mini', title: 'Connect every neuron here to every neuron of the next layer. Dense edges mix the tokens and are not shared.' }, 'connect next →');
+      b.addEventListener('click', () => dense(lid, net().layers[L + 1].id));
+      section(c, 'layer.wire', 'Wiring', null, h('div', { class: 'nn-row' }, b));
+    }
+  }
+
+  // heads / causal / scale through model.setLayer, which checks heads divides d; scale null = default.
+  function setAttnLayer(lid, patch, what) {
+    if (!layerOf(lid)) return;
+    M.setLayer(net(), lid, patch);
+    store.commit(what);
   }
 
   const schemeFor = L => (/relu|leaky/.test(actOf(L)) ? 'he' : 'xavier');
@@ -1447,10 +2032,14 @@ export function install(ctx) {
     const tmp = M.clone(n);
     M.randomize(tmp, { seed: seed(), scheme, biases: 'small' });
     const ids = new Set(M.nodesIn(n, M.layerIndex(n, lid)).map(q => q.id));
+    const done = new Set();   // tie groups already drawn: one value per shared parameter
     for (const e of n.edges) {
-      if (!ids.has(e.to)) continue;
+      if (!ids.has(e.to) || e.fixed) continue;
+      const t = tieOf(e);
+      if (t && done.has(t)) continue;
+      if (t) done.add(t);
       const w = M.edge(tmp, e.id)?.w;
-      if (Number.isFinite(w)) M.setWeight(n, e.id, w);
+      if (Number.isFinite(w)) setW(e.id, w);
     }
     for (const id of ids) {
       const b = M.node(tmp, id)?.bias;
@@ -1513,6 +2102,11 @@ export function install(ctx) {
   let uraf = 0;
   store.on('values', () => {
     if (!uraf && cards.length) uraf = requestAnimationFrame(() => { uraf = 0; if (visible) updateAll(); });
+  });
+  store.on('train', p => {
+    const was = training;
+    training = !!p?.running;
+    if (was && !training && cards.length && visible) updateAll();   // paused: every box current again
   });
   store.on('layout', () => { for (const c of cards) c.akey = ''; ensureLoop(); });
   store.on('hover', paintHover);

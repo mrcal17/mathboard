@@ -143,6 +143,49 @@
 .nn-rand select { font-size: 12px; padding: 1px 4px; }
 .nn-actions { padding: 6px 12px 0; border-top: 1px solid var(--ui-line); }
 
+/* shared (tied) and fixed weights */
+.nn-sl.tied .nn-sw { box-shadow: 0 0 0 2px var(--ui-bg), 0 0 0 3px var(--accent); }
+.nn-sl.tied.wide { grid-template-columns: 10px auto 1fr 58px; }
+.nn-sl.tied.wide .nn-sl-lab { max-width: 110px; }
+.nn-sl.fixed { grid-template-columns: 10px 64px 1fr auto; }
+.nn-sl.fixed .nn-sw { border-style: dashed; }
+.nn-fixed-val { font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; min-width: 40px; }
+.nn-tok { margin-top: 1px; }
+.nn-share { color: var(--ui-fg); margin-top: 3px; }
+.nn-used { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 2px; }
+.nn-used-chip { max-width: none; font-size: 11.5px; padding: 1px 7px; }
+.nn-used-chip.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+
+/* attention: a neuron's row of A as bars, the layer's fields and heatmaps */
+.nn-att-row {
+  display: grid; grid-template-columns: 58px 1fr 70px; gap: 6px; align-items: center;
+  padding: 1px 4px; margin: 0 -4px; border-radius: 6px; min-height: 24px;
+}
+.nn-att-row.hi { background: color-mix(in srgb, #ffd54a 22%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, #ffd54a 70%, transparent); }
+.nn-att-row.masked { opacity: 0.5; }
+.nn-att-lab { font-size: 12.5px; white-space: nowrap; }
+.nn-att-bar { height: 10px; border-radius: 5px; background: rgba(127, 127, 127, 0.16); overflow: hidden; }
+.nn-att-bar i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 5px; transition: width 0.08s linear; }
+.nn-att-val { font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; color: var(--ui-muted); white-space: nowrap; }
+.nn-attn-grid { display: grid; grid-template-columns: 44px 1fr; gap: 5px 6px; align-items: center; margin-bottom: 4px; }
+.nn-attn-grid .nn-size { text-align: left; }
+.nn-attn-grid select { justify-self: start; min-width: 56px; }
+.nn-check-row { display: inline-flex; align-items: center; gap: 6px; color: var(--ui-muted); font-size: 12px; cursor: pointer; }
+.nn-check { accent-color: var(--accent); margin: 0; }
+.nn-scale-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.nn-scale { width: 64px; flex: none; }
+.nn-scale-note { font-size: 12px; white-space: nowrap; overflow: hidden; }
+.nn-amaps { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0; }
+.nn-amap { display: grid; gap: 2px; font-size: 11px; font-variant-numeric: tabular-nums; flex: 1 1 130px; max-width: 220px; }
+.nn-amap-h, .nn-amap-c { color: var(--ui-muted); text-align: center; align-self: center; padding: 0 3px; }
+.nn-amap-c { font-weight: 600; }
+.nn-amap-v { text-align: center; padding: 3px 0; border-radius: 4px; border: 1px solid var(--ui-line); }
+.nn-amap-v.masked { color: var(--ui-muted); background-image: repeating-linear-gradient(135deg, transparent 0 3px, rgba(127, 127, 127, 0.18) 3px 5px); }
+/* a hovered token (canvas box, heatmap cell, matrix header): its row or column of A */
+.nn-amap-v.hi { border-color: #ffd54a; box-shadow: inset 0 0 0 1px #ffd54a; }
+.nn-amap-h.hi { color: #ffd54a; font-weight: 700; }
+.nn-amap-h, .nn-amap-v { cursor: default; }
+
 /* params */
 .nn-params { display: flex; flex-direction: column; gap: 3px; }
 .nn-prow { display: grid; grid-template-columns: 0.8fr 1.2fr 24px; gap: 4px; align-items: center; }

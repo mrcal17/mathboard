@@ -9,6 +9,16 @@
 // wheel to zoom; double-click empty space to add a neuron to the nearest layer, or a new layer
 // when the click is clearly between two columns or beyond the ends; drag from a neuron's handle
 // (the dot on its right edge) to another neuron to connect them. W: numbers on the edges.
+//
+// Sequences (docs/NN_ATTENTION.md): a token layer's neurons sit in one rounded box per token
+// (t₁…tₙ), inside a band per group (Q / K / V). An attention layer draws its data-dependent edges
+// V_j -> Z_i (width and opacity from A_ij) and an n×n heatmap of A in its header; hovering a Z
+// token (or neuron, or a heatmap cell) shows its attention row, hovering a V token or neuron its
+// column. Token boxes, heatmap cells and attention edges hover through the store as
+// { kind: 'token', layer, t, g?, h? }, so the matrix panel, the cards and the audience see it too.
+// A hovered or selected tied edge lights its whole tie group; fixed edges are dashed. Edits keep
+// token layers whole: a double-click adds a feature to every token (or says why it can't), and a
+// new edge between tokenwise-tied layers becomes a new shared entry, added for every token.
 
 import { colorFor } from './store.js';
 
@@ -23,13 +33,45 @@ const SNAP = 10;                       // a dragged neuron snaps onto its column
 const TEXT_K = 0.85, TEXT_MAX = 1.5;   // zoomed out past TEXT_K, text grows (up to TEXT_MAX) to stay legible
 const BEYOND = 2.5 * R;                // a double-click this far past the end columns adds a layer
 const GAP = 170;                       // a layer added by double-click keeps this far from its neighbours (as nn.js)
+const ROW = 80;                        // neuron spacing in a column (as model.js)
+// Token boxes: padding around the token's neurons (the left gutter holds t₁, the bottom the value
+// under the circle), and the group band's padding around its boxes (Q / K / V sit to its left).
+const TOK = { l: 20, r: 6, t: 6, b: 22, gap: 5 };
+const GRP = { l: 6, r: 6, t: 6, b: 6 };
 const VARS = ['--nnv-hi', '--nnv-bg', '--nnv-text', '--nnv-muted', '--nnv-node', '--nnv-rim', '--nnv-band',
-  '--nnv-band-line', '--nnv-head', '--nnv-head-line', '--nnv-dot', '--nnv-bad'];
-const MARKS = ['sel', 'hov', 'rel', 'lit', 'bias', 'show', 'drop'];
+  '--nnv-band-line', '--nnv-head', '--nnv-head-line', '--nnv-dot', '--nnv-bad', '--nnv-att', '--nnv-tok',
+  '--nnv-tok-line', '--nnv-grp', '--nnv-grp-line'];
+const MARKS = ['sel', 'hov', 'rel', 'lit', 'bias', 'show', 'drop', 'tie', 'foc'];
 
 const r1 = v => Math.round(v * 10) / 10;
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const isNum = v => typeof v === 'number' && Number.isFinite(v);
+
+// A layer's token shape: tokens rows of d features, per group (node k is group floor(k / (T d)),
+// token floor(k / d) % T, feature k % d). null for a plain vector; d = 0 when the size doesn't split.
+function shapeOf(layer, size) {
+  const att = layer?.kind === 'attention';
+  const T = Number.isInteger(layer?.tokens) && layer.tokens >= 1 ? layer.tokens : 1;
+  const groups = !att && Array.isArray(layer?.groups) && layer.groups.length ? layer.groups.map(String) : null;
+  if (T === 1 && !groups && !att) return null;
+  const G = groups ? groups.length : 1, d = size / (T * G);
+  const heads = att && Number.isInteger(layer.heads) && layer.heads > 0 ? layer.heads : 1;
+  return { T, G, d: Number.isInteger(d) && d >= 1 ? d : 0, groups, att, heads, causal: att && !!layer.causal };
+}
+// 'W_{Q}:1,2' -> { name: 'W_{Q}', i: 1, j: 2 }.
+function tieParse(tie) {
+  const m = /^(.*):\s*(\d+)\s*,\s*(\d+)\s*$/.exec(String(tie ?? ''));
+  return m ? { name: m[1], i: +m[2], j: +m[3] } : null;
+}
+// KaTeX tie name -> plain base + subscript for SVG text: 'W_{Q}' -> ['W', 'Q'], '\\alpha' -> ['α', ''].
+const GREEK = { alpha: 'α', beta: 'β', gamma: 'γ', delta: 'δ', theta: 'θ', lambda: 'λ', mu: 'μ', sigma: 'σ', phi: 'φ', omega: 'ω' };
+function tiePlain(name) {
+  const s = String(name).replace(/\\(?:mathrm|mathbf|mathit|text|operatorname|boldsymbol)\s*/g, '')
+    .replace(/\\([a-zA-Z]+)/g, (_, w) => GREEK[w] || w);
+  const m = /^([^_]*)(?:_(\{[^}]*\}|.))?(.*)$/.exec(s);
+  const clean = x => (x || '').replace(/[{}\s]/g, '').replace(/\^/g, '');
+  return [clean(m[1]) + clean(m[3]), clean(m[2])];
+}
 function maxAbs(...xs) {   // as matrix.js: nested arrays, non-finite entries skipped
   let m = 0;
   const walk = x => {
@@ -132,6 +174,8 @@ export function install(ctx) {
   const audience = !!ctx.audience;
   const theme = () => ctx.theme?.() || (document.documentElement.dataset.theme === 'light' ? 'light' : 'dark');
   const num = v => (isNum(v) ? model.fmt(v, 2).replace(/^-/, '−') : '—');
+  // gradients: below 0.01 two significant figures (0.0034, 3.4e−4), as in the matrix panel
+  const numg = v => (isNum(v) ? (model.fmtg || model.fmt)(v, 2).replace(/-/g, '−') : '—');
 
   // ---------------------------------------------------------------- DOM
   const svg = mk('svg', { class: `nnv${audience ? ' audience' : ''}`, role: 'img', 'aria-label': 'Neural network' });
@@ -143,10 +187,15 @@ export function install(ctx) {
   const world = mk('g', { class: 'nnv-world' }, svg);
   const content = mk('g', { class: 'nnv-content' }, world);   // untransformed: its getBBox is in world px
   const gBands = mk('g', { class: 'nnv-bands' }, content);
+  const gGroups = mk('g', { class: 'nnv-grps' }, content);
+  const gToks = mk('g', { class: 'nnv-toks' }, content);
   const gEdges = mk('g', { class: 'nnv-edges' }, content);
+  const gAtt = mk('g', { class: 'nnv-atts' }, content);
   const pairEl = mk('path', { class: 'nnv-pair', display: 'none' }, content);
   const gPulses = mk('g', { class: 'nnv-pulses' }, content);
   const gLabels = mk('g', { class: 'nnv-wls' }, content);
+  const gTokLabs = mk('g', { class: 'nnv-tls' }, content);   // t₁ and Q / K / V: over the edges that cross them
+  const gAttLabs = mk('g', { class: 'nnv-als' }, content);
   const gNodes = mk('g', { class: 'nnv-nodes' }, content);
   const gHeads = mk('g', { class: 'nnv-heads' }, content);
   const ghost = mk('path', { class: 'nnv-ghost', display: 'none' }, content);
@@ -156,12 +205,14 @@ export function install(ctx) {
 
   // ---------------------------------------------------------------- state
   const nodes = new Map(), edges = new Map(), layers = new Map(), images = new Map();
+  const toks = new Map(), atts = new Map(), attLines = new Map();   // per layer id; attention edges by id
   const V = { k: 1, x: 0, y: 0 };
   let I = null, stale = true;
   let dirty = { build: true }, raf = 0;
   let shown = document.body.dataset.view === 'nn';
   let needFit = 0, everFit = false, userMoved = false, fitAnim = 0;   // needFit: false | ms of the pending fit
   let showW = false, marked = [], pulseKey = '', pairIds = null, dropId = null, textScale = 1;
+  let focus = null;   // the shown attention row (or column)
 
   // Per-flush index of the live net. store.net's contents are replaced on undo, so never cache
   // node objects across events.
@@ -183,7 +234,28 @@ export function install(ctx) {
         box.minY = Math.min(box.minY, n.y); box.maxY = Math.max(box.maxY, n.y);
       }
     }
-    for (const e of net.edges) edgeById.set(e.id, e);
+    const ties = new Map(), biasTies = new Map();   // tie id -> edge ids; node.tie (shared bias) -> node ids
+    for (const e of net.edges) {
+      edgeById.set(e.id, e);
+      if (typeof e.tie === 'string' && e.tie) {
+        if (!ties.has(e.tie)) ties.set(e.tie, []);
+        ties.get(e.tie).push(e.id);
+      }
+    }
+    for (const n of net.nodes) {
+      if (typeof n.tie !== 'string' || !n.tie) continue;
+      if (!biasTies.has(n.tie)) biasTies.set(n.tie, []);
+      biasTies.get(n.tie).push(n.id);
+    }
+    const tok = net.layers.map((l, i) => shapeOf(l, byLayer[i].length));
+    // An attention layer draws only when it has what it reads: a Q/K/V layer before it with the same tokens.
+    const att = tok.map((s, l) => {
+      const p = tok[l - 1];
+      if (!s?.att || !s.d || !p?.groups || !p.d || p.T !== s.T || p.d !== s.d) return null;
+      const vG = p.groups.indexOf('V'), dh = s.d / s.heads;
+      if (vG < 0 || !Number.isInteger(dh)) return null;
+      return { l, T: s.T, d: s.d, heads: s.heads, dh, vG, qG: p.groups.indexOf('Q'), kG: p.groups.indexOf('K'), causal: s.causal };
+    });
     const real = byLayer.map(ns => {
       if (!ns.length) return null;
       const c = { x: 0, minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, n: ns.length };
@@ -205,9 +277,17 @@ export function install(ctx) {
         : P ? P.x + COL * (i - p) : Q ? Q.x - COL * (q - i) : 450 + COL * (i - (L - 1) / 2);
       return { x, minX: x, maxX: x, minY: cy, maxY: cy, n: 0 };
     });
-    I = { li, byLayer, nodeById, edgeById, rank, cols, box, cy, full: real.every(Boolean) };
+    I = { li, byLayer, nodeById, edgeById, rank, cols, box, cy, full: real.every(Boolean), ties, biasTies, tok, att };
     return I;
   }
+  // Where node id sits in its token layer: { l, g, t, f } (null on a plain layer or a bad shape).
+  function tokPos(id) {
+    const I = ix(), n = I.nodeById.get(id), l = n && I.li.get(n.layer), s = l !== undefined ? I.tok[l] : null;
+    if (!s?.d) return null;
+    const k = I.rank.get(id);
+    return { l, g: Math.floor(k / (s.T * s.d)), t: Math.floor(k / s.d) % s.T, f: k % s.d };
+  }
+  const tokNode = (l, g, t, f) => { const I = ix(), s = I.tok[l]; return s?.d ? I.byLayer[l][(g * s.T + t) * s.d + f] : undefined; };
 
   // ---------------------------------------------------------------- build (structural)
   function diff(map, items, make, drop) {
@@ -234,8 +314,9 @@ export function install(ctx) {
     const grad = mk('text', { class: 'nnv-grad', x: R + 7, y: -R * 0.45 }, g);
     const tgt = mk('text', { class: 'nnv-tgt', x: R + 7, y: R * 0.5 }, g);
     const bias = mk('text', { class: 'nnv-bias', x: -R - 7, y: -R * 0.45 }, g);
+    const bn = mk('tspan', { class: 'nnv-wl-n' }, bias), bs = mk('tspan', { class: 'nnv-wl-s' }, bias), bv = mk('tspan', null, bias);
     if (!audience) mk('circle', { class: 'nnv-handle', 'data-kind': 'handle', 'data-id': n.id, cx: R + 1, r: 7 }, g);
-    const r = { id: n.id, g, gring, fill, fo, div, val, grad, tgt, bias, img: null, label: undefined, x: NaN, y: NaN };
+    const r = { id: n.id, g, gring, fill, fo, div, val, grad, tgt, bias, bn, bs, bv, img: null, label: undefined, x: NaN, y: NaN };
     if (images.has(n.id)) applyImage(r, images.get(n.id));
     return r;
   }
@@ -245,20 +326,23 @@ export function install(ctx) {
     const line = mk('path', { class: 'nnv-line' }, g);
     const lab = mk('text', { class: 'nnv-wl' }, gLabels);
     const t1 = mk('tspan', { x: 0 }, lab);
+    const tn = mk('tspan', { class: 'nnv-wl-n' }, t1);   // a tied edge's matrix, e.g. W
+    const ts = mk('tspan', { class: 'nnv-wl-s' }, t1);   // its subscript, e.g. Q
+    const tv = mk('tspan', null, t1);                     // (i,j) = value
     const t2 = mk('tspan', { x: 0, dy: '1.2em', class: 'nnv-wl-g' }, lab);
-    return { id: e.id, g, hit, line, lab, t1, t2, G: null };
+    return { id: e.id, g, hit, line, lab, t1, tn, ts, tv, t2, G: null, kind: '' };
   }
   function makeLayer(l) {
     const band = mk('rect', { class: 'nnv-band', rx: 18 }, gBands);
     const g = mk('g', { class: 'nnv-head', 'data-kind': 'layer', 'data-id': l.id }, gHeads);
-    const gi = mk('g', { class: 'nnv-head-in' }, g);   // carries the text boost
-    if (textScale !== 1) gi.setAttribute('transform', `scale(${textScale})`);
+    const gi = mk('g', { class: 'nnv-head-in' }, g);   // carries the text boost (see scaleHead)
+    if (textScale !== 1) put(gi, 'transform', `scale(${textScale})`);
     const bg = mk('rect', { class: 'nnv-head-bg', rx: 9, y: -21, height: 40 }, gi);
     const name = mk('text', { class: 'nnv-head-name', y: -4 }, gi);
     const sub = mk('text', { class: 'nnv-head-sub', y: 12 }, gi);
     return { id: l.id, band, g, gi, bg, name, sub, nameS: null, subS: null, measured: false };
   }
-  const drop = r => { r.g.remove(); r.lab?.remove(); r.band?.remove(); };
+  const drop = r => { r.g.remove(); r.lab?.remove(); r.band?.remove(); r.hm = null; };
 
   function rebuild() {
     const net = store.net, before = new Set(nodes.keys());
@@ -274,6 +358,102 @@ export function install(ctx) {
     pulseKey = '';
   }
 
+  // ---------------------------------------------------------------- tokens and attention (structure)
+  // A layer's token shape lives in its fields, so changing it is not a structural event (no id
+  // changes): compare shape keys on every net event and rebuild only what changed.
+  const tokKey = s => (s?.d ? `${s.T}|${s.d}|${s.groups ? s.groups.join('\u0001') : ''}|${s.att}` : '');
+  const attKey = a => (a ? `${a.T}|${a.d}|${a.heads}|${a.vG}|${a.qG}|${a.kG}` : '');
+  function syncTokens() {
+    const net = store.net, I = ix(), live = new Set();
+    let changed = false;
+    net.layers.forEach((l, i) => {
+      live.add(l.id);
+      const key = tokKey(I.tok[i]), r = toks.get(l.id);
+      if ((r?.key ?? '') !== key) {
+        if (r) dropTok(r);
+        toks.delete(l.id);
+        if (key) toks.set(l.id, makeTok(l.id, I.tok[i], key));
+        changed = true;
+      }
+      const akey = attKey(I.att[i]), q = atts.get(l.id), head = layers.get(l.id);
+      if ((q?.key ?? '') !== akey || (q && q.head !== head)) {
+        if (q) dropAtt(q);
+        atts.delete(l.id);
+        if (akey) atts.set(l.id, makeAtt(l.id, I.att[i], akey, head));
+        changed = true;
+      }
+    });
+    for (const [id, r] of toks) if (!live.has(id)) { dropTok(r); toks.delete(id); changed = true; }
+    for (const [id, q] of atts) if (!live.has(id)) { dropAtt(q); atts.delete(id); changed = true; }
+    return changed;
+  }
+  function makeTok(id, s, key) {
+    const r = { key, bands: [], boxes: [] };
+    (s.groups || []).forEach((name, g) => {
+      const rect = mk('rect', { class: 'nnv-grp', rx: 16 }, gGroups);
+      const lab = mk('text', { class: 'nnv-grp-lab' }, gTokLabs);
+      const [base, lo] = tiePlain(name);
+      lab.textContent = base;
+      if (lo) mk('tspan', { class: 'nnv-sub', dy: '0.3em' }, lab).textContent = lo;
+      r.bands.push({ rect, lab, g });
+    });
+    for (let g = 0; g < s.G; g++) for (let t = 0; t < s.T; t++) {
+      const el = mk('g', { class: 'nnv-tok', 'data-kind': 'token', 'data-id': id, 'data-g': g, 'data-t': t }, gToks);
+      const rect = mk('rect', { class: 'nnv-tok-box', rx: 12 }, el);
+      const lab = mk('text', { class: 'nnv-tok-lab' }, gTokLabs);
+      lab.textContent = 't';
+      mk('tspan', { class: 'nnv-sub', dy: '0.3em' }, lab).textContent = String(t + 1);
+      if (s.T === 1) { el.setAttribute('display', 'none'); lab.setAttribute('display', 'none'); }   // one token: the band is enough
+      r.boxes.push({ el, rect, lab, g, t });
+    }
+    return r;
+  }
+  function dropTok(r) {
+    for (const b of r.bands) { b.rect.remove(); b.lab.remove(); }
+    for (const b of r.boxes) { b.el.remove(); b.lab.remove(); }
+  }
+  // Attention: an edge V_j,f -> Z_i,f per (i, j, f), an A_ij label per (head, i, j) shown with its row,
+  // and the heatmap (one T×T block per head) in the layer's header.
+  function makeAtt(id, a, key, head) {
+    const q = { key, head, lines: [], labs: [], hm: null };
+    for (let i = 0; i < a.T; i++) for (let j = 0; j < a.T; j++) for (let f = 0; f < a.d; f++) {
+      const h = Math.floor(f / a.dh), lid = `att:${id}:${i}:${j}:${f}`;
+      const g = mk('g', { class: 'nnv-att', 'data-kind': 'attedge', 'data-id': id, 'data-i': i, 'data-j': j, 'data-h': h }, gAtt);
+      const rec = { id: lid, g, hit: mk('path', { class: 'nnv-att-hit' }, g), line: mk('path', { class: 'nnv-att-line' }, g), i, j, f, h, G: null };
+      q.lines.push(rec);
+      attLines.set(lid, rec);
+    }
+    for (let h = 0; h < a.heads; h++) for (let i = 0; i < a.T; i++) for (let j = 0; j < a.T; j++) {
+      q.labs.push({ el: mk('text', { class: 'nnv-al' }, gAttLabs), h, i, j });
+    }
+    if (head) {
+      const cell = clamp(Math.floor(42 / a.T), 4, 14), n = a.T * cell, gap = 7;
+      const g = mk('g', { class: 'nnv-hm' }, head.g);   // above the header box, so free of its neighbours' squeeze
+      const hm = { g, cell, n, W: a.heads * n + (a.heads - 1) * gap, H: n, cells: [], hl: [] };
+      g.dataset.w = hm.W;
+      g.dataset.h = hm.H;
+      mk('text', { class: 'nnv-hm-cap', x: -7, y: r1(n / 2) }, g).textContent = 'A';
+      for (let h = 0; h < a.heads; h++) {
+        const x0 = h * (n + gap);
+        mk('rect', { class: 'nnv-hm-frame', x: x0 - 1.5, y: -1.5, width: n + 2, height: n + 2, rx: 2 }, g);
+        for (let i = 0; i < a.T; i++) for (let j = 0; j < a.T; j++) {
+          const el = mk('rect', { class: 'nnv-hm-c', 'data-kind': 'attcell', 'data-id': id, 'data-i': i, 'data-j': j, 'data-h': h,
+            x: x0 + j * cell, y: i * cell, width: cell - 1, height: cell - 1 }, g);
+          hm.cells.push({ el, h, i, j });
+        }
+        hm.hl.push({ el: mk('rect', { class: 'nnv-hm-hl', display: 'none', rx: 1.5 }, g), x0 });
+      }
+      q.hm = head.hm = hm;   // placed by scaleHead
+    }
+    return q;
+  }
+  function dropAtt(q) {
+    for (const r of q.lines) { r.g.remove(); attLines.delete(r.id); }
+    for (const t of q.labs) t.el.remove();
+    q.hm?.g.remove();
+    if (q.head && q.head.hm === q.hm) q.head.hm = null;
+  }
+
   // ---------------------------------------------------------------- meta (labels, headers)
   function renderLabel(r, tex) {
     r.label = tex;
@@ -283,45 +463,75 @@ export function install(ctx) {
     try { k.render(String(tex), r.div, { throwOnError: false, output: 'html' }); }
     catch { r.div.textContent = tex; }
   }
+  // The header box holds the name and subtitle; an attention layer's heatmap of A sits just above it.
+  function sizeHead(r, textW) {
+    const w = Math.max(64, textW + 26);
+    r.w = w;
+    put(r.bg, 'x', r1(-w / 2));
+    put(r.bg, 'width', r1(w));
+  }
   function measureHead(r) {
     let w = 0;
     try { w = Math.max(r.name.getComputedTextLength(), r.sub.getComputedTextLength()); } catch { /* not rendered */ }
     if (!w) return;
     r.measured = true;
-    w = Math.max(64, w + 26);
-    put(r.bg, 'x', r1(-w / 2));
-    put(r.bg, 'width', r1(w));
+    sizeHead(r, w);
   }
+  function headSub(l, i, count) {
+    const s = ix().tok[i], act = model.ACTS?.[l.act]?.label || l.act || 'Identity';
+    if (!s) return i === 0 ? `${count} input${count === 1 ? '' : 's'}` : `${act} · ${count}`;
+    const tokens = `${s.T} token${s.T === 1 ? '' : 's'}`;
+    if (!s.d) return `${i === 0 ? '' : `${act} · `}${count}: not ${s.G > 1 ? `${s.G} × ` : ''}${tokens} ✕`;
+    const shape = `${s.T} × ${s.d}${s.groups ? ' each' : ''}`;
+    if (s.att) return `${s.causal ? 'causal ' : ''}attention · ${shape}${s.heads > 1 ? ` · ${s.heads} heads` : ''}`;
+    return i === 0 ? `${tokens} × ${s.d}${s.groups ? ' each' : ''}` : `${act} · ${shape}`;
+  }
+  // Returns true when a header's text changed (it needs measuring and fitting between its neighbours).
   function syncMeta() {
     const net = store.net, I = ix(), L = net.layers.length;
+    let heads = false;
     for (const n of net.nodes) {
       const r = nodes.get(n.id);
       if (r && r.label !== n.label) renderLabel(r, n.label);
+    }
+    for (const e of net.edges) {   // fixed (dashed) and tied edges: plain fields, so no structural event
+      const r = edges.get(e.id), kind = e.fixed ? 'fixed' : typeof e.tie === 'string' && e.tie ? 'tied' : '';
+      if (!r || r.kind === kind) continue;
+      r.kind = kind;
+      r.g.classList.toggle('fixed', kind === 'fixed');
+      r.g.classList.toggle('tied', kind === 'tied');
     }
     net.layers.forEach((l, i) => {
       const r = layers.get(l.id);
       if (!r) return;
       const count = I.byLayer[i].length;
       const name = l.name || (i === 0 ? 'Input' : i === L - 1 ? 'Output' : 'Hidden');
-      const sub = i === 0 ? `${count} input${count === 1 ? '' : 's'}`
-        : `${model.ACTS?.[l.act]?.label || l.act || 'Identity'} · ${count}`;
+      const sub = headSub(l, i, count);
       if (r.nameS === name && r.subS === sub) return;
       r.nameS = name; r.subS = sub;
       txt(r.name, name); txt(r.sub, sub);
       r.g.setAttribute('aria-label', `${name}: ${sub}`);
       r.measured = false;
-      const w = Math.max(64, Math.max(name.length * 8.6, sub.length * 7) + 26);   // until measured
-      put(r.bg, 'x', r1(-w / 2));
-      put(r.bg, 'width', r1(w));
+      sizeHead(r, Math.max(name.length * 8.6, sub.length * 7));   // until measured
       r.band.classList.toggle('empty', !count);
+      heads = true;
     });
+    return heads;
   }
 
   // ---------------------------------------------------------------- layout (positions)
   // Skip edges bow around the columns they jump over: above them if they start and end in the
   // upper half, below otherwise.
+  // Between token layers (a transformer's residual stream) they only bow a little instead: going
+  // around a tall Q/K/V column would take them off the page. A token's upper features bow up, the
+  // lower ones down, so the two strands of a d = 2 stream separate.
   function geom(a, b) {
     const I = ix(), la = I.li.get(a.layer), lb = I.li.get(b.layer);
+    if (lb - la >= 2 && I.tok[la]?.d && I.tok[lb]?.d) {
+      const p = tokPos(a.id), s = I.tok[la], dir = p && p.f > (s.d - 1) / 2 ? -1 : 1;
+      const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy) || 1, off = 2 * 34 * dir;
+      return curve(a, { x: (a.x + b.x) / 2 + (dy / len) * off, y: (a.y + b.y) / 2 - (dx / len) * off }, b);
+    }
     if (lb - la >= 2) {
       let top = Infinity, bot = -Infinity;
       for (let l = la + 1; l < lb; l++) {
@@ -364,22 +574,126 @@ export function install(ctx) {
       const p = r.G.at(0.3 + (0.4 * ((I.rank.get(a.id) ?? 0) + 0.5)) / n);
       put(r.lab, 'transform', `translate(${r1(p.x)},${r1(p.y)})`);
     }
+    const ext = layoutTokens();
+    layoutAtt();
     const top = (I.box ? I.box.minY : I.cy) - HEAD_UP;
     const bottom = (I.box ? I.box.maxY : I.cy) + LANE_DOWN;
     net.layers.forEach((l, i) => {
       const r = layers.get(l.id), c = I.cols[i];
       if (!r) return;
       put(r.g, 'transform', `translate(${r1(c.x)},${r1(top)})`);
-      const x0 = c.minX - R - 14, x1 = c.maxX + R + 14;
+      const x0 = Math.min(c.minX - R - 14, (ext[i]?.x0 ?? Infinity) - 8), x1 = Math.max(c.maxX + R + 14, (ext[i]?.x1 ?? -Infinity) + 8);
       put(r.band, 'x', r1(x0));
       put(r.band, 'width', r1(x1 - x0));
       put(r.band, 'y', r1(top + 23));
-      put(r.band, 'height', r1(Math.max(0, bottom - top - 23)));
+      put(r.band, 'height', r1(Math.max(0, Math.max(bottom, (ext[i]?.y1 ?? -Infinity) + 6) - top - 23)));
       if (!r.measured && shown) measureHead(r);
     });
-    for (const p of gPulses.children) put(p, 'd', edges.get(p.dataset.id)?.G?.d ?? '');
+    fitHeads();
+    for (const p of gPulses.children) put(p, 'd', pathOf(p.dataset.id) ?? '');
     layoutPair();
     placeHint();
+    placeAttLabels();
+  }
+  const pathOf = id => (edges.get(id) || attLines.get(id))?.G?.d;
+  // Headers get the text boost, but never grow past their neighbours: two adjacent headers that
+  // would touch shrink by one factor (long layer names, columns packed close).
+  function fitHeads() {
+    const I = ix(), hs = store.net.layers.map((l, i) => ({ r: layers.get(l.id), x: I.cols[i].x, s: Infinity }))
+      .filter(h => h.r).sort((a, b) => a.x - b.x);
+    for (let k = 0; k + 1 < hs.length; k++) {
+      const a = hs[k], b = hs[k + 1], s = (2 * (b.x - a.x - 8)) / ((a.r.w || 64) + (b.r.w || 64));
+      a.s = Math.min(a.s, s);
+      b.s = Math.min(b.s, s);
+    }
+    for (const h of hs) { h.r.fs = h.s; scaleHead(h.r); }
+  }
+  function scaleHead(r) {
+    r.gi.__fs = r.fs;
+    const s = Math.round(Math.min(textScale, Math.max(0.6, r.fs ?? Infinity)) * 100) / 100;
+    put(r.gi, 'transform', s === 1 ? null : `scale(${s})`);
+    // The heatmap of A sits over the header box (whose top is at -21 s) with the full text boost.
+    if (r.hm) put(r.hm.g, 'transform', `translate(${r1(-textScale * r.hm.W / 2)},${r1(-21 * s - 7 - textScale * r.hm.H)}) scale(${textScale})`);
+  }
+
+  // Token boxes around each token's neurons, group bands around each group's boxes. Returns each
+  // token layer's extent (by layer index) so its lane can hold them.
+  function layoutTokens() {
+    const net = store.net, I = ix(), ext = [];
+    net.layers.forEach((l, li) => {
+      const r = toks.get(l.id), s = I.tok[li], ns = I.byLayer[li];
+      if (!r || !s?.d || ns.length !== s.G * s.T * s.d) return;
+      const boxes = r.boxes.map(b => {
+        let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+        for (let f = 0; f < s.d; f++) {
+          const n = ns[(b.g * s.T + b.t) * s.d + f];
+          x0 = Math.min(x0, n.x); x1 = Math.max(x1, n.x); y0 = Math.min(y0, n.y); y1 = Math.max(y1, n.y);
+        }
+        return { b, cy0: y0, cy1: y1, x0: x0 - R - TOK.l, x1: x1 + R + TOK.r, y0: y0 - R - TOK.t, y1: y1 + R + TOK.b };
+      });
+      // Tokens packed tighter than their boxes: neighbours split the space between their neurons.
+      const order = [...boxes].sort((a, b) => a.cy0 - b.cy0);
+      for (let k = 0; k + 1 < order.length; k++) {
+        const a = order[k], b = order[k + 1];
+        if (a.x1 <= b.x0 || b.x1 <= a.x0 || a.y1 + TOK.gap <= b.y0) continue;
+        const mid = (a.cy1 + b.cy0) / 2;
+        a.y1 = Math.max(a.cy1 + R + 2, mid - TOK.gap / 2);
+        b.y0 = Math.min(b.cy0 - R - 2, mid + TOK.gap / 2);
+      }
+      let E = null;
+      const grow = (x0, x1, y0, y1) => {
+        E = E ? { x0: Math.min(E.x0, x0), x1: Math.max(E.x1, x1), y0: Math.min(E.y0, y0), y1: Math.max(E.y1, y1) } : { x0, x1, y0, y1 };
+      };
+      for (const q of boxes) {
+        const { b } = q;
+        put(b.rect, 'x', r1(q.x0)); put(b.rect, 'y', r1(q.y0));
+        put(b.rect, 'width', r1(q.x1 - q.x0)); put(b.rect, 'height', r1(q.y1 - q.y0));
+        put(b.lab, 'x', r1(q.x0 + TOK.l / 2 + 1));
+        put(b.lab, 'y', r1((q.cy0 + q.cy1) / 2));
+        grow(q.x0, q.x1, q.y0, q.y1);
+      }
+      const bands = r.bands.map(band => {
+        const mine = boxes.filter(q => q.b.g === band.g);
+        return mine.length && {
+          band, x0: Math.min(...mine.map(q => q.x0)) - GRP.l, x1: Math.max(...mine.map(q => q.x1)) + GRP.r,
+          y0: Math.min(...mine.map(q => q.y0)) - GRP.t, y1: Math.max(...mine.map(q => q.y1)) + GRP.b,
+          in0: Math.min(...mine.map(q => q.y0)), in1: Math.max(...mine.map(q => q.y1)),
+        };
+      }).filter(Boolean).sort((a, b) => a.y0 - b.y0);
+      for (let k = 0; k + 1 < bands.length; k++) {   // groups packed tight: bands give way, never into a box
+        const a = bands[k], b = bands[k + 1];
+        if (a.x1 <= b.x0 || b.x1 <= a.x0 || a.y1 + 2 <= b.y0) continue;
+        const mid = (a.in1 + b.in0) / 2;
+        a.y1 = Math.max(a.in1, mid - 1);
+        b.y0 = Math.min(b.in0, mid + 1);
+      }
+      for (const b of bands) {
+        const { band, x0, x1, y0, y1 } = b;
+        put(band.rect, 'x', r1(x0)); put(band.rect, 'y', r1(y0));
+        put(band.rect, 'width', r1(x1 - x0)); put(band.rect, 'height', r1(y1 - y0));
+        // Left of the band, as in Q = [ ... ]; above it when another group sits right there (dragged side by side).
+        const top = bands.some(o => o !== b && o.x1 <= x0 + 1 && x0 - o.x1 < 34 && o.y0 < y1 && y0 < o.y1);
+        band.lab.classList.toggle('top', top);
+        put(band.lab, 'x', r1(top ? x0 + 10 : x0 - 5));
+        put(band.lab, 'y', r1(top ? y0 - 10 : (y0 + y1) / 2));
+        grow(top ? x0 : x0 - 26, x1, top ? y0 - 22 : y0, y1);
+      }
+      ext[li] = E;
+    });
+    return ext;
+  }
+  // Attention edges run from V_j,f (the layer before) to Z_i,f.
+  function layoutAtt() {
+    const I = ix();
+    for (const [id, q] of atts) {
+      const l = I.li.get(id), a = I.att[l];
+      for (const rec of q.lines) {
+        const v = a && tokNode(l - 1, a.vG, rec.j, rec.f), z = a && tokNode(l, 0, rec.i, rec.f);
+        rec.G = v && z ? straight(v, z) : null;
+        put(rec.line, 'd', rec.G?.d ?? '');
+        put(rec.hit, 'd', rec.G?.d ?? '');
+      }
+    }
   }
   // The empty-net hint sits under the lanes, centred on them (screen px: it doesn't scale).
   function placeHint() {
@@ -399,10 +713,25 @@ export function install(ctx) {
   }
 
   // ---------------------------------------------------------------- paint (values)
-  function paintLabel(r, e) {
-    const bwd = store.state.bwd;
-    txt(r.t1, num(e.w));
-    txt(r.t2, bwd && isNum(bwd.edge?.[e.id]) ? `∂L/∂w ${num(bwd.edge[e.id])}` : '');
+  // An edge's numbers. Hovered or selected (mode true), a tied edge also names its shared entry,
+  // e.g. W_Q(1,2) = 0.53 with ∂L/∂w of its own and Σ over the group, and a fixed edge says so. The
+  // rest of a lit tie group (mode 'tie') shows just the shared value.
+  function paintLabel(r, e, mode = r.lab.__show) {
+    if (mode === 'tie') {
+      txt(r.tn, ''); txt(r.ts, ''); put(r.ts, 'dy', null); put(r.tv, 'dy', null);
+      txt(r.tv, num(e.w)); txt(r.t2, '');
+      return;
+    }
+    const full = !!mode, bwd = store.state.bwd, tied = typeof e.tie === 'string' && e.tie;
+    const tp = full && tied ? tieParse(e.tie) || { name: e.tie, i: null } : null;
+    const [base, lo] = tp ? tiePlain(tp.name) : ['', ''];
+    txt(r.tn, base);
+    txt(r.ts, lo);
+    put(r.ts, 'dy', lo ? '0.3em' : null);
+    put(r.tv, 'dy', lo ? '-0.3em' : null);
+    txt(r.tv, tp ? `${tp.i ? `(${tp.i},${tp.j})` : ''} = ${num(e.w)}` : full && e.fixed ? `${num(e.w)} fixed` : num(e.w));
+    const g = bwd?.edge?.[e.id], sum = tp ? bwd?.tie?.[e.tie] : undefined;
+    txt(r.t2, e.fixed || !isNum(g) ? '' : `∂L/∂w ${numg(g)}${isNum(sum) ? ` · Σ ${numg(sum)}` : ''}`);
   }
   function paint() {
     const net = store.net, I = ix(), th = theme(), L = net.layers.length;
@@ -436,13 +765,13 @@ export function install(ctx) {
       if (isNum(d)) {
         put(r.gring, 'stroke', colorFor(d, maxD, th));
         put(r.gring, 'stroke-width', r1(1.5 + 4 * Math.min(1, Math.abs(d) / maxD)));
-        txt(r.grad, `δ ${num(d)}`);
+        txt(r.grad, `δ ${numg(d)}`);
       } else {
         put(r.gring, 'stroke', 'none');
         txt(r.grad, '');
       }
       txt(r.tgt, L > 1 && l === L - 1 && isNum(n.target) ? `y = ${num(n.target)}` : '');
-      txt(r.bias, l > 0 ? `b = ${num(n.bias ?? 0)}` : '');
+      paintBias(r, n, l > 0 && !I.tok[l]?.att);
     }
     for (const e of net.edges) {
       const r = edges.get(e.id);
@@ -452,12 +781,48 @@ export function install(ctx) {
       put(r.line, 'stroke-width', r1(1.2 + 5 * Math.min(1, Math.abs(w) / maxW)));
       if (showW || r.lab.__show) paintLabel(r, e);
     }
+    paintAtt();
+  }
+  // b = 0.12, or a shared bias by name: b_Q(2) = 0.12 (node.tie 'b_Q:2').
+  function paintBias(r, n, on) {
+    const m = on && typeof n.tie === 'string' && n.tie ? /^(.*?)(?::(\d+))?$/.exec(n.tie) : null;
+    const [base, lo] = m ? tiePlain(m[1]) : [on ? 'b' : '', ''];
+    txt(r.bn, base);
+    txt(r.bs, lo);
+    put(r.bs, 'dy', lo ? '0.3em' : null);
+    put(r.bv, 'dy', lo ? '-0.3em' : null);
+    txt(r.bv, on ? `${m?.[2] ? `(${m[2]})` : ''} = ${num(n.bias ?? 0)}` : '');
+  }
+  // A_ij: the attention edges' width and opacity, the heatmap cells, the shown row's labels.
+  // Causally masked pairs (j > i) have no edge; their cells are hatched.
+  function attA(l, h, i, j) {
+    const v = store.state.fwd?.attn?.[l]?.heads?.[h]?.A?.[i]?.[j];
+    return isNum(v) ? v : NaN;
+  }
+  function paintAtt() {
+    const I = ix();
+    for (const [id, q] of atts) {
+      const l = I.li.get(id), a = I.att[l];
+      if (!a) continue;
+      for (const rec of q.lines) {
+        const v = attA(l, rec.h, rec.i, rec.j), u = isNum(v) ? clamp(v, 0, 1) : 0;
+        put(rec.g, 'display', a.causal && rec.j > rec.i ? 'none' : null);
+        put(rec.line, 'stroke-width', r1(0.8 + 6.4 * u));
+        put(rec.line, 'stroke-opacity', isNum(v) ? (0.06 + 0.88 * u).toFixed(3) : '0.12');
+      }
+      for (const c of q.hm?.cells || []) {
+        const v = attA(l, c.h, c.i, c.j), masked = a.causal && c.j > c.i;
+        put(c.el, 'class', masked ? 'nnv-hm-c mask' : isNum(v) ? 'nnv-hm-c' : 'nnv-hm-c nan');
+        put(c.el, 'fill-opacity', masked || !isNum(v) ? null : (0.07 + 0.93 * clamp(v, 0, 1)).toFixed(3));
+      }
+      for (const t of q.labs) if (t.on) txt(t.el, num(attA(l, t.h, t.i, t.j)));
+    }
   }
 
   // ---------------------------------------------------------------- highlight (sel, hover, anim)
   // What a sel / hover target lights up. Matrix rows and columns name layers by index or id.
   function resolve(t) {
-    const out = { nodes: [], edges: [], layers: [], relNodes: [], relEdges: [], pair: null, bias: null, any: false };
+    const out = { nodes: [], edges: [], layers: [], relNodes: [], relEdges: [], ties: [], tokens: [], pair: null, bias: null, any: false };
     if (!t) return out;
     const net = store.net, I = ix();
     const li = v => (typeof v === 'number' ? v : I.li.get(v));
@@ -471,7 +836,11 @@ export function install(ctx) {
       case 'node': case 'bias':
         if (!I.nodeById.has(t.id)) break;
         out.nodes.push(t.id);
-        if (t.kind === 'bias') { out.bias = t.id; break; }
+        if (t.kind === 'bias') {
+          // A shared bias (node.tie): every neuron that uses it shows it.
+          out.bias = [t.id, ...(I.biasTies.get(I.nodeById.get(t.id).tie) || []).filter(id => id !== t.id)];
+          break;
+        }
         for (const e of net.edges) {
           if (e.from === t.id) { out.relEdges.push(e.id); out.relNodes.push(e.to); }
           else if (e.to === t.id) { out.relEdges.push(e.id); out.relNodes.push(e.from); }
@@ -479,7 +848,16 @@ export function install(ctx) {
         break;
       case 'edge': {
         const e = I.edgeById.get(t.id);
-        if (e) { out.edges.push(e.id); out.relNodes.push(e.from, e.to); }
+        if (!e) break;
+        out.edges.push(e.id);
+        out.relNodes.push(e.from, e.to);
+        // A tied edge is one entry of a shared matrix: light every edge that uses it.
+        for (const o of (e.tie && I.ties.get(e.tie)) || []) {
+          if (o === e.id) continue;
+          const x = I.edgeById.get(o);
+          out.ties.push(o);
+          out.relNodes.push(x.from, x.to);
+        }
         break;
       }
       case 'layer': {
@@ -507,58 +885,218 @@ export function install(ctx) {
         }
         break;
       }
+      case 'token': {
+        // the token's neurons (of group g, and of head h in attention's Z or V) and their edges
+        const l = li(t.layer), s = I.tok[l];
+        if (!s?.d || !Number.isInteger(t.t) || t.t < 0 || t.t >= s.T) break;
+        const hd = Number.isInteger(t.h) ? t.h : null, a = I.att[l], b = I.att[l + 1];
+        for (let g = 0; g < s.G; g++) {
+          if (Number.isInteger(t.g) && t.g !== g) continue;
+          out.tokens.push({ l, g, t: t.t });
+          const dh = hd === null ? 0 : a ? a.dh : b ? b.dh : 0;   // heads split Q, K and V by column too
+          for (let f = 0; f < s.d; f++) {
+            const n = dh && Math.floor(f / dh) !== hd ? null : tokNode(l, g, t.t, f);
+            if (!n) continue;
+            out.nodes.push(n.id);
+            for (const e of net.edges) {
+              if (e.from === n.id) { out.relEdges.push(e.id); out.relNodes.push(e.to); }
+              else if (e.to === n.id) { out.relEdges.push(e.id); out.relNodes.push(e.from); }
+            }
+          }
+        }
+        break;
+      }
       default: break;
     }
     out.any = !!(out.nodes.length || out.edges.length || out.layers.length || out.pair);
     return out;
   }
   // state.anim { dir, l, i, phase }: neuron i of layer l; fwd lights its incoming edges, bwd its outgoing ones.
+  // An attention layer steps a token at a time (matrix.js: anim.i is the token's first neuron), in
+  // phases: 'scores' (q_i · k_j: the query and the keys light up), 'softmax' (row i of A: its edges
+  // and numbers), 'sum' (Σ_j A_ij v_j: pulses from the values); backward, the gradient runs back
+  // along those edges and out of the token's outgoing weights.
   function resolveAnim(a) {
-    const out = { node: null, dir: 'fwd', edges: [], rel: [], phase: '' };
+    const out = { node: null, nodes: [], dir: 'fwd', edges: [], rel: [], phase: '', focus: null };
     if (!a) return out;
     const I = ix(), l = typeof a.l === 'number' ? a.l : I.li.get(a.l), n = I.byLayer[l]?.[a.i];
     if (!n) return out;
     out.node = n.id;
+    out.nodes.push(n.id);
     out.dir = a.dir === 'bwd' ? 'bwd' : 'fwd';
     out.phase = String(a.phase ?? '');
-    for (const e of store.net.edges) {
-      if (out.dir === 'fwd' ? e.to !== n.id : e.from !== n.id) continue;
-      out.edges.push(e.id);
-      out.rel.push(out.dir === 'fwd' ? e.from : e.to);
+    const p = tokPos(n.id), at = p && I.att[p.l], bwd = out.dir === 'bwd';
+    const lines = L => atts.get(store.net.layers[L]?.id)?.lines || [];
+    const outOf = id => {
+      for (const e of store.net.edges) if (e.from === id) { out.edges.push(e.id); out.rel.push(e.to); }
+    };
+    if (at) {
+      const t = p.t, ph = bwd ? 'bwd' : out.phase, zs = [];
+      for (let f = 0; f < at.d; f++) { const z = tokNode(p.l, 0, t, f); if (z) zs.push(z.id); }
+      out.nodes = zs;
+      out.focus = { l: p.l, dir: 'row', t, h: null, f: null, labels: ph !== 'scores' };
+      if ((ph === 'scores' || ph === 'bwd') && at.qG >= 0 && at.kG >= 0) {
+        for (let f = 0; f < at.d; f++) {
+          out.rel.push(tokNode(p.l - 1, at.qG, t, f)?.id);
+          for (let j = 0; j < at.T; j++) if (!(at.causal && j > t)) out.rel.push(tokNode(p.l - 1, at.kG, j, f)?.id);
+        }
+      }
+      if (ph === 'sum' || ph === 'bwd') {
+        for (const rec of lines(p.l)) {
+          if (rec.i !== t || (at.causal && rec.j > rec.i)) continue;
+          out.edges.push(rec.id);
+          out.rel.push(tokNode(p.l - 1, at.vG, rec.j, rec.f)?.id);
+        }
+      }
+      if (bwd) zs.forEach(outOf);
+      out.rel = out.rel.filter(Boolean);
+      return out;
+    }
+    if (bwd) outOf(n.id);
+    else for (const e of store.net.edges) if (e.to === n.id) { out.edges.push(e.id); out.rel.push(e.from); }
+    // A V neuron's gradient comes back from every Z_i,f it fed (dV = Aᵀ dZ).
+    const nx = p && I.att[p.l + 1];
+    if (bwd && nx && p.g === nx.vG) {
+      for (const rec of lines(p.l + 1)) {
+        if (rec.f !== p.f || rec.j !== p.t || (nx.causal && rec.j > rec.i)) continue;
+        out.edges.push(rec.id);
+        const z = tokNode(p.l + 1, 0, rec.i, rec.f);
+        if (z) out.rel.push(z.id);
+      }
     }
     return out;
+  }
+
+  // The attention row (or column) to show: a hovered token (a Z token, heatmap cell or attention
+  // edge: its row; a V token: its column), else a hovered Z neuron (its token's row, in its head)
+  // or V neuron (its column, that feature), else the step-through's token, else the selected
+  // neuron. { l, dir: 'row' | 'col', t, h: head | null, f: feature | null, hover }.
+  function focusOfNode(id) {
+    const I = ix(), p = tokPos(id);
+    if (!p) return null;
+    const a = I.att[p.l], b = I.att[p.l + 1];
+    if (a) return { l: p.l, dir: 'row', t: p.t, h: Math.floor(p.f / a.dh), f: null };
+    if (b && p.g === b.vG) return { l: p.l + 1, dir: 'col', t: p.t, h: Math.floor(p.f / b.dh), f: p.f };
+    return null;
+  }
+  function focusOfToken(hv) {
+    const I = ix(), l = typeof hv.layer === 'number' ? hv.layer : I.li.get(hv.layer);
+    if (l === undefined || !Number.isInteger(hv.t)) return null;
+    const h = Number.isInteger(hv.h) ? hv.h : null, b = I.att[l + 1];
+    if (I.att[l]) return { l, dir: 'row', t: hv.t, h, f: null };
+    if (!b) return null;   // on the Q, K, V layer: a query token's row, a key or value token's column
+    return { l: l + 1, dir: Number.isInteger(hv.g) && hv.g === b.qG ? 'row' : 'col', t: hv.t, h, f: null };
+  }
+  function attFocus(A) {
+    if (!atts.size) return null;
+    const I = ix(), st = store.state, li = v => (typeof v === 'number' ? v : I.li.get(v));
+    const hv = st.hover, hn = hv?.kind === 'node' ? hv.id : hv?.kind === 'row' ? I.byLayer[li(hv.layer)]?.[hv.i]?.id : null;
+    const fh = hv?.kind === 'token' ? focusOfToken(hv) : hn && focusOfNode(hn);
+    if (fh) return { ...fh, hover: true };
+    return A?.focus || (A?.node && focusOfNode(A.node)) || (st.sel?.kind === 'node' && focusOfNode(st.sel.id)) || null;
+  }
+  function highlightAtt(F, mark, onNode) {
+    for (const q of atts.values()) {
+      for (const t of q.labs) t.on = false;
+      for (const hl of q.hm?.hl || []) put(hl.el, 'display', 'none');
+    }
+    const I = ix(), a = F && I.att[F.l], q = a && atts.get(store.net.layers[F.l].id);
+    if (!q) return;
+    const row = F.dir === 'row', inHead = h => F.h == null || h === F.h;
+    const hit = rec => (row ? rec.i : rec.j) === F.t && inHead(rec.h) && (F.f == null || rec.f === F.f) && !(a.causal && rec.j > rec.i);
+    for (const rec of q.lines) {
+      if (F.labels === false || !hit(rec)) continue;   // labels false: the scores step, before A exists
+      mark(rec.g, 'rel');
+      if (F.hover) {
+        onNode(tokNode(F.l - 1, a.vG, rec.j, rec.f)?.id, 'rel');
+        onNode(tokNode(F.l, 0, rec.i, rec.f)?.id, 'rel');
+      }
+    }
+    // A_ij = softmax_j(q_i · k_j): the query of the row and every key of its head.
+    if (F.hover && row && a.qG >= 0 && a.kG >= 0) {
+      for (let f = 0; f < a.d; f++) {
+        if (!inHead(Math.floor(f / a.dh))) continue;
+        onNode(tokNode(F.l - 1, a.qG, F.t, f)?.id, 'rel');
+        for (let j = 0; j < a.T; j++) if (!(a.causal && j > F.t)) onNode(tokNode(F.l - 1, a.kG, j, f)?.id, 'rel');
+      }
+    }
+    const box = toks.get(store.net.layers[row ? F.l : F.l - 1].id)?.boxes.find(b => b.t === F.t && b.g === (row ? 0 : a.vG));
+    if (box) mark(box.el, 'foc');
+    for (const t of q.labs) {
+      if (F.labels === false || (row ? t.i : t.j) !== F.t || !inHead(t.h) || (a.causal && t.j > t.i)) continue;
+      t.on = true;
+      mark(t.el, 'show');
+      put(t.el, 'data-dir', F.dir);
+      txt(t.el, num(attA(F.l, t.h, t.i, t.j)));
+    }
+    placeAttLabels();
+    const hm = q.hm;
+    for (const [h, hl] of (hm?.hl || []).entries()) {
+      if (!inHead(h)) continue;
+      put(hl.el, 'display', null);
+      put(hl.el, 'x', r1(hl.x0 + (row ? 0 : F.t * hm.cell) - 1.5));
+      put(hl.el, 'y', r1((row ? F.t * hm.cell : 0) - 1.5));
+      put(hl.el, 'width', r1((row ? hm.n : hm.cell) + 2));
+      put(hl.el, 'height', r1((row ? hm.cell : hm.n) + 2));
+    }
+  }
+  // A shown A_ij sits on its edge: near V_j for a row (the edges fan into Z_i), near Z_i for a column.
+  // It rides the edge of the head's last feature: in a token grid that is V's right-hand column,
+  // so the number lands clear of the Q, K, V neurons.
+  function placeAttLabels() {
+    const I = ix();
+    for (const [id, q] of atts) {
+      const l = I.li.get(id), a = I.att[l];
+      if (!a) continue;
+      for (const t of q.labs) {
+        if (!t.on) continue;
+        const f = (t.h + 1) * a.dh - 1, rec = attLines.get(`att:${id}:${t.i}:${t.j}:${f}`), G = rec?.G;
+        if (!G) continue;
+        const p = G.at(t.el.getAttribute('data-dir') === 'col' ? 0.72 : 0.3);
+        put(t.el, 'x', r1(p.x));
+        put(t.el, 'y', r1(p.y));
+      }
+    }
   }
   function highlight() {
     for (const [e, c] of marked) { e.classList.remove(c); if (c === 'show') e.__show = false; }
     marked = [];
     const mark = (e, c) => { if (e) { e.classList.add(c); marked.push([e, c]); } };
     const onNode = (id, c) => mark(nodes.get(id)?.g, c);
-    const onEdge = (id, c) => { const r = edges.get(id); if (r) { mark(r.g, c); mark(r.lab, c); } };
+    const onEdge = (id, c) => { const r = edges.get(id) || attLines.get(id); if (r) { mark(r.g, c); mark(r.lab, c); } };
     const onLayer = (id, c) => { const r = layers.get(id); if (r) { mark(r.g, c); mark(r.band, c); } };
     const I = ix(), S = resolve(store.state.sel), H = resolve(store.state.hover), A = resolveAnim(store.state.anim);
     S.nodes.forEach(id => onNode(id, 'sel'));
     S.edges.forEach(id => onEdge(id, 'sel'));
+    S.ties.forEach(id => onEdge(id, 'tie'));
     S.layers.forEach(id => onLayer(id, 'sel'));
     H.nodes.forEach(id => onNode(id, 'hov'));
     H.edges.forEach(id => onEdge(id, 'hov'));
+    H.ties.forEach(id => onEdge(id, 'tie'));
     H.layers.forEach(id => onLayer(id, 'hov'));
     H.relNodes.forEach(id => onNode(id, 'rel'));
     H.relEdges.forEach(id => onEdge(id, 'rel'));
-    if (H.bias) onNode(H.bias, 'bias');
+    for (const { l, g, t } of H.tokens) mark(toks.get(store.net.layers[l]?.id)?.boxes.find(b => b.g === g && b.t === t)?.el, 'hov');
+    if (H.bias) H.bias.forEach((id, k) => { onNode(id, 'bias'); if (k) onNode(id, 'rel'); });
     if (A.node) {
-      onNode(A.node, 'lit');
+      A.nodes.forEach(id => onNode(id, 'lit'));
       A.edges.forEach(id => onEdge(id, 'lit'));
       A.rel.forEach(id => onNode(id, 'rel'));
     }
-    // The hovered / selected edge shows its numbers even with W off.
-    for (const id of [...S.edges, ...H.edges]) {
+    focus = attFocus(A);
+    highlightAtt(focus, mark, onNode);
+    // The hovered / selected edge shows its numbers even with W off; the rest of its tie group its value.
+    const shows = [...S.edges, ...H.edges].map(id => [id, true]).concat([...S.ties, ...H.ties].map(id => [id, 'tie']));
+    for (const [id, mode] of shows) {
       const r = edges.get(id), e = I.edgeById.get(id);
-      if (!r || !e) continue;
+      if (!r || !e || r.lab.__show) continue;
       mark(r.lab, 'show');
-      r.lab.__show = true;
-      paintLabel(r, e);
+      r.lab.__show = mode;
+      paintLabel(r, e, mode);
     }
-    svg.classList.toggle('focus', H.any || !!A.node);
+    // Labels that just lost 'show' drop the tie name (with W on they stay, as plain numbers).
+    if (showW) for (const e of store.net.edges) { const r = edges.get(e.id); if (r && !r.lab.__show) paintLabel(r, e, false); }
+    svg.classList.toggle('focus', H.any || !!A.node || !!focus?.hover);
     pairIds = H.pair;
     layoutPair();
     const key = A.node ? `${A.dir}|${A.node}|${A.edges.join()}|${A.phase}` : '';
@@ -566,8 +1104,8 @@ export function install(ctx) {
       pulseKey = key;
       gPulses.textContent = '';
       for (const id of A.edges) {
-        const r = edges.get(id);
-        if (r?.G) mk('path', { class: `nnv-pulse ${A.dir}`, d: r.G.d, pathLength: 100, 'data-id': id }, gPulses);
+        const d = pathOf(id);
+        if (d) mk('path', { class: `nnv-pulse ${A.dir}`, d, pathLength: 100, 'data-id': id }, gPulses);
       }
     }
   }
@@ -581,11 +1119,12 @@ export function install(ctx) {
     const d = dirty;
     dirty = {};
     if (d.build) rebuild();
-    if (d.build || d.meta) syncMeta();
-    const moved = d.build || d.layout || (d.meta && posChanged());
+    const reshaped = (d.build || d.meta) && syncTokens();
+    const retitled = (d.build || d.meta) && syncMeta();
+    const moved = d.build || d.layout || reshaped || retitled || (d.meta && posChanged());
     if (moved) layoutAll();
-    if (d.build || d.paint) paint();
-    if (d.build || d.hl) highlight();
+    if (d.build || d.paint || reshaped) paint();
+    if (d.build || d.hl || reshaped) highlight();
     if (audience && moved && shown && needFit === false && outOfView()) needFit = 300;
     if (needFit !== false && shown && stage.clientWidth && stage.clientHeight) fit(everFit ? needFit : 0);
   }
@@ -635,10 +1174,7 @@ export function install(ctx) {
     if (ts === textScale) return;
     textScale = ts;
     svg.style.setProperty('--nnv-ts', ts);
-    for (const r of layers.values()) {
-      if (ts === 1) r.gi.removeAttribute('transform');
-      else r.gi.setAttribute('transform', `scale(${ts})`);
-    }
+    for (const r of layers.values()) scaleHead(r);
   }
   function moveTo(k, x, y, ms = 0) {
     cancelAnimationFrame(fitAnim);
@@ -742,10 +1278,16 @@ export function install(ctx) {
     const W = Math.ceil(b.w + 2 * pad), H = Math.ceil(b.h + 2 * pad);
     const cs = getComputedStyle(svg);
     const clone = svg.cloneNode(true);
-    for (const e of clone.querySelectorAll('.nnv-grid, pattern, .nnv-pulses, .nnv-ghost, .nnv-pair, .nnv-handle, .nnv-hint')) e.remove();
+    for (const e of clone.querySelectorAll('.nnv-grid, pattern, .nnv-pulses, .nnv-ghost, .nnv-pair, .nnv-handle, .nnv-hint, .nnv-hm-hl')) e.remove();
     for (const c of MARKS) for (const e of clone.querySelectorAll(`.${c}`)) e.classList.remove(c);
     clone.classList.remove('focus', 'panning', 'wiring', 'dragging');
-    for (const e of clone.querySelectorAll('.nnv-head-in')) e.removeAttribute('transform');   // drawn at zoom 1
+    const heads = [...svg.querySelectorAll('.nnv-head')];   // drawn at zoom 1, still fitted between neighbours
+    [...clone.querySelectorAll('.nnv-head')].forEach((h, i) => {
+      const gi = h.querySelector('.nnv-head-in'), hm = h.querySelector('.nnv-hm');
+      const s = Math.round(Math.min(1, Math.max(0.6, heads[i]?.querySelector('.nnv-head-in')?.__fs ?? Infinity)) * 100) / 100;
+      if (s === 1) gi?.removeAttribute('transform'); else gi?.setAttribute('transform', `scale(${s})`);
+      if (hm) hm.setAttribute('transform', `translate(${r1(-hm.dataset.w / 2)},${r1(-21 * s - 7 - hm.dataset.h)})`);
+    });
     clone.querySelector('.nnv-world').setAttribute('transform', `translate(${r1(pad - b.x)},${r1(pad - b.y)})`);
     clone.setAttribute('xmlns', NS);
     clone.setAttribute('width', W);
@@ -814,13 +1356,23 @@ export function install(ctx) {
   }
 
   // Hover: set on entering a node / edge / header; on leaving, clear it only if it is still ours.
+  // A token box, heatmap cell or attention edge hovers a token, { kind: 'token', layer, t, g?, h? }:
+  // a box its token (g: its group), a cell or attention edge A_ij's row, token i of head h.
   let hoverKey = '', myHover = null;
+  const TOKEN = new Set(['token', 'attcell', 'attedge']);
+  function tokenHover(h) {
+    const I = ix(), l = I.li.get(h.dataset.id), ds = h.dataset;
+    if (l === undefined) return null;
+    if (ds.kind === 'token') return { kind: 'token', layer: l, t: +ds.t, ...(I.tok[l]?.groups ? { g: +ds.g } : {}) };
+    return { kind: 'token', layer: l, t: +ds.i, ...(I.att[l]?.heads > 1 ? { h: +ds.h } : {}) };
+  }
   function hoverFrom(target) {
-    const h = hitOf(target), kind = h?.dataset.kind === 'handle' ? 'node' : h?.dataset.kind;
-    const key = h ? `${kind}:${h.dataset.id}` : '';
+    const h = hitOf(target), kind = h?.dataset.kind === 'handle' ? 'node' : h?.dataset.kind, ds = h?.dataset;
+    const key = h ? `${kind}:${ds.id}:${ds.t ?? ds.i ?? ''}:${ds.g ?? ds.h ?? ''}` : '';
     if (key === hoverKey) return;
     hoverKey = key;
-    if (h) { myHover = { kind, id: h.dataset.id }; store.set('hover', myHover); }
+    const spec = !h ? null : TOKEN.has(kind) ? tokenHover(h) : { kind, id: ds.id };
+    if (spec) { myHover = spec; store.set('hover', spec); }
     else if (myHover && store.state.hover === myHover) { myHover = null; store.set('hover', null); }
   }
 
@@ -839,10 +1391,47 @@ export function install(ctx) {
     dropId = id;
     if (id) nodes.get(id)?.g.classList.add('drop');
   }
+  // What a wire from a to b would do: { why } refuses; { tie, pairs } adds one shared entry of a
+  // tokenwise tied matrix, for every token; else a plain edge. Between the same two groups of two
+  // token layers, the existing (non-fixed) edges decide: all tied to one matrix N, token t to token t.
+  const texName = name => { const [b, s] = tiePlain(name); return s ? `${b}_${s}` : b; };
+  function wirePlan(a, b) {
+    const I = ix();
+    let la = I.li.get(a.layer), lb = I.li.get(b.layer);
+    if (la === lb) return { why: 'Edges run between layers, not within one' };
+    if (la > lb) { [a, b] = [b, a]; [la, lb] = [lb, la]; }
+    if (I.tok[lb]?.att) return { why: 'Attention has no weights coming in: Z = softmax(QKᵀ)V is computed from the Q, K and V before it' };
+    const pa = tokPos(a.id), pb = tokPos(b.id);
+    if (!pa || !pb || I.tok[la].T !== I.tok[lb].T || I.tok[la].T < 2) return {};
+    let name = null, conv = 'both';
+    for (const e of store.net.edges) {
+      const p = tokPos(e.from), q = tokPos(e.to);
+      if (!p || !q || e.fixed || p.l !== la || q.l !== lb || p.g !== pa.g || q.g !== pb.g) continue;
+      const tp = tieParse(e.tie);
+      if (!tp || p.t !== q.t || (name !== null && tp.name !== name)) return {};
+      name = tp.name;
+      // X W convention (Q = X W_Q): (i, j) = (sending, receiving) feature. Accept the transpose too.
+      const xw = tp.i === p.f + 1 && tp.j === q.f + 1, rw = tp.i === q.f + 1 && tp.j === p.f + 1;
+      conv = conv === 'both' ? (xw && rw ? 'both' : xw ? 'xw' : rw ? 'rw' : '') : conv === 'xw' ? (xw ? 'xw' : '') : rw ? 'rw' : '';
+      if (!conv) return {};
+    }
+    if (name === null) return {};
+    if (pa.t !== pb.t) return { why: `Only attention mixes tokens: ${texName(name)} acts on each token by itself` };
+    const [i, j] = conv === 'rw' ? [pb.f + 1, pa.f + 1] : [pa.f + 1, pb.f + 1];
+    const pairs = [];
+    for (let t = 0; t < I.tok[la].T; t++) {
+      const s = tokNode(la, pa.g, t, pa.f), d = tokNode(lb, pb.g, t, pb.f);
+      if (s && d) pairs.push([s.id, d.id]);
+    }
+    return { tie: `${name}:${i},${j}`, label: `${texName(name)}(${i},${j})`, pairs, T: I.tok[la].T };
+  }
+  let planFor = null;   // the last wirePlan, while dragging a wire: { key, P }
   function wireMove(d, w) {
     const I = ix(), src = I.nodeById.get(d.from);
     if (!src) return;
-    const tgt = nearest(w, d.from), ok = !!tgt && I.li.get(tgt.layer) !== I.li.get(src.layer);
+    const tgt = nearest(w, d.from), key = tgt ? `${d.from}>${tgt.id}` : '';
+    if (tgt && planFor?.key !== key) planFor = { key, P: wirePlan(src, tgt) };
+    const ok = !!tgt && !planFor.P.why;
     put(ghost, 'd', (tgt ? straight(src, tgt) : straight(src, w, 0)).d);
     put(ghost, 'display', null);
     ghost.classList.toggle('bad', !!tgt && !ok);
@@ -852,14 +1441,33 @@ export function install(ctx) {
     put(ghost, 'display', 'none');
     ghost.classList.remove('bad');
     setDrop(null);
+    planFor = null;
     const net = store.net, I = ix(), src = I.nodeById.get(d.from), tgt = w && nearest(w, d.from);
     if (!src || !tgt) return;
-    const la = I.li.get(src.layer), lb = I.li.get(tgt.layer);
-    if (la === lb) { ctx.toast?.('Edges run between layers, not within one'); return; }
+    const P = wirePlan(src, tgt);
+    if (P.why) { ctx.toast?.(P.why); return; }
     const old = model.edgeBetween(net, src.id, tgt.id);
     if (old) { select({ kind: 'edge', id: old.id }); ctx.toast?.('Those two are already connected'); return; }
+    const la = I.li.get(src.layer), lb = I.li.get(tgt.layer);
     const lim = Math.sqrt(6 / (I.byLayer[la].length + I.byLayer[lb].length));
     const w0 = (Math.random() < 0.5 ? -1 : 1) * lim * (0.25 + 0.75 * Math.random());
+    if (P.tie) {
+      // One new shared parameter: the same entry of the matrix, for every token.
+      const have = I.ties.get(P.tie);
+      const w1 = have?.length ? I.edgeById.get(have[0]).w : Math.round(w0 * 100) / 100;
+      for (const [f, t] of P.pairs) {
+        if (model.edgeBetween(net, f, t)) continue;
+        const id = model.connect(net, f, t, w1);
+        const e = id && model.edge(net, id);
+        if (e) e.tie = P.tie;
+      }
+      const mine = model.edgeBetween(net, src.id, tgt.id);
+      if (!mine) return;
+      store.commit('Connect');
+      select({ kind: 'edge', id: mine.id });
+      ctx.toast?.(`New shared weight ${P.label}: one edge per token (${P.pairs.length})`);
+      return;
+    }
     const id = model.connect(net, src.id, tgt.id, Math.round(w0 * 100) / 100);
     if (!id) return;
     store.commit('Connect');
@@ -893,6 +1501,7 @@ export function install(ctx) {
   }
   function addNeuron(l, p) {
     const net = store.net, I = ix(), c = I.cols[l], layer = net.layers[l];
+    if (I.tok[l]) { addFeature(l, p); return; }
     const x = c.n && Math.abs(p.x - c.x) < R + 16 ? c.x : p.x;
     const index = I.byLayer[l].filter(n => n.y < p.y).length;   // rows follow the picture, top to bottom
     const id = model.addNode(net, layer.id, { x, y: p.y, index, connect: true, seed: (Math.random() * 2 ** 31) | 0 });
@@ -900,11 +1509,97 @@ export function install(ctx) {
     store.commit('Add neuron');
     select({ kind: 'node', id });
   }
+  // A token layer grows by a whole feature: one neuron per token, each wired like the token's last
+  // feature (same neighbours, fresh weights; a tied entry N(i, d) gets a new shared N(i, d + 1)).
+  // Attention, Q/K/V and residual-stream layers keep their width, and say why.
+  function addFeature(l, p) {
+    const net = store.net, I = ix(), s = I.tok[l], lay = net.layers[l], nm = lay.name || 'This layer';
+    const no = msg => { ctx.toast?.(msg, 4500); };
+    if (!s.d) return no(`${nm} doesn't split into ${s.T} tokens evenly: fix its size first`);
+    if (s.att) return no('Attention has no weights of its own: Z is tokens × d_v, one row per token of V');
+    if (s.groups) return no(`${s.groups.map(texName).join(', ')} share one shape (tokens × d each), so they can't grow one neuron at a time`);
+    if (I.att[l + 1]) return no('Attention reads this layer as Q, K and V: its shape is fixed');
+    const T = s.T, d = s.d, ns = I.byLayer[l];
+    const plan = [], conv = new Map();   // per token: the template's edges; per tie name: its (i, j) convention
+    for (let t = 0; t < T; t++) {
+      const tn = ns[t * d + d - 1], list = [];
+      for (const e of net.edges) {
+        if (e.to !== tn.id && e.from !== tn.id) continue;
+        if (e.fixed) return no(`${nm} is on a fixed (residual) path, so its width stays d = ${d}`);
+        const inc = e.to === tn.id, tp = typeof e.tie === 'string' && e.tie ? tieParse(e.tie) : null;
+        if (e.tie && !tp) return no(`The shared weight ${e.tie} can't grow a new feature`);
+        if (tp) {
+          const xw = inc ? tp.j === d : tp.i === d, rw = inc ? tp.i === d : tp.j === d, was = conv.get(tp.name) ?? 'both';
+          const now = was === 'both' ? (xw && rw ? 'both' : xw ? 'xw' : rw ? 'rw' : '') : was === 'xw' ? (xw ? 'xw' : '') : rw ? 'rw' : '';
+          if (!now) return no(`The shared weight ${texName(tp.name)} can't grow a new feature`);
+          conv.set(tp.name, now);
+        }
+        list.push({ other: inc ? e.from : e.to, inc, tp });
+      }
+      plan.push(list);
+    }
+    const newTie = ({ inc, tp }) => {
+      const rw = conv.get(tp.name) === 'rw';
+      return inc === !rw ? `${tp.name}:${tp.i},${d + 1}` : `${tp.name}:${d + 1},${tp.j}`;
+    };
+    // Where: one step past the token's last feature (the step between its last two, or a row down).
+    // Tokens stacked along that step move apart to make room, then the layer is recentred.
+    const step = d >= 2 ? { x: ns[d - 1].x - ns[d - 2].x, y: ns[d - 1].y - ns[d - 2].y } : { x: 0, y: ROW };
+    const along = T > 1 && (ns[d].x - ns[0].x) * step.x + (ns[d].y - ns[0].y) * step.y > 0;
+    const back = along ? T / 2 : 0.5;
+    const at = (n, k) => ({ x: r1(n.x + (k - back) * step.x), y: r1(n.y + (k - back) * step.y) });
+    const moves = ns.map((n, k) => [n.id, at(n, along ? Math.floor(k / d) : 0)]);
+    const nIn = plan[0].filter(x => x.inc).length, nOut = plan[0].length - nIn;
+    const rand = () => {
+      const lim = Math.sqrt(6 / Math.max(2, nIn + nOut + 1));
+      return Math.round((Math.random() < 0.5 ? -1 : 1) * lim * (0.25 + 0.75 * Math.random()) * 100) / 100;
+    };
+    // A shared bias (node.tie 'b:d', one per feature) gets a new entry too.
+    const bt = /^(.*):(\d+)$/.exec(typeof ns[d - 1].tie === 'string' ? ns[d - 1].tie : '');
+    const biasTie = bt && +bt[2] === d ? `${bt[1]}:${d + 1}` : null;
+    const tieW = new Map(), added = [];
+    for (let t = 0; t < T; t++) {
+      const tn = ns[t * d + d - 1], pos = at(tn, (along ? t : 0) + 1);
+      // Midway the layer doesn't split into its tokens, so model.addNode makes it a plain vector:
+      // the tokens come back below, once every token has its new neuron.
+      const id = model.addNode(net, lay.id, { index: t * (d + 1) + d, x: pos.x, y: pos.y, label: nextLabel(tn, d) });
+      if (!id) continue;
+      added.push(id);
+      const nn = model.node(net, id);
+      if (biasTie && nn) nn.tie = biasTie;
+      for (const x of plan[t]) {
+        const tie = x.tp ? newTie(x) : null;
+        if (tie && !tieW.has(tie)) tieW.set(tie, rand());
+        const eid = model.connect(net, x.inc ? x.other : id, x.inc ? id : x.other, tie ? tieW.get(tie) : rand());
+        const e = eid && model.edge(net, eid);
+        if (e && tie) e.tie = tie;
+      }
+    }
+    for (const [id, q] of moves) model.setNode(net, id, q);
+    if (added.length === T) lay.tokens = T;
+    store.commit('Add feature');
+    const near = added.map(id => model.node(net, id)).filter(Boolean)
+      .reduce((m, n) => (!m || Math.hypot(n.x - p.x, n.y - p.y) < Math.hypot(m.x - p.x, m.y - p.y) ? n : m), null);
+    if (near) select({ kind: 'node', id: near.id });
+    ctx.toast?.(`${nm}: a new feature in every token (d = ${d} → ${d + 1})${tieW.size ? `, with ${tieW.size} new shared weights` : ''}`);
+    requestAnimationFrame(() => { if (outOfView()) fit(300); });
+  }
+  // A custom label that ends in the feature number (x_{2,3}) counts on; default labels renumber themselves.
+  function nextLabel(n, d) {
+    if (!n.label || model.defaultLabel?.(store.net, n.id) === n.label) return undefined;
+    const m = /^(.*?)(\d+)(\D*)$/.exec(n.label);
+    return m && +m[2] === d ? `${m[1]}${d + 1}${m[3]}` : undefined;
+  }
   // As the toolbar's "+ Layer": the direct edges between the two neighbours would become skip
   // edges, so they go; a new hidden layer copies the activation of the hidden layer before it.
   // The new column keeps GAP from its neighbours: later columns move right to make room.
   function insertLayer(at, p) {
     const net = store.net, L = net.layers.length, hidden = at > 0 && at < L, before = net.layers[at - 1];
+    // Next to token layers a new (plain, dense) layer would cut their shared weights and residuals,
+    // and before an attention layer it would leave attention without its Q, K, V.
+    const I = ix();
+    if (I.tok[at]?.att) { ctx.toast?.('Attention reads Q, K and V straight from the layer before it: nothing goes between them', 4500); return; }
+    if (I.tok[at - 1] || I.tok[at]) { ctx.toast?.('Between token layers a plain dense layer would cut their shared (tied) weights, so none is added here', 4500); return; }
     const meanX = l => { const ns = l ? layerNodes(l.id) : []; return ns.length ? ns.reduce((s, n) => s + n.x, 0) / ns.length : null; };
     const px = meanX(net.layers[at - 1]), nx = meanX(net.layers[at]);
     let x = p.x;
@@ -940,8 +1635,13 @@ export function install(ctx) {
     else if (n) {
       const peers = layerNodes(n.layer).filter(m => m.id !== id);
       drag = { ...base, type: 'node', id, ox: n.x, oy: n.y, colX: peers.length ? peers.reduce((s, m) => s + m.x, 0) / peers.length : null };
-    } else if (kind === 'layer') drag = { ...base, type: 'layer', id, start: layerNodes(id).map(m => [m.id, m.x, m.y]) };
-    else drag = { ...base, type: 'pan', x0: V.x, y0: V.y, edge: kind === 'edge' ? id : null, click: e.button === 0 };
+    } else if (kind === 'layer' || kind === 'attcell') drag = { ...base, type: 'layer', id, start: layerNodes(id).map(m => [m.id, m.x, m.y]) };
+    else if (kind === 'token') {
+      // A token box drags its token's neurons (of its group); a click selects the layer.
+      const s = ix().tok[ix().li.get(id)], g = +h.dataset.g, t = +h.dataset.t;
+      const mine = s?.d ? layerNodes(id).slice((g * s.T + t) * s.d, (g * s.T + t + 1) * s.d) : [];
+      drag = { ...base, type: 'layer', id, token: true, start: mine.map(m => [m.id, m.x, m.y]) };
+    } else drag = { ...base, type: 'pan', x0: V.x, y0: V.y, edge: kind === 'edge' ? id : null, click: e.button === 0 };
   });
   svg.addEventListener('pointermove', e => {
     if (!drag) { hoverFrom(e.target); return; }
@@ -982,7 +1682,7 @@ export function install(ctx) {
     const cancel = e.type === 'pointercancel';
     if (d.moved) {
       if (d.type === 'node') store.commit('Move neuron');
-      else if (d.type === 'layer') store.commit('Move layer');
+      else if (d.type === 'layer') store.commit(d.token ? 'Move token' : 'Move layer');
       else if (d.type === 'wire') wireEnd(d, cancel ? null : toWorld(pt(e)));
       return;
     }
@@ -997,9 +1697,10 @@ export function install(ctx) {
   svg.addEventListener('pointercancel', end);
   svg.addEventListener('pointerleave', () => { if (!drag) hoverFrom(null); });
   // Edges don't block it: between two dense columns there is hardly a spot that misses every edge.
+  // Nor do token boxes: they fill their column.
   svg.addEventListener('dblclick', e => {
     const t = document.elementFromPoint(e.clientX, e.clientY), h = hitOf(t);
-    if (!t || !svg.contains(t) || (h && h.dataset.kind !== 'edge')) return;
+    if (!t || !svg.contains(t) || (h && !['edge', 'attedge', 'token'].includes(h.dataset.kind))) return;
     e.preventDefault();
     addAt(toWorld(pt(e)));
   });

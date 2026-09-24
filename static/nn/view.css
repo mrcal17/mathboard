@@ -15,6 +15,11 @@
   --nnv-head-line: rgba(255, 255, 255, 0.14);
   --nnv-dot: rgba(255, 255, 255, 0.075);
   --nnv-bad: #ff6b6b;
+  --nnv-att: #b794ff;                        /* attention: computed A_ij, not a parameter */
+  --nnv-tok: rgba(255, 255, 255, 0.035);
+  --nnv-tok-line: rgba(255, 255, 255, 0.17);
+  --nnv-grp: rgba(255, 255, 255, 0.018);
+  --nnv-grp-line: rgba(255, 255, 255, 0.13);
   display: block; width: 100%; height: 100%;
   touch-action: none; user-select: none; -webkit-user-select: none;
   font-family: system-ui, "Segoe UI", sans-serif;
@@ -31,6 +36,11 @@
   --nnv-head-line: rgba(0, 0, 0, 0.14);
   --nnv-dot: rgba(0, 0, 0, 0.1);
   --nnv-bad: #d93025;
+  --nnv-att: #7442d6;
+  --nnv-tok: rgba(0, 0, 0, 0.028);
+  --nnv-tok-line: rgba(0, 0, 0, 0.17);
+  --nnv-grp: rgba(0, 0, 0, 0.014);
+  --nnv-grp-line: rgba(0, 0, 0, 0.13);
 }
 .nnv.panning { cursor: grabbing; }
 .nnv.wiring, .nnv.wiring * { cursor: crosshair !important; }
@@ -53,6 +63,38 @@
 .nnv-head-name { fill: var(--nnv-text); font-size: 15px; font-weight: 650; text-anchor: middle; }
 .nnv-head-sub { fill: var(--nnv-muted); font-size: 12.5px; text-anchor: middle; }
 
+/* attention: the n×n heatmap of A in the header (one block per head); the shown row / column is ringed */
+.nnv-hm-frame { fill: var(--nnv-head); stroke: var(--nnv-head-line); stroke-width: 1; }
+.nnv-hm-cap { fill: var(--nnv-att); font: italic 600 15px "KaTeX_Math", "Times New Roman", serif; text-anchor: end; dominant-baseline: middle; }
+.nnv-hm-c { fill: var(--nnv-att); }
+.nnv-hm-c.mask { fill: none; stroke: var(--nnv-band-line); stroke-width: 0.8; }
+.nnv-hm-c.nan { fill: var(--nnv-muted); fill-opacity: 0.15; }
+.nnv-hm-hl { fill: none; stroke: var(--nnv-hi); stroke-width: 1.6; pointer-events: none; }
+
+/* ---------------------------------------------------------------- token layers: groups (Q / K / V) and token boxes */
+.nnv-grps { pointer-events: none; }
+.nnv-grp { fill: var(--nnv-grp); stroke: var(--nnv-grp-line); stroke-width: 1; stroke-dasharray: 4 4; }
+.nnv-grp-lab {
+  fill: var(--nnv-text); font-size: calc(19px * var(--nnv-ts, 1)); font-style: italic;
+  font-family: "KaTeX_Math", "Times New Roman", serif; text-anchor: end; dominant-baseline: middle;
+  paint-order: stroke; stroke: var(--nnv-bg); stroke-width: 5px; stroke-linejoin: round;
+}
+.nnv-grp-lab.top { text-anchor: start; }
+.nnv-sub { font-size: 0.72em; }
+.nnv-tok { cursor: grab; }
+.nnv-tok-box { fill: var(--nnv-tok); stroke: var(--nnv-tok-line); stroke-width: 1.2; transition: stroke 0.12s, stroke-width 0.12s; }
+.nnv-tok:hover .nnv-tok-box, .nnv-tok.hov .nnv-tok-box { stroke: var(--nnv-hi); stroke-opacity: 0.65; stroke-width: 1.6; }
+.nnv-tok.foc .nnv-tok-box { stroke: var(--nnv-att); stroke-opacity: 1; stroke-width: 2.4; }
+.nnv-tls { pointer-events: none; }
+.nnv-tok-lab {
+  fill: var(--nnv-muted); font-size: calc(15px * var(--nnv-ts, 1)); font-style: italic;
+  font-family: "KaTeX_Math", "Times New Roman", serif; text-anchor: middle; dominant-baseline: middle;
+  paint-order: stroke; stroke: var(--nnv-bg); stroke-width: 4px; stroke-linejoin: round;
+}
+.nnv-tok-lab .nnv-sub { font-size: 0.8em; }
+.nnv.dragging .nnv-tok, .nnv.panning .nnv-tok, .nnv.audience .nnv-tok { cursor: inherit; }
+.nnv.audience .nnv-tok:hover:not(.foc):not(.hov) .nnv-tok-box { stroke: var(--nnv-tok-line); stroke-opacity: 1; stroke-width: 1.2; }
+
 /* ---------------------------------------------------------------- edges */
 .nnv-edge { transition: opacity 0.15s; }
 .nnv-line { fill: none; stroke-linecap: round; }
@@ -62,15 +104,34 @@
 }
 .nnv-edge.rel .nnv-hit { stroke-opacity: 0.2; }
 .nnv-edge.lit .nnv-hit { stroke-opacity: 0.28; }
+.nnv-edge.tie .nnv-hit { stroke-opacity: 0.34; }   /* the rest of a hovered / selected edge's tie group */
 .nnv-edge:hover .nnv-hit, .nnv-edge.hov .nnv-hit { stroke-opacity: 0.42; }
 .nnv-edge.sel .nnv-hit { stroke-opacity: 0.6; }
 .nnv.dragging .nnv-hit, .nnv.panning .nnv-hit, .nnv.audience .nnv-hit { cursor: inherit; }
-.nnv.audience .nnv-edge:hover:not(.hov):not(.sel) .nnv-hit { stroke-opacity: 0; }
+.nnv.audience .nnv-edge:hover:not(.hov):not(.sel):not(.tie) .nnv-hit { stroke-opacity: 0; }
+/* fixed edges (residual identity, fixed pooling): dashed, read-only */
+.nnv-edge.fixed .nnv-line { stroke-dasharray: 7 5; stroke-linecap: butt; }
+
+/* attention edges V_j -> Z_i: width and opacity from A_ij (set inline) */
+.nnv-att { transition: opacity 0.15s; }
+.nnv-att-line { fill: none; stroke: var(--nnv-att); stroke-linecap: round; pointer-events: none; }
+.nnv-att-hit { fill: none; stroke: var(--nnv-att); stroke-opacity: 0; stroke-width: 12; stroke-linecap: round; pointer-events: stroke; }
+.nnv-att.rel .nnv-att-hit { stroke-opacity: 0.14; }
+.nnv-att.lit .nnv-att-hit { stroke-opacity: 0.26; }
+.nnv.dragging .nnv-att-hit, .nnv.panning .nnv-att-hit, .nnv.wiring .nnv-att-hit { pointer-events: none; }
+.nnv-als { pointer-events: none; }
+.nnv-al {
+  display: none; fill: var(--nnv-att); font-size: calc(13px * var(--nnv-ts, 1)); font-weight: 700;
+  text-anchor: middle; dominant-baseline: middle; font-variant-numeric: tabular-nums;
+  paint-order: stroke; stroke: var(--nnv-bg); stroke-width: 4px; stroke-linejoin: round;
+}
+.nnv-al.show { display: inline; }
 
 /* hover (here or in the matrix panel) and the step animation dim everything unrelated */
-.nnv.focus:not(.wiring) .nnv-edge:not(.hov):not(.sel):not(.rel):not(.lit) { opacity: 0.13; }
+.nnv.focus:not(.wiring) .nnv-edge:not(.hov):not(.sel):not(.rel):not(.lit):not(.tie) { opacity: 0.13; }
+.nnv.focus:not(.wiring) .nnv-att:not(.rel):not(.lit) { opacity: 0.1; }
 .nnv.focus:not(.wiring) .nnv-node:not(.hov):not(.sel):not(.rel):not(.lit) { opacity: 0.42; }
-.nnv.focus:not(.wiring) .nnv-wl:not(.hov):not(.sel):not(.rel):not(.lit) { opacity: 0.15; }
+.nnv.focus:not(.wiring) .nnv-wl:not(.hov):not(.sel):not(.rel):not(.lit):not(.tie) { opacity: 0.15; }
 
 .nnv-pair, .nnv-ghost { fill: none; stroke: var(--nnv-hi); stroke-width: 2.5; stroke-dasharray: 7 6; stroke-linecap: round; pointer-events: none; }
 .nnv-ghost.bad { stroke: var(--nnv-bad); }
@@ -84,7 +145,10 @@
 }
 .nnv.show-w .nnv-wl, .nnv-wl.show { display: inline; }
 .nnv-wl.show, .nnv-wl.sel { font-size: calc(14px * var(--nnv-ts, 1)); }
+.nnv-wl.show.tie:not(.sel):not(.hov) { font-size: calc(12.5px * var(--nnv-ts, 1)); fill: var(--nnv-muted); }
 .nnv-wl-g { fill: var(--nnv-muted); font-size: 0.85em; font-weight: 500; }
+.nnv-wl-n { font-family: "KaTeX_Math", "Times New Roman", serif; font-style: italic; font-weight: 500; }
+.nnv-wl-s { font-family: "KaTeX_Math", "Times New Roman", serif; font-style: italic; font-weight: 500; font-size: 0.75em; }
 
 /* the matrix panel's step animation: a pulse runs along the lit edges */
 .nnv-pulses { pointer-events: none; }
