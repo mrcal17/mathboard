@@ -6,7 +6,10 @@ multiplication. Everything here is optional in the JSON, so older nets load unch
 **Status:** implemented: model.js (tests: `tests/nn_model.test.mjs`), the canvas, the matrix
 panel, the cards, the Train panel and the shell. The spec below is kept as it was written.
 "model.js as implemented" and "Display as implemented" list where the code differs from it or
-goes further. The binding interface is docs/NN_CONTRACT.md.
+goes further. The binding interface is docs/NN_CONTRACT.md. The tiny language model's variants
+(docs/NN_FLOW.md, Variants) go further again: attention layers with a sliding window, RoPE, ALiBi
+or no softmax (linear attention), K and V shared across heads by ties (multi-query, grouped-query),
+and LayerNorm and RMSNorm as layer-wide activations, which the tiny language model at d = 8 can use.
 
 ## Why
 

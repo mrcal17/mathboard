@@ -147,6 +147,18 @@ function sigmoid(z) {
   return e / (1 + e);
 }
 const softplus = z => (z > 0 ? z + Math.log1p(Math.exp(-z)) : Math.log1p(Math.exp(z)));
+// GELU, the tanh form (GPT-2's): z/2 (1 + tanh(k (z + c z³))), k = √(2/π), c = 0.044715.
+const GELU_K = Math.sqrt(2 / Math.PI), GELU_C = 0.044715;
+function gelu(z) { return 0.5 * z * (1 + Math.tanh(GELU_K * (z + GELU_C * z * z * z))); }
+function dgelu(z) {
+  const t = Math.tanh(GELU_K * (z + GELU_C * z * z * z));
+  return 0.5 * (1 + t) + 0.5 * z * (1 - t * t) * GELU_K * (1 + 3 * GELU_C * z * z);
+}
+// silu (swish): z σ(z), SwiGLU's gate.
+const silu = z => z * sigmoid(z);
+const dsilu = z => { const s = sigmoid(z); return s * (1 + z * (1 - s)); };
+// LayerNorm's and RMSNorm's ε, under the square root.
+export const NORM_EPS = 1e-5;
 
 export const ACTS = {
   identity: { label: 'Identity', tex: 'z', f: z => z, df: () => 1 },
@@ -164,6 +176,16 @@ export const ACTS = {
     label: 'Softmax', tex: '\\frac{e^{z_i}}{\\sum_j e^{z_j}}', vector: true,
     f: sigmoid, df: (z, a = sigmoid(z)) => a * (1 - a),   // scalar view only; see header
   },
+  // The transformer variants' (docs/NN_FLOW.md, Variants). gelu is scalar; the other three act on
+  // the whole layer, or per token on a token layer, like softmax (their scalar f / df are stand-ins
+  // for plots and are never used by the maths).
+  gelu: { label: 'GELU', tex: '\\tfrac{z}{2}\\big(1 + \\tanh\\big(\\sqrt{2/\\pi}\\,(z + 0.044715\\,z^3)\\big)\\big)', f: gelu, df: dgelu },
+  // (z - mean) / sqrt(variance + ε) over each token's features, without a learned gain or shift
+  layernorm: { label: 'LayerNorm', tex: '\\frac{z_i - \\mu}{\\sqrt{\\sigma^2 + \\epsilon}}', vector: true, f: z => z, df: () => 1 },
+  // z / sqrt(mean(z²) + ε): no mean taken out
+  rmsnorm: { label: 'RMSNorm', tex: '\\frac{z_i}{\\sqrt{\\operatorname{mean}(z^2) + \\epsilon}}', vector: true, f: z => z, df: () => 1 },
+  // the layer's first half g gates its second half u: a = [silu(g) ⊙ u, u] (with groups G, U: the groups)
+  swiglu: { label: 'SwiGLU', tex: '\\operatorname{silu}(g_i)\\,u_i', vector: true, f: silu, df: dsilu },
 };
 
 const ACT_ALIASES = {
@@ -175,6 +197,16 @@ function actName(a) {
   if (typeof a !== 'string') return 'identity';
   const k = a.trim().toLowerCase().replace(/[\s-]+/g, '_');
   return ACTS[k] ? k : ACT_ALIASES[k] || ACT_ALIASES[k.replace(/_/g, '')] || 'identity';
+}
+
+// LayerNorm / RMSNorm over z[s0 .. s0 + w): the mean taken out (0 for RMSNorm) and the rate 1/σ that
+// scales what is left, σ = sqrt(mean((z - mu)²) + ε).
+function normRate(act, z, s0, w) {
+  let mu = 0;
+  if (act === 'layernorm') { for (let i = s0; i < s0 + w; i++) mu += z[i]; mu /= w; }
+  let v = 0;
+  for (let i = s0; i < s0 + w; i++) { const c = z[i] - mu; v += c * c; }
+  return { mu, r: 1 / Math.sqrt(v / w + NORM_EPS) };
 }
 
 // Apply a layer activation to a whole vector (softmax needs the layer). Works on typed arrays.
@@ -191,6 +223,20 @@ export function activate(act, z, out, seg) {
       for (let i = s0; i < s0 + w; i++) { const e = Math.exp(z[i] - m); out[i] = e; s += e; }
       for (let i = s0; i < s0 + w; i++) out[i] /= s;
     }
+    return out;
+  }
+  if (act === 'layernorm' || act === 'rmsnorm') {
+    const w = seg > 0 && n % seg === 0 ? seg : n;
+    for (let s0 = 0; s0 < n; s0 += w) {
+      const r = normRate(act, z, s0, w), mu = r.mu;
+      for (let i = s0; i < s0 + w; i++) out[i] = (z[i] - mu) * r.r;
+    }
+    return out;
+  }
+  if (act === 'swiglu') {
+    const h = n >> 1;   // an odd layer passes its middle entry through with the u half
+    for (let i = 0; i < h; i++) out[i] = silu(z[i]) * z[i + h];
+    for (let i = h; i < n; i++) out[i] = z[i];
     return out;
   }
   const f = (ACTS[act] || ACTS.identity).f;
@@ -318,6 +364,12 @@ const isGroups = g => Array.isArray(g) && g.length > 0 && g.every(s => typeof s 
   && new Set(g).size === g.length;
 const isQKV = g => Array.isArray(g) && g.length === 3 && g.every((s, i) => s === QKV[i]);
 const isAttn = layer => isObj(layer) && layer.kind === 'attention';
+// An attention layer's optional variant fields (docs/NN_FLOW.md, Variants): window (int >= 1, a
+// sliding window: query i reads keys j with |i - j| < window), pos ('rope': q and k rotated by their
+// positions; 'alibi': a bias -m_h |i - j| on the scores) and linear (true: no softmax, the weights
+// are phi(q)·phi(k) over their row's sum, phi = elu + 1).
+const ATT_POS = ['rope', 'alibi'];
+const ATT_EXTRA = ['window', 'pos', 'linear'];
 
 // Shape of a layer with `size` nodes: tokens rows of d features in each group. A plain vector
 // (1 token, no groups) when the fields are absent or don't split the size. Attention layers have no groups.
@@ -351,7 +403,13 @@ function attnGeom(layers, sizes, l) {
   if (!isAttn(lay) || attnProblem(layers, sizes, l)) return null;
   const n = isTokens(lay.tokens) ? lay.tokens : 1, d = sizes[l] / n;
   const H = lay.heads === undefined ? 1 : lay.heads, dh = d / H;
-  return { l, n, d, H, dh, scale: isNum(lay.scale) ? lay.scale : 1 / Math.sqrt(dh), causal: lay.causal === true };
+  const g = { l, n, d, H, dh, scale: isNum(lay.scale) ? lay.scale : 1 / Math.sqrt(dh), causal: lay.causal === true };
+  return withExtras(g, isTokens(lay.window) ? lay.window : 0, ATT_POS.includes(lay.pos) ? lay.pos : null, lay.linear === true);
+}
+// A variant's fields on the geometry, and ext (the general attention path) when any is set.
+function withExtras(g, window, pos, linear) {
+  if (window || pos || linear) Object.assign(g, { window, pos, linear, ext: true });
+  return g;
 }
 
 function layerSizes(net) {
@@ -376,7 +434,7 @@ function settle(net) {
   net.layers.forEach((l, i) => {
     if (!isAttn(l)) return;
     if (attnProblem(net.layers, sizes, i)) {
-      for (const k of ['kind', 'heads', 'causal', 'scale']) delete l[k];
+      for (const k of ['kind', 'heads', 'causal', 'scale', ...ATT_EXTRA]) delete l[k];
       return;
     }
     l.act = 'identity';
@@ -428,12 +486,34 @@ export function reshape(net, layer, vec) {
   return out;
 }
 
-// A working attention layer's settings, defaults filled: { l, tokens, d, heads, dh, scale, causal }, else null.
+// A working attention layer's settings, defaults filled: { l, tokens, d, heads, dh, scale, causal }, and
+// window, pos and linear when the layer sets them; else null.
 export function attnSpec(net, layer) {
   const l = layerRef(net, layer);
   const g = l < 0 ? null : attnGeom(net.layers, layerSizes(net), l);
-  return g && { l, tokens: g.n, d: g.d, heads: g.H, dh: g.dh, scale: g.scale, causal: g.causal };
+  if (!g) return null;
+  const s = { l, tokens: g.n, d: g.d, heads: g.H, dh: g.dh, scale: g.scale, causal: g.causal };
+  if (g.window) s.window = g.window;
+  if (g.pos) s.pos = g.pos;
+  if (g.linear) s.linear = true;
+  return s;
 }
+
+// Whether query i may read key j (spec: attnSpec or the internal geometry): the causal mask (j <= i)
+// and the sliding window (|i - j| < window).
+export function attnVisible(spec, i, j) {
+  return (!spec.causal || j <= i) && (!spec.window || Math.abs(i - j) < spec.window);
+}
+// RoPE: pair p of a head (its columns 2p + 1 and 2p + 2) turns by t · ropeFreq(p, d_h) radians at
+// position t (0-based), the RoFormer frequencies base^(-2p / d_h) with base ROPE_BASE.
+export const ROPE_BASE = 10000;
+export const ropeFreq = (p, dh) => Math.pow(ROPE_BASE, (-2 * p) / dh);
+// ALiBi: head h (0-based) adds -alibiSlope(h) · |i - j| to its scores. The slopes are 1/2, 1/4, 1/8, ...,
+// the ALiBi paper's for 8 heads (its 2-head slopes, 1/16 and 1/256, would barely show over 5 positions).
+export const alibiSlope = h => Math.pow(2, -(h + 1));
+// Linear attention's feature map phi = elu + 1 (positive, so every weight is) and its slope.
+const phi = x => (x > 0 ? x + 1 : Math.exp(x));
+const dphi = x => (x > 0 ? 1 : Math.exp(x));
 
 const TIE_ID = /^(.*):(\d+),(\d+)$/;
 
@@ -465,7 +545,7 @@ export function tiedMatrices(net, layer) {
     const W = Array.from({ length: R }, () => new Array(C).fill(0));
     const ties = Array.from({ length: R }, () => new Array(C).fill(null));
     const ks = new Set(), from = new Set(), to = new Set();
-    let tokenwise = true;
+    let tokenwise = true, flip = true;   // flip: every edge reads entry (i, j) the other way round
     for (const { q, e, i, j } of list) {
       W[i - 1][j - 1] = T.w[q];
       ties[i - 1][j - 1] = e.tie;
@@ -473,15 +553,27 @@ export function tiedMatrices(net, layer) {
       const sp = at(T.k[q], T.j[q]), tp = at(l, T.i[q]);
       from.add(sp.s.groups ? sp.s.groups[sp.g] : null);
       to.add(tp.s.groups ? tp.s.groups[tp.g] : null);
-      if (sp.s.tokens !== tp.s.tokens || sp.t !== tp.t || sp.f !== i - 1 || tp.f !== j - 1) tokenwise = false;
+      const row = sp.s.tokens === tp.s.tokens && sp.t === tp.t;
+      if (!row || sp.f !== i - 1 || tp.f !== j - 1) tokenwise = false;
+      if (!row || sp.f !== j - 1 || tp.f !== i - 1) flip = false;
     }
     const cells = ties.flat().filter(Boolean).length;
-    if (from.size !== 1 || to.size !== 1 || list.length !== cells * P.shapes[l].tokens) tokenwise = false;
-    out.push({
+    const whole = from.size === 1 && to.size === 1 && list.length === cells * P.shapes[l].tokens;
+    if (!whole) tokenwise = false;
+    const m = {
       name, W, ties, k: ks.size === 1 ? [...ks][0] : null,
       fromGroup: from.size === 1 ? [...from][0] : null, toGroup: to.size === 1 ? [...to][0] : null,
       edges: list.map(x => x.e.id), tokenwise,
-    });
+    };
+    // A shared matrix used transposed here (tied embeddings: the unembedding reads W_E as W_Eᵀ): W and
+    // ties in this layer's X W convention, so the layer is I ⊗ Wᵀ again, and transposed: true.
+    if (!tokenwise && flip && whole) {
+      Object.assign(m, {
+        W: W[0].map((_, j) => W.map(r => r[j])), ties: ties[0].map((_, j) => ties.map(r => r[j])),
+        tokenwise: true, transposed: true,
+      });
+    }
+    out.push(m);
   }
   return out;
 }
@@ -524,6 +616,8 @@ export function validate(net) {
       if (!(typeof v === 'string' || isNum(v))) errs.push(`${tag}: param ${k} must be a string or number`);
     }
     if (n.tie !== undefined && n.tie !== null && !isTie(n.tie)) errs.push(`${tag}: tie must be a non-empty string or null`);
+    if (n.fixed !== undefined && typeof n.fixed !== 'boolean') errs.push(`${tag}: fixed must be a boolean`);
+    if (n.fixed === true && isTie(n.tie)) errs.push(`${tag}: a bias cannot be both fixed and tied`);
   });
 
   // token shapes and attention layers
@@ -549,6 +643,9 @@ export function validate(net) {
     if (l.act !== 'identity') errs.push(`${tag}: an attention layer's act must be identity`);
     if (l.causal !== undefined && typeof l.causal !== 'boolean') errs.push(`${tag}: causal must be a boolean`);
     if (l.scale !== undefined && !isNum(l.scale)) errs.push(`${tag}: scale must be a finite number`);
+    if (l.window !== undefined && !isTokens(l.window)) errs.push(`${tag}: window must be an integer >= 1`);
+    if (l.pos !== undefined && !ATT_POS.includes(l.pos)) errs.push(`${tag}: pos must be one of ${ATT_POS.join(', ')}`);
+    if (l.linear !== undefined && typeof l.linear !== 'boolean') errs.push(`${tag}: linear must be a boolean`);
   });
 
   const pairs = new Set();
@@ -624,6 +721,9 @@ function cleanLayerFields(l) {
   if ('heads' in l) { const h = toNum(l.heads); if (isTokens(h)) l.heads = h; else delete l.heads; }
   if ('causal' in l) { const c = toBool(l.causal); if (typeof c === 'boolean') l.causal = c; else delete l.causal; }
   if ('scale' in l) { const s = toNum(l.scale); if (s !== undefined) l.scale = s; else delete l.scale; }
+  if ('window' in l) { const w = toNum(l.window); if (isTokens(w)) l.window = w; else delete l.window; }
+  if ('pos' in l) { const p = typeof l.pos === 'string' ? l.pos.trim().toLowerCase() : ''; if (ATT_POS.includes(p)) l.pos = p; else delete l.pos; }
+  if ('linear' in l) { const v = toBool(l.linear); if (typeof v === 'boolean') l.linear = v; else delete l.linear; }
   return l;
 }
 function cleanTie(o) {
@@ -712,7 +812,10 @@ export function normalize(input) {
       bias: bias ?? 0, value: value ?? 0, target: target ?? null, params: cleanParams(r.params),
     };
     if (x === undefined || y === undefined) unplaced.push(n);
-    out.nodes.push(cleanTie(n));
+    if ('fixed' in n) { const f = toBool(n.fixed); if (typeof f === 'boolean') n.fixed = f; else delete n.fixed; }
+    cleanTie(n);
+    if (n.fixed === true && isTie(n.tie)) delete n.tie;   // fixed beats tie, as on edges
+    out.nodes.push(n);
   }
 
   while (out.layers.length < 2) {
@@ -872,7 +975,8 @@ export function removeLayer(net, id, { bridge = false, seed } = {}) {
 }
 
 // patch: { name, act } for any layer; { causal: bool, heads: int dividing d, scale: number | null
-// (null = the default 1/sqrt(d_k / heads)) } for an attention layer, whose act stays identity.
+// (null = the default 1/sqrt(d_k / heads)), window: int >= 1 | null, pos: 'rope' | 'alibi' | null,
+// linear: bool } for an attention layer, whose act stays identity (null removes the field).
 export function setLayer(net, id, patch = {}) {
   const l = net.layers.find(x => x.id === id);
   if (!l || !isObj(patch)) return false;
@@ -883,6 +987,12 @@ export function setLayer(net, id, patch = {}) {
     if (typeof patch.causal === 'boolean') l.causal = patch.causal;
     if (patch.scale === null) delete l.scale;
     else if (toNum(patch.scale) !== undefined) l.scale = toNum(patch.scale);
+    if (patch.window === null) delete l.window;
+    else if (isTokens(toNum(patch.window))) l.window = toNum(patch.window);
+    if (patch.pos === null) delete l.pos;
+    else if (ATT_POS.includes(patch.pos)) l.pos = patch.pos;
+    if (patch.linear === false) delete l.linear;
+    else if (patch.linear === true) l.linear = true;
     const h = toNum(patch.heads);
     if (isTokens(h)) {
       const had = 'heads' in l, old = l.heads;
@@ -948,7 +1058,7 @@ function applyNodePatch(net, n, patch) {
     if (v !== undefined) n[k] = v;
   }
   const bv = toNum(patch.bias);
-  if (bv !== undefined && !isAttn(net.layers.find(l => l.id === n.layer))) {
+  if (bv !== undefined && n.fixed !== true && !isAttn(net.layers.find(l => l.id === n.layer))) {
     if (isTie(n.tie)) { for (const m of net.nodes) if (m.tie === n.tie) m.bias = bv; }
     else n.bias = bv;
   }
@@ -1076,7 +1186,7 @@ export function randomize(net, { seed, scheme = 'xavier', biases = 'zero', init 
     const input = net.layers[0]?.id, attn = new Set(net.layers.filter(isAttn).map(l => l.id));
     const shared = new Map();
     for (const n of net.nodes) {
-      if (n.layer === input) continue;
+      if (n.layer === input || n.fixed === true) continue;   // a fixed bias keeps its value
       if (attn.has(n.layer)) { n.bias = 0; continue; }
       if (isTie(n.tie) && shared.has(n.tie)) { n.bias = shared.get(n.tie); continue; }
       n.bias = biases === 'small' ? (2 * r() - 1) * 0.1 : 0;
@@ -1135,7 +1245,7 @@ function plan(net) {
   nodes.forEach((ns, l) => {
     if (l === 0 || att[l]) return;
     ns.forEach((n, i) => {
-      if (!isTie(n.tie)) return;
+      if (!isTie(n.tie) || n.fixed === true) return;
       if (!bties.has(n.tie)) bties.set(n.tie, []);
       bties.get(n.tie).push([l, i]);
     });
@@ -1147,7 +1257,16 @@ function plan(net) {
   return { L, nodes, where, T, b, acts, sizes, shapes, att, seg, ties, bties };
 }
 
-const attnBuf = g => ({ S: new Float64Array(g.H * g.n * g.n), A: new Float64Array(g.H * g.n * g.n) });
+// S and A per head; a variant also keeps qe, ke: the q and k its scores dot (rotated, or phi of them),
+// and with RoPE and linear together qr, kr: the rotated ones before phi.
+function attnBuf(g) {
+  const b = { S: new Float64Array(g.H * g.n * g.n), A: new Float64Array(g.H * g.n * g.n) };
+  if (!g.ext) return b;
+  const m = g.n * g.d;
+  Object.assign(b, { qe: new Float64Array(m), ke: new Float64Array(m) });
+  if (g.pos === 'rope' && g.linear) Object.assign(b, { qr: new Float64Array(m), kr: new Float64Array(m) });
+  return b;
+}
 
 function alloc(P) {
   return {
@@ -1183,9 +1302,54 @@ function attnScores(g, x, S, A) {
   }
 }
 
+// A variant's scores (g.ext): qe, ke as its scores dot them, then per head S (masked cells -Infinity;
+// the causal mask and the window) and A. Softmax: S = q·k · scale, minus the ALiBi slope times the
+// distance, and A = softmax(S). Linear: S = phi(q)·phi(k) and A = S over its row's sum.
+function ropeRow(buf, i, g, dir) {   // row i of buf turned by its position's angles (dir -1: back)
+  const { d, H, dh } = g;
+  for (let h = 0; h < H; h++) {
+    for (let p = 0; 2 * p + 1 < dh; p++) {
+      const a = dir * i * ropeFreq(p, dh), co = Math.cos(a), si = Math.sin(a), c = i * d + h * dh + 2 * p;
+      const u = buf[c], v = buf[c + 1];
+      buf[c] = u * co - v * si;
+      buf[c + 1] = u * si + v * co;
+    }
+  }
+}
+function attnScoresExt(g, x, st) {
+  const { n, d, H, dh, scale, pos, linear } = g, ko = n * d, { qe, ke, S, A } = st;
+  for (let k = 0; k < ko; k++) { qe[k] = x[k]; ke[k] = x[ko + k]; }
+  if (pos === 'rope') for (let i = 0; i < n; i++) { ropeRow(qe, i, g, 1); ropeRow(ke, i, g, 1); }
+  if (st.qr) { st.qr.set(qe); st.kr.set(ke); }
+  if (linear) for (let k = 0; k < ko; k++) { qe[k] = phi(qe[k]); ke[k] = phi(ke[k]); }
+  for (let h = 0; h < H; h++) {
+    const o = h * n * n, c = h * dh, m = pos === 'alibi' ? alibiSlope(h) : 0;
+    for (let i = 0; i < n; i++) {
+      const row = o + i * n;
+      let mx = -Infinity, t = 0;
+      for (let j = 0; j < n; j++) {
+        let s = -Infinity;
+        if (attnVisible(g, i, j)) {
+          s = 0;
+          for (let f = 0; f < dh; f++) s += qe[i * d + c + f] * ke[j * d + c + f];
+          if (!linear) s = s * scale - m * Math.abs(i - j);
+        }
+        S[row + j] = s;
+        if (s > mx) mx = s;
+      }
+      for (let j = 0; j < n; j++) {
+        const e = linear ? (S[row + j] === -Infinity ? 0 : S[row + j]) : Math.exp(S[row + j] - mx);
+        A[row + j] = e; t += e;
+      }
+      for (let j = 0; j < n; j++) A[row + j] /= t;
+    }
+  }
+}
+
 // Z = A V per head, heads side by side in each token's row.
 function attnForward(g, x, out, st) {
-  attnScores(g, x, st.S, st.A);
+  if (g.ext) attnScoresExt(g, x, st);
+  else attnScores(g, x, st.S, st.A);
   const { n, d, H, dh } = g, vo = 2 * n * d, A = st.A;
   for (let h = 0; h < H; h++) {
     const o = h * n * n, c = h * dh;
@@ -1203,6 +1367,7 @@ function attnForward(g, x, out, st) {
 // V layer's dL/da). st keeps S, A, dA = dZ Vᵀ, dS = A ⊙ (dA - rowsum(dA ⊙ A)) and own = this
 // layer's [dQ | dK | dV] with dQ = dS K · scale, dK = dSᵀ Q · scale, dV = Aᵀ dZ.
 function attnBackward(g, x, dZ, dX, st) {
+  if (g.ext) { attnBackwardExt(g, x, dZ, dX, st); return; }
   attnScores(g, x, st.S, st.A);
   const { n, d, H, dh, scale } = g, ko = n * d, vo = 2 * n * d;
   const { A, dAt, dS, own } = st;
@@ -1233,6 +1398,53 @@ function attnBackward(g, x, dZ, dX, st) {
       }
     }
   }
+  for (let q = 0; q < own.length; q++) dX[q] += own[q];
+}
+
+// A variant's backward pass. dA = dZ Vᵀ and dV = Aᵀ dZ as before. dS: softmax's A ⊙ (dA - rowsum(dA ⊙ A)),
+// or for linear attention (A = S / r, r the row's sum) (dA - rowsum(dA ⊙ A)) / r on the visible cells.
+// The dotted vectors get dqe = dS ke (· scale for softmax) and dke = dSᵀ qe, which go back through
+// phi' (linear) and the transposed rotation (RoPE) to the Q, K layer's own values.
+function attnBackwardExt(g, x, dZ, dX, st) {
+  attnScoresExt(g, x, st);
+  const { n, d, H, dh, scale, pos, linear } = g, ko = n * d, vo = 2 * n * d;
+  const { S, A, dAt, dS, own, qe, ke, dqe, dke } = st, k0 = linear ? 1 : scale;
+  for (let h = 0; h < H; h++) {
+    const o = h * n * n, c = h * dh;
+    for (let i = 0; i < n; i++) {
+      const row = o + i * n;
+      let r = 0, tot = 0;
+      for (let j = 0; j < n; j++) {
+        let s = 0;
+        for (let f = 0; f < dh; f++) s += dZ[i * d + c + f] * x[vo + j * d + c + f];
+        dAt[row + j] = s;
+        r += s * A[row + j];
+        if (linear && S[row + j] !== -Infinity) tot += S[row + j];
+      }
+      for (let j = 0; j < n; j++) {
+        dS[row + j] = !linear ? A[row + j] * (dAt[row + j] - r) : S[row + j] === -Infinity ? 0 : (dAt[row + j] - r) / tot;
+      }
+    }
+    for (let i = 0; i < n; i++) {
+      for (let f = 0; f < dh; f++) {
+        let q = 0, k = 0, v = 0;
+        for (let j = 0; j < n; j++) {
+          q += dS[o + i * n + j] * ke[j * d + c + f];
+          k += dS[o + j * n + i] * qe[j * d + c + f];
+          v += A[o + j * n + i] * dZ[j * d + c + f];
+        }
+        dqe[i * d + c + f] = q * k0;
+        dke[i * d + c + f] = k * k0;
+        own[vo + i * d + c + f] = v;
+      }
+    }
+  }
+  if (linear) {
+    const pq = st.qr, pk = st.kr;   // phi's inputs: the rotated q, k (RoPE), else the Q, K layer's
+    for (let k = 0; k < ko; k++) { dqe[k] *= dphi(pq ? pq[k] : x[k]); dke[k] *= dphi(pk ? pk[k] : x[ko + k]); }
+  }
+  if (pos === 'rope') for (let i = 0; i < n; i++) { ropeRow(dqe, i, g, -1); ropeRow(dke, i, g, -1); }
+  for (let k = 0; k < ko; k++) { own[k] = dqe[k]; own[ko + k] = dke[k]; }
   for (let q = 0; q < own.length; q++) dX[q] += own[q];
 }
 
@@ -1313,7 +1525,30 @@ function attnReport(g, x, out, st) {
       Z: grid(n, dh, (i, f) => out[i * d + c + f]),
     });
   }
-  return { heads, tokens: n, dk: dh, scale: g.scale, causal: g.causal };
+  const rep = { heads, tokens: n, dk: dh, scale: g.scale, causal: g.causal };
+  if (!g.ext) return rep;
+  // a variant also reports what its scores used: RoPE's rotated q, k (Qr, Kr), linear attention's
+  // phi(q), phi(k) (Qf, Kf) and ALiBi's bias B (-slope · |i - j|, masked cells included)
+  heads.forEach((hd, h) => {
+    const c = h * dh, at = B => grid(n, dh, (i, f) => B[i * d + c + f]);
+    if (g.pos === 'rope') { hd.Qr = at(st.qr || st.qe); hd.Kr = at(st.kr || st.ke); }
+    if (g.linear) { hd.Qf = at(st.qe); hd.Kf = at(st.ke); }
+    if (g.pos === 'alibi') { const m = alibiSlope(h); hd.B = grid(n, n, (i, j) => -m * Math.abs(i - j) + 0); }
+  });
+  if (g.window) rep.window = g.window;
+  if (g.pos) rep.pos = g.pos;
+  if (g.linear) rep.linear = true;
+  return rep;
+}
+
+// One attention layer on its own, as forward() computes it: x is the Q, K, V layer's activations
+// and spec an attnSpec. Returns fwd.attn[l]'s report and out, the layer's activations (heads side by side).
+export function attend(x, spec) {
+  const g = withExtras({ l: spec.l, n: spec.tokens, d: spec.d, H: spec.heads, dh: spec.dh, scale: spec.scale, causal: !!spec.causal },
+    spec.window || 0, spec.pos || null, !!spec.linear);
+  const st = attnBuf(g), out = new Float64Array(g.n * g.d);
+  attnForward(g, x, out, st);
+  return { ...attnReport(g, x, out, st), out: Array.from(out) };
 }
 
 // bwd.attn[l]: per head dZ, dQ, dK, dV (n x dh; this layer's own contribution) and dA, dS (n x n).
@@ -1398,6 +1633,29 @@ function actBack(act, z, a, dA, dZ, seg) {
     }
     return;
   }
+  if (act === 'layernorm' || act === 'rmsnorm') {
+    // a = (z - mu) / σ: dz = (dA - mean(dA) - a · mean(dA ⊙ a)) / σ, and without the mean(dA) for RMSNorm
+    const w = seg > 0 && n % seg === 0 ? seg : n, ln = act === 'layernorm';
+    for (let s0 = 0; s0 < n; s0 += w) {
+      const { r } = normRate(act, z, s0, w);
+      let md = 0, mda = 0;
+      for (let i = s0; i < s0 + w; i++) { md += dA[i]; mda += dA[i] * a[i]; }
+      md = ln ? md / w : 0; mda /= w;
+      for (let i = s0; i < s0 + w; i++) dZ[i] = r * (dA[i] - md - a[i] * mda);
+    }
+    return;
+  }
+  if (act === 'swiglu') {
+    // a_i = silu(g_i) u_i (i < h) and a_{i+h} = u_i: dg_i = dA_i u_i silu'(g_i), du_i = dA_i silu(g_i) + dA_{i+h}
+    const h = n >> 1;
+    for (let i = h; i < n; i++) dZ[i] = dA[i];
+    for (let i = 0; i < h; i++) {
+      const g = z[i], u = z[i + h];
+      dZ[i] = dA[i] * u * dsilu(g);
+      dZ[i + h] += dA[i] * silu(g);
+    }
+    return;
+  }
   const df = (ACTS[act] || ACTS.identity).df;
   for (let i = 0; i < n; i++) dZ[i] = dA[i] * df(z[i], a[i]);
 }
@@ -1410,6 +1668,7 @@ function workspace(P) {
     att: P.att.map(g => g && {
       ...attnBuf(g), dAt: new Float64Array(g.H * g.n * g.n), dS: new Float64Array(g.H * g.n * g.n),
       own: new Float64Array(3 * g.n * g.d),
+      ...(g.ext ? { dqe: new Float64Array(g.n * g.d), dke: new Float64Array(g.n * g.d) } : {}),
     }),
   };
 }
@@ -1508,7 +1767,7 @@ export function trainStep(net, { X, Y } = {}, { lr = 0.1, loss } = {}) {
     const T = P.T[l];
     for (let q = 0; q < T.n; q++) if (!T.fixed[q] && !T.tied[q]) T.edges[q].w -= step * gw[l][q];
     if (P.att[l]) continue;   // no biases
-    P.nodes[l].forEach((n, i) => { if (!isTie(n.tie)) n.bias -= step * gb[l][i]; });
+    P.nodes[l].forEach((n, i) => { if (!isTie(n.tie) && n.fixed !== true) n.bias -= step * gb[l][i]; });
   }
   // A shared parameter steps by the summed gradient of its members, and they stay equal.
   for (const list of P.ties.values()) {
@@ -2115,7 +2374,7 @@ function lmNet(seed) {
 // Flow view is where it reads best.
 function lmLayout(net) {
   const FX = 88, RP = 90, GG = 60, GAP = 170, TOP = 120;
-  const q = tokenShape(net, 2), block = q.tokens * RP + GG;
+  const q = tokenShape(net, net.layers.findIndex(l => isQKV(l.groups))), block = q.tokens * RP + GG;
   const mid = TOP + (block * (q.groups.length - 1) + (q.tokens - 1) * RP) / 2;
   let x = 110;
   net.layers.forEach((_, l) => {
@@ -2129,6 +2388,111 @@ function lmLayout(net) {
     x += (d - 1) * FX + GAP;
   });
   return net;
+}
+
+// ---- the tiny language model's variants (docs/NN_FLOW.md, Variants): the same data (nl_lm), the
+// same sizes (d_model 8, 5 positions, 23 words, an FFN of 32) and the same recipe (He, biases 0, W_Q,
+// W_K, W_O, W_2 small), with one thing changed. o:
+//   pos: 'learned' (P, a vector per position, as tiny_lm) | 'none' | 'sin' (P fixed: sin and cos of the
+//     position at d/2 frequencies) | 'rope' | 'alibi' (no P: position enters the attention layer)
+//   heads (2), kv (the K, V heads, shared by heads / kv query heads each: 1 is multi-query, else
+//     grouped-query; the sharing is ties, so W_K and W_V are d x (kv · d_h)), causal (true), window,
+//     linear: the attention layer (see ATT_EXTRA)
+//   norm: null | 'pre' (N = norm(X) before Q, K, V, before the FFN and before the logits, on fixed
+//     identity edges with fixed zero biases, the residuals skipping them) | 'post' (H = norm(X + Z W_O),
+//     Y = norm(H + FFN)); normAct 'layernorm' | 'rmsnorm'. No learned gain or shift.
+//   ffn: 'relu' | 'gelu' | 'swiglu' (the FFN layer as groups G, U: G = H W_1 + b_1, U = H W_3 + b_3,
+//     and W_2 reads silu(G) ⊙ U), tied (W_U = W_Eᵀ: the logits' edges tie to W_E's entries), blocks (1 | 2)
+// Positions X's biases can't learn (none, rope, alibi) are fixed at 0 (node.fixed).
+const LM_SUB = n => String(n).replace(/\d/g, c => '₀₁₂₃₄₅₆₇₈₉'[c]);
+// sin(t / 10000^(2i/d)) in column 2i and cos in column 2i + 1, t the position (0-based)
+const sinPos = (t, f, d) => { const w = Math.pow(10000, -(2 * Math.floor(f / 2)) / d); return f % 2 ? Math.cos(t * w) : Math.sin(t * w); };
+function lmVariant(seed, o) {
+  const vocab = LM_VOCAB, V = vocab.length, T = LM_T, d = 8, H = o.heads || 2, kv = o.kv || H, dh = d / H, F = 4 * d;
+  const blocks = o.blocks || 1, norm = o.norm || null, nact = o.normAct || 'layernorm', glu = o.ffn === 'swiglu';
+  const NL = nact === 'rmsnorm' ? 'RMSNorm' : 'LN', FN = { relu: 'ReLU', gelu: 'GELU', swiglu: 'SwiGLU' }[o.ffn || 'relu'];
+  const word = k => `\\text{${vocab[k]}}`, zero = (r, c) => Array.from({ length: r }, () => new Array(c).fill(0));
+  const specs = [], at = {};
+  const push = (role, s) => { at[role] = specs.length; specs.push(s); };
+  const lab = (sym, n) => (t, f) => `${sym}${n ? `^{(${n})}` : ''}_{${t},${f}}`;   // the blocks' neurons share their labels (z_{1,1})
+  let nNorm = 0;
+  const normSpec = (role, of) => push(role, { name: `N${LM_SUB(++nNorm)} = ${NL}(${of})`, act: nact, tokens: T, d, label: lab(`n^{${nNorm}}`) });
+  push('in', { name: 'Words (one-hot)', tokens: T, d: V, label: (t, f) => `${word(f - 1)}_{${t}}` });
+  push('x', { name: o.pos === 'learned' ? 'X = E[w] + P' : o.pos === 'sin' ? 'X = E[w] + P (sinusoidal)' : 'X = E[w]', tokens: T, d, label: lab('x') });
+  const heads = `${H} ${o.causal === false ? '' : 'causal '}heads`;
+  const attName = o.linear ? `Linear attention Z, ${heads}` : `Attention Z, ${heads}`
+    + (o.pos === 'rope' ? ', RoPE' : o.pos === 'alibi' ? ', ALiBi' : '') + (o.window ? `, window ${o.window}` : '')
+    + (o.causal === false ? ', no mask' : '') + (kv < H ? `, ${kv} K, V head${kv > 1 ? 's' : ''}` : '');
+  let stream = 'X';
+  for (let b = 1; b <= blocks; b++) {
+    const B = blocks > 1 ? b : null, s = B ? LM_SUB(B) : '';
+    if (norm === 'pre') normSpec(`n1.${b}`, stream);
+    push(`qkv.${b}`, { name: B ? `Q, K, V (block ${B})` : 'Q, K, V', tokens: T, d, groups: QKV, label: qkvLabel });
+    push(`z.${b}`, { name: attName, tokens: T, d, attention: { heads: H, causal: o.causal !== false }, label: lab('z') });
+    const hs = `H${s}`, sum = `${stream} + Z W_O`;
+    push(`h.${b}`, { name: `${hs} = ${norm === 'post' ? `${NL}(${sum})` : sum}`, act: norm === 'post' ? nact : 'identity', tokens: T, d, label: lab('h') });
+    if (norm === 'pre') normSpec(`n2.${b}`, hs);
+    push(`f.${b}`, glu
+      ? { name: 'FFN: SwiGLU, G = H W₁, U = H W₃', act: 'swiglu', tokens: T, d: F, groups: ['G', 'U'], label: (t, f, g) => `${g.toLowerCase()}_{${t},${f}}` }
+      : { name: `FFN: ${FN}(H W₁)`, act: o.ffn || 'relu', tokens: T, d: F, label: lab('f') });
+    const ys = `Y${s}`, fsum = `${hs} + FFN`;
+    push(`y.${b}`, { name: `${ys} = ${norm === 'post' ? `${NL}(${fsum})` : fsum}`, act: norm === 'post' ? nact : 'identity', tokens: T, d, label: lab('y') });
+    stream = ys;
+  }
+  if (norm === 'pre') normSpec('nf', stream);
+  const readout = norm === 'pre' ? `N${LM_SUB(nNorm)}` : stream;
+  push('out', { name: `Next word: softmax(${readout} ${o.tied ? 'W_Eᵀ' : 'W_U'})`, act: 'softmax', tokens: T, d: V, label: (t, f) => `p_{${t}}(${word(f - 1)})` });
+
+  const net = seqBlank(o.title, 'xent', specs);
+  const init = {};
+  const W = (base, b) => `${base}${blocks > 1 ? `^{(${b})}` : ''}`;
+  wireTied(net, at.in, at.x, 'W_E', zero(V, d));
+  if (o.pos !== 'learned') nodesIn(net, at.x).forEach((n, k) => { n.fixed = true; n.bias = o.pos === 'sin' ? sinPos(Math.floor(k / d), k % d, d) : 0; });
+  // a norm layer: a fixed identity copy of the layer it normalizes, with fixed zero biases
+  const normIn = (l, from) => { wireResidual(net, from, l); nodesIn(net, l).forEach(n => { n.fixed = true; }); };
+  let src = at.x;
+  for (let b = 1; b <= blocks; b++) {
+    const qkv = at[`qkv.${b}`], z = at[`z.${b}`], h = at[`h.${b}`], f = at[`f.${b}`], y = at[`y.${b}`];
+    let into = src;
+    if (norm === 'pre') { normIn(at[`n1.${b}`], src); into = at[`n1.${b}`]; }
+    // K and V column c (head floor(c / d_h)) reads the shared column of its K, V head
+    const col = c => Math.floor(Math.floor(c / dh) / (H / kv)) * dh + (c % dh);
+    for (const g of QKV) {
+      const name = W(`W_${g}`, b), bn = W(`b_${g}`, b);
+      if (g === 'Q' || kv === H) { wireTied(net, into, qkv, name, zero(d, d), { to: g }); tieBias(net, qkv, bn, zero(1, d)[0], g); continue; }
+      const sg = tokenGrid(net, into), dg = tokenGrid(net, qkv, g);
+      dg.forEach((row, t) => row.forEach((q, c) => sg[t].forEach((p, i) => addEdge(net, p.id, q.id, 0, { tie: `${name}:${i + 1},${col(c) + 1}` }))));
+      dg.forEach(row => row.forEach((n, c) => { n.bias = 0; n.tie = `${bn}:${col(c) + 1}`; }));
+    }
+    Object.assign(net.layers[z], o.window ? { window: o.window } : {}, o.pos === 'rope' || o.pos === 'alibi' ? { pos: o.pos } : {}, o.linear ? { linear: true } : {});
+    wireTied(net, z, h, W('W_O', b), zero(d, d));
+    wireResidual(net, src, h);
+    tieBias(net, h, W('b_O', b), zero(1, d)[0]);
+    let fin = h;
+    if (norm === 'pre') { normIn(at[`n2.${b}`], h); fin = at[`n2.${b}`]; }
+    wireTied(net, fin, f, W('W_1', b), zero(d, F), glu ? { to: 'G' } : {});
+    tieBias(net, f, W('b_1', b), zero(1, F)[0], glu ? 'G' : null);
+    if (glu) { wireTied(net, fin, f, W('W_3', b), zero(d, F), { to: 'U' }); tieBias(net, f, W('b_3', b), zero(1, F)[0], 'U'); }
+    wireTied(net, f, y, W('W_2', b), zero(F, d), glu ? { from: 'G' } : {});
+    wireResidual(net, h, y);
+    tieBias(net, y, W('b_2', b), zero(1, d)[0]);
+    for (const m of ['W_Q', 'W_K', 'W_O', 'W_2']) init[W(m, b)] = 'small';
+    src = y;
+  }
+  if (norm === 'pre') { normIn(at.nf, src); src = at.nf; }
+  if (o.tied) {   // the unembedding is W_E transposed: logit w of a row reads W_E[w, :]
+    const sg = tokenGrid(net, src), dg = tokenGrid(net, at.out);
+    dg.forEach((row, t) => row.forEach((q, w) => sg[t].forEach((p, i) => addEdge(net, p.id, q.id, 0, { tie: `W_E:${w + 1},${i + 1}` }))));
+  } else wireTied(net, src, at.out, 'W_U', zero(d, V));
+  tieBias(net, at.out, 'b_U', zero(1, V)[0]);
+  net.meta.train.init = init;
+  net.meta.train.n = 300;
+  randomize(net, { seed, scheme: 'he', init });
+  net.meta.vocab = [...vocab];
+  net.meta.flow = true;
+  const hot = w => vocab.map(v => (v === w ? 1 : 0));
+  net.meta.tokenNames = LM_PROMPT.slice(0, T);
+  return lmLayout(io(net, LM_PROMPT.slice(0, T).flatMap(hot), LM_PROMPT.slice(1).flatMap(hot)));
 }
 
 const eye = (i, j) => (i === j ? 1 : null);                        // identity shortcut, rest masked
@@ -2145,9 +2509,12 @@ const GRAPH = [[0, 1, 1, 0, 0], [1, 0, 1, 0, 0], [1, 1, 0, 1, 0], [0, 0, 1, 0, 1
 // group: its section of the New net menu. note: one line on what to notice (matrix panel first).
 // lr: a learning rate that suits the preset (one the Train panel lists), recorded as meta.train.lr.
 // noise: the same for the dataset's noise (the word presets train on the exact word vectors).
-function preset({ group, label, dataset = null, note, lr = null, noise = null }, make) {
+// family, axis, short, title (the tiny language model and its variants): the Flow view's variant picker
+// lists a family's presets, by axis (what the variant changes), under their short names; title is the
+// meta.title its nets carry (how a loaded net is matched to its variant).
+function preset({ group, label, dataset = null, note, lr = null, noise = null, family, axis, short, title }, make) {
   return {
-    label, group, note, dataset, lr, noise,
+    label, group, note, dataset, lr, noise, ...(family ? { family, axis, short, title } : {}),
     build: (seed = 1) => {
       const net = make(seed);
       if (dataset) net.meta.train = { ...net.meta.train, dataset };
@@ -2160,6 +2527,67 @@ function preset({ group, label, dataset = null, note, lr = null, noise = null },
 
 const BASICS = 'Basics', MLPS = 'MLPs', SKIPS = 'Skip connections', STRUCT = 'Structure in W';
 const SEQ = 'Sequences', ATT = 'Attention', EMB = 'Embeddings & autoencoders', DEMO = 'Teaching demos';
+const LMV = 'Tiny LM variants';
+
+// The variants' presets, in menu order: [key, axis, short name, label, lr, note, lmVariant options].
+const LM_VARIANTS = [
+  ['tiny_lm_nope', 'Positions', 'no positions (NoPE)', 'Tiny LM: no positions (NoPE)', 0.2,
+    'No position vector: X = O W_E. Word order reaches the model only through the causal mask (position 1 sees one word, position 5 sees five). Compare its loss with the tiny language model.',
+    { pos: 'none' }],
+  ['tiny_lm_sin', 'Positions', 'sinusoidal P (fixed)', 'Tiny LM: sinusoidal positions', 0.2,
+    'P is fixed, not learned: sin and cos of the position at four frequencies, one per pair of columns. Flow shows P beside O W_E; its rows never change as you train.',
+    { pos: 'sin' }],
+  ['tiny_lm_rope', 'Positions', 'RoPE (rotary)', 'Tiny LM: RoPE (rotary positions)', 0.2,
+    'RoPE, no P: before the scores, each pair of columns of q and k turns by an angle that grows with the position, so q·k depends only on how far apart the two are. Flow shows the turned Q and K.',
+    { pos: 'rope' }],
+  ['tiny_lm_alibi', 'Positions', 'ALiBi (distance bias)', 'Tiny LM: ALiBi (distance bias)', 0.2,
+    'ALiBi, no P: each head adds a fixed penalty to its scores, its slope times the distance back (1/2 and 1/4 per position), so nearby words start out favoured. Flow adds the bias B to the scores.',
+    { pos: 'alibi' }],
+  ['tiny_lm_mqa', 'Attention', 'multi-query (1 K, V)', 'Tiny LM: multi-query attention', 0.2,
+    'Multi-query: both heads share one K and one V (W_K and W_V are 8 × 4, not 8 × 8); each head keeps its own Q. Generating then stores half the keys and values. Flow marks the shared K, V.',
+    { kv: 1 }],
+  ['tiny_lm_gqa', 'Attention', 'grouped-query (4 heads, 2 K, V)', 'Tiny LM: grouped-query attention (4 heads)', 0.2,
+    'Grouped-query: 4 heads of d_h = 2 in 2 groups, each group sharing one K and V: between multi-head (4 K, V heads) and multi-query (1). Flow marks which heads share.',
+    { heads: 4, kv: 2 }],
+  ['tiny_lm_window', 'Attention', 'sliding window 3', 'Tiny LM: sliding window (3)', 0.2,
+    'Sliding window 3: each position reads itself and the 2 before it. The last position no longer sees the subject, so after sat on the it has to guess between mat, rug and branch. Flow shows the band mask.',
+    { window: 3 }],
+  ['tiny_lm_linear', 'Attention', 'linear (no softmax)', 'Tiny LM: linear attention (no softmax)', 0.2,
+    'Linear attention, no softmax: the weights are φ(q)·φ(k) over their row sum (φ = elu + 1), so Z can be summed as a running d_h × d_h state. The weights come out flatter than softmax ones.',
+    { linear: true }],
+  ['tiny_lm_nomask', 'Attention', 'no mask (it cheats)', 'Tiny LM: no mask (it cheats)', 0.2,
+    'No causal mask: every position reads the whole sentence, including the next word it is trained to predict. The loss drops fast by copying; only the last position, with nothing to copy, has to learn.',
+    { causal: false }],
+  ['tiny_lm_prenorm', 'Norm', 'pre-norm LayerNorm', 'Tiny LM: pre-norm LayerNorm', 0.5,
+    'Pre-norm: LayerNorm each position before Q, K, V, before the FFN and before the logits (no gain or shift); the residual stream itself is never normalized. How GPT-2 and most LLMs stack.',
+    { norm: 'pre' }],
+  ['tiny_lm_postnorm', 'Norm', 'post-norm LayerNorm', 'Tiny LM: post-norm LayerNorm', 0.5,
+    'Post-norm, as in the first transformer: H = LN(X + Z W_O) and Y = LN(H + FFN), so the residual stream is renormalized after each branch: every row of H and Y has mean 0 and spread 1.',
+    { norm: 'post' }],
+  ['tiny_lm_rmsnorm', 'Norm', 'pre-norm RMSNorm', 'Tiny LM: pre-norm RMSNorm', 0.5,
+    'Pre-norm with RMSNorm (LLaMA): N = X / rms(X), with no mean taken out. Cheaper than LayerNorm and trains about as well: compare with the pre-norm LayerNorm variant.',
+    { norm: 'pre', normAct: 'rmsnorm' }],
+  ['tiny_lm_gelu', 'FFN', 'GELU FFN', 'Tiny LM: GELU FFN', 0.2,
+    'The FFN uses GELU instead of ReLU: a smooth curve, slightly negative below 0, so no unit is ever fully off and every one gets a gradient. Flow shows F with small negative entries.',
+    { ffn: 'gelu' }],
+  ['tiny_lm_swiglu', 'FFN', 'SwiGLU FFN', 'Tiny LM: SwiGLU FFN', 0.2,
+    'SwiGLU FFN (LLaMA): two matrices up, G = H W₁ and U = H W₃, then F = silu(G) ⊙ U, so one half gates the other. 50% more FFN weights than ReLU at the same width.',
+    { ffn: 'swiglu' }],
+  ['tiny_lm_tied', 'Other', 'tied embeddings', 'Tiny LM: tied embeddings', 0.2,
+    'Tied embeddings: the logits reuse W_E, transposed (ℓ = Y W_Eᵀ + b_U), so a word\'s score is y times its embedding. 184 fewer weights, and training moves W_E from both ends.',
+    { tied: true }],
+  ['tiny_lm_2layer', 'Other', '2 layers (pre-norm)', 'Tiny LM: 2 layers (pre-norm)', 0.5,
+    'Two pre-norm blocks: the second block\'s heads read what the first wrote into the residual stream. Without the norms two blocks blow up at this rate. Twice the weights and the stages.',
+    { blocks: 2, norm: 'pre' }],
+  ['tiny_lm_window2', 'Other', '2 layers, window 3 (pre-norm)', 'Tiny LM: 2 layers, sliding window (pre-norm)', 0.5,
+    'Two pre-norm blocks with window 3: one block can\'t bring the subject to the last position, two can, as the verb and the preposition read it first. Reach grows with depth.',
+    { blocks: 2, window: 3, norm: 'pre' }],
+];
+function lmVariants() {
+  return Object.fromEntries(LM_VARIANTS.map(([key, axis, short, label, lr, note, o]) => [key, preset({
+    group: LMV, label, dataset: 'nl_lm', lr, noise: 0, note, family: 'tiny_lm', axis, short, title: label,
+  }, seed => lmVariant(seed, { pos: 'learned', ...o, title: label }))]));
+}
 
 // Menu order: by group, then as listed.
 export const PRESETS = {
@@ -2642,7 +3070,13 @@ export const PRESETS = {
   tiny_lm: preset({
     group: ATT, label: 'Tiny language model: next word (train it)', dataset: 'nl_lm', lr: 0.2, noise: 0,
     note: 'Five words in, a softmax over 23 words out at each position: embedding + position, 2 causal heads, W_O, a ReLU FFN. Open Flow (G) and train: after the cat sat on the, mat wins.',
+    family: 'tiny_lm', axis: 'Baseline', short: 'learned positions, causal, ReLU', title: 'Tiny language model',
   }, seed => lmNet(seed)),
+
+  // ---------------------------------------------------------------- the tiny language model's variants
+  // One change each from tiny_lm, on the same data (docs/NN_FLOW.md, Variants); the Flow view's picker
+  // switches between them.
+  ...lmVariants(),
 
   // ---------------------------------------------------------------- embeddings and autoencoders
   autoencoder: preset({

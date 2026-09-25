@@ -35,9 +35,10 @@ Modules talk through the store, `ctx` and the handles listed below.
 ```js
 net = {
   v: 1,
-  layers: [{ id, name, act, tokens?, groups?, kind?, heads?, causal?, scale? }],   // array order = layer index.
-                                 //   layers[0] = inputs, last = outputs. Optional fields: docs/NN_ATTENTION.md
-  nodes:  [{ id, layer, x, y, label, bias, value, target, params, tie? }],
+  layers: [{ id, name, act, tokens?, groups?, kind?, heads?, causal?, scale?, window?, pos?, linear? }],   // array order =
+                                 //   layer index. layers[0] = inputs, last = outputs. Optional fields: docs/NN_ATTENTION.md,
+                                 //   window / pos / linear: docs/NN_FLOW.md, Variants
+  nodes:  [{ id, layer, x, y, label, bias, value, target, params, tie?, fixed? }],
   edges:  [{ id, from, to, w, tie?, fixed? }],
   meta:   { title, loss: 'mse' | 'xent', nextId, train: {...} },   // meta.train: see below
 }
@@ -49,7 +50,10 @@ The optional fields (all absent in older nets, which load unchanged):
   `k % d`. `layer.kind` is `'dense'` (the default) or `'attention'`, with `heads`, `causal` and `scale`.
 - `edge.tie` (string or null): edges with the same tie share one weight. `edge.fixed` (bool): never
   trained, randomized or re-weighted. `node.tie` (string or null): nodes with the same tie share one
-  bias (not on the input layer or an attention layer).
+  bias (not on the input layer or an attention layer). `node.fixed` (bool): the node's bias is never
+  trained, randomized or set (its gradient is still reported); fixed beats tie, as on edges.
+- An attention layer's `window` (int >= 1: query i reads keys j with |i - j| < window), `pos`
+  (`'rope'` | `'alibi'`) and `linear` (true: no softmax): docs/NN_FLOW.md, Variants.
 - `meta.vocab` (string[]): names the one-hot slots of a token input and a softmax output of that
   width; `meta.flow` (true): the net opens in the Flow view when it loads (docs/NN_FLOW.md).
   `normalize` keeps them, as any unknown meta field.
@@ -82,8 +86,13 @@ A valid net always has at least 2 layers. `emptyNet()` is an empty Input and an 
 - Skip edges (l-2 to l and so on) are allowed. They add an extra term `W^{(l,k)} a^{(k)}`.
 
 **Activations**
-- `act` is one of `identity relu leaky sigmoid tanh softmax`.
-- `softmax` acts on the whole layer, or per token (and group) on a token layer.
+- `act` is one of `identity relu leaky sigmoid tanh softmax`, or one of the transformer variants'
+  `gelu layernorm rmsnorm swiglu` (docs/NN_FLOW.md, Variants).
+- `softmax` acts on the whole layer, or per token (and group) on a token layer; so do `layernorm`
+  ((z - mean) / sqrt(variance + ε)) and `rmsnorm` (z / sqrt(mean(z²) + ε)), ε = `NORM_EPS` = 1e-5, with no
+  learned gain or shift. `swiglu` gates the layer's second half by its first: a = [silu(g) ⊙ u, u]
+  (with groups G, U, the groups). Softmax and these three are `vector: true` in `ACTS` (layer-wide);
+  `gelu` (the tanh form) is scalar.
 - An attention layer's `act` is always `identity`.
 
 ## `meta.train` (train.js)
@@ -167,7 +176,11 @@ PRESETS         // { key: { label, group, note, dataset: DATASETS key | null, lr
                 //     Y = H + FFN; seq_addmax, lr 0.3), tiny_lm (the tiny language model: 5 one-hot words -> X = O W_E + P
                 //     -> Q, K, V -> 2 causal heads -> H = X + Z W_O -> ReLU FFN d -> 4d (8 -> 32) -> Y = H + F W_2 -> softmax
                 //     over 23 words per position, xent; nl_lm, lr 0.2, noise 0, 300 points; its inputs are "the cat sat on
-                //     the"; sets meta.vocab and meta.flow; 670 nodes, the one preset over the menu's 40, docs/NN_FLOW.md).
+                //     the"; sets meta.vocab and meta.flow; 670 nodes, over the menu's 40 like its variants, docs/NN_FLOW.md).
+                //   Tiny LM variants: tiny_lm_nope, _sin, _rope, _alibi, _mqa, _gqa, _window, _linear, _nomask, _prenorm,
+                //     _postnorm, _rmsnorm, _gelu, _swiglu, _tied, _2layer, _window2: tiny_lm with one change each, on nl_lm
+                //     (up to 1270 nodes). They and tiny_lm have family: 'tiny_lm', axis, short and title (the meta.title
+                //     their nets carry), which the Flow view's variant picker reads (docs/NN_FLOW.md, Variants)
                 //     The 3-token presets
                 //     lay X and Q, K, V out as tokens x d grids (a row per token, a column per feature, groups stacked,
                 //     X between the Q and K blocks), so they fit a 1600 x 900 window at 0.63 to 0.73 zoom; later layers are columns
@@ -185,8 +198,9 @@ addLayer(net, at, { name, act, size = 2, dense = false, seed }) -> id   // nodes
                                                                         //   dense: also wire it to both neighbours
 removeLayer(net, id, { bridge, seed }) -> bool  // refuses (false) at 2 layers. bridge: wire the two
                                                 //   neighbours densely if nothing joins them (the shell's Delete uses it)
-setLayer(net, id, { name, act, causal, heads, scale }) -> bool   // an attention layer's act stays identity; heads
-                                                //   only if it divides d; scale: a number, or null for 1/sqrt(d_k / heads)
+setLayer(net, id, { name, act, causal, heads, scale, window, pos, linear }) -> bool   // an attention layer's act stays
+                                                //   identity; heads only if it divides d; scale: a number, or null for
+                                                //   1/sqrt(d_k / heads); window, pos: null removes them, linear: false
 addNode(net, layer, { x, y, label, bias, value, target, params, index, connect, seed }) -> id | null
                 // index = order within the layer; connect: wire it to every node of both neighbour layers
                 //   (seeded Xavier). A new output gets target 0 when every other output has a target
@@ -200,7 +214,7 @@ connect(net, from, to, w?) -> id | null         // reuses an existing edge, swap
 disconnect(net, edgeId), setWeight(net, edgeId, w) -> bool   // setWeight: a tied edge sets its group; false on a fixed edge
 connectDense(net, fromLayer, toLayer, { seed, scheme = 'xavier', w }) -> edgeId[]   // existing edges keep their w
 randomize(net, { seed, scheme: 'xavier' | 'he' | 'small', biases: 'zero' | 'small' | 'keep', init })   // biases default 'zero'.
-                                                //   Fixed edges kept, one draw per tie group, attention biases stay 0.
+                                                //   Fixed edges and fixed biases kept, one draw per tie group, attention biases stay 0.
                                                 //   init: { <name>: scheme } for the edges tied as '<name>:<i>,<j>', a scheme of
                                                 //   INIT_SCHEMES = ['xavier', 'he', 'small', 'identity', 'zero'] ('identity': 1 where
                                                 //   i = j, else 0); other names and unknown schemes use scheme
@@ -213,12 +227,18 @@ tokenPos(net, nodeId) -> { l, index, g, group, token, feature } | null   // 0-ba
 reshape(net, layer, vec) -> { [group | 'X']: number[][] }        // tokens x d matrices of any layer vector
                                                                  //   (a, z, b, dA...); missing entries read 0
 attnSpec(net, layer) -> { l, tokens, d, heads, dh, scale, causal } | null   // a working attention layer, defaults
-                                                                 //   filled (d = d_k = d_v, dh = d / heads)
+                                                                 //   filled (d = d_k = d_v, dh = d / heads); window, pos, linear too when set
+attnVisible(spec, i, j) -> bool                                  // query i may read key j: the causal mask and the window
+attend(x, spec) -> { heads, tokens, dk, scale, causal, ..., out } // one attention layer from its Q, K, V activations x,
+                                                                 //   as forward computes it (fwd.attn[l]'s report, and out)
+ropeFreq(p, dh), ROPE_BASE = 10000, alibiSlope(h), NORM_EPS     // the variants' constants (docs/NN_FLOW.md, Variants)
 tiedMatrices(net, l) -> [{ name, W, ties, k, fromGroup, toGroup, edges, tokenwise }]   // [] unless every non-fixed
                 // edge into l is tied as '<name>:<i>,<j>'. W is in the X W convention (rows = input feature): Q = X W_Q,
                 // an edge from feature i to feature j has weight W[i-1][j-1], the per-token receiving-row matrix is Wᵀ.
                 // ties[i][j] = tie id | null; k = source layer (null if mixed); tokenwise: the layer matrix is exactly
-                // I_tokens ⊗ Wᵀ. Fixed (residual) edges are left out: find them by edge.fixed
+                // I_tokens ⊗ Wᵀ. Fixed (residual) edges are left out: find them by edge.fixed. A shared matrix whose
+                // every edge here reads entry (i, j) the other way round (tied embeddings: the logits' W_E) comes back
+                // in this layer's X W convention with transposed: true (and tokenwise)
 
 // maths
 matrices(net) -> [ per layer l >= 1: { l, id, kind: 'dense', act, rows: nodeId[], b: number[],
@@ -228,7 +248,9 @@ matrices(net) -> [ per layer l >= 1: { l, id, kind: 'dense', act, rows: nodeId[]
                  //   rows, b: all 0, terms: [] } (its z is not b + Σ W a: read fwd.attn)
 forward(net, x?) -> { z: (number[]|null)[], a: number[][], node: { [id]: { z, a } }, attn }   // x defaults to layer-0 values
                  // attn[l] (null except on attention layers) = { heads: [{ Q, K, V, Z (tokens x dh), S, A (tokens x tokens) }],
-                 //   tokens, dk: dh, scale, causal }. S is the scaled score QKᵀ·scale with masked cells -Infinity; A = softmax(S)
+                 //   tokens, dk: dh, scale, causal }. S is the scaled score QKᵀ·scale with masked cells -Infinity; A = softmax(S).
+                 //   The variants add window / pos / linear, and per head Qr, Kr (RoPE), Qf, Kf (linear), B (ALiBi):
+                 //   docs/NN_FLOW.md, Variants
 backward(net, fwd, y, loss) -> { loss, note, dA: number[][], dZ: number[][], dW, db: number[][],
                                  node: { [id]: { da, dz } }, edge: { [id]: dw }, attn, tie }
                  // attn[l] = { heads: [{ dZ, dQ, dK, dV (tokens x dh), dA, dS (tokens x tokens) }] }: dV = Aᵀ dZ, dA = dZ Vᵀ,
@@ -238,7 +260,7 @@ backward(net, fwd, y, loss) -> { loss, note, dA: number[][], dZ: number[][], dW,
 trainStep(net, { X, Y }, { lr = 0.1, loss }) -> mean loss   // one step over the given batch (gradients averaged);
                                                             //   the loss is from before the update. Non-finite: no update.
                                                             //   A tie group steps by its summed gradient (members stay
-                                                            //   equal); fixed edges and attention biases never move
+                                                            //   equal); fixed edges, fixed biases and attention biases never move
 predict(net, X, { layer }) -> number[][]       // outputs; layer = index | id (that layer's a) | 'all' (every layer per sample)
 collapse(net) -> { W, b, rows, cols } | null   // the affine map y = W x + b when every non-input layer is identity
                                                //   (null with an attention layer)

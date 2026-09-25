@@ -106,9 +106,10 @@ right one is `subspaces([[1,2,3],[2,4,6]])`.
 An editable network for teaching. The canvas on the left and the matrix panel on the right show
 the same numbers: each layer is written out as `z = W a + b`, and hovering a weight anywhere
 lights it everywhere. Click a neuron, edge or layer for a card with its arithmetic and its
-gradients. The Train panel fits the net to a toy dataset while you watch. The 46 presets run
+gradients. The Train panel fits the net to a toy dataset while you watch. The 63 presets run
 from logic gates and MLPs to convolutions, an unrolled RNN and attention, including attention
-trained on three-word sentences and a tiny language model that learns to predict the next word.
+trained on three-word sentences and a tiny language model that learns to predict the next word,
+with 17 variants of it that each change one thing (positions, attention, norms, the FFN).
 
 ![Training a 2-6-4-1 ReLU network on the circles dataset: the decision region forms, the edges change colour and the matrices update](docs/media/net-train.gif)
 
@@ -208,6 +209,20 @@ d → 4d → d FFN and a softmax over 23 words at each position, trained with cr
 sentences like "the cat sat on the mat", "the dog ran to the park" and "the bird flew over the
 tree", where the last word depends on the subject three words back. Above, after 1000 steps: after
 "the cat sat on the" it gives mat 0.999, while the first three words stay guesses.
+
+**Variants.** The picker at the left of the Flow bar (and the **Tiny LM variants** section of New
+net) swaps in a variant of the tiny language model on the same data, each with one change, and the
+flow draws what changed: no positions (NoPE), a fixed sinusoidal P, RoPE (a stage that turns q and
+k by their positions), ALiBi (a bias tile B added to the scores), multi-query and grouped-query
+attention (the shared K and V are marked), a sliding window (a band mask), linear attention (a
+feature map φ and weights with no softmax), no mask at all (it cheats: every position copies its
+next word), pre-norm LayerNorm or RMSNorm and post-norm LayerNorm (their own stages, or the sums
+normalized), GELU and SwiGLU FFNs (a gate and an up matrix, then silu(G) ⊙ U), tied embeddings
+(the logits read W_Eᵀ) and two blocks, with and without a window. Trained side by side they show,
+for example, that this task needs no position signal beyond the causal mask, that a window of 3
+leaves the last position blind to the subject (cat, dog and bird get the same guess after "sat on
+the") while two such blocks recover it, and that without the mask the loss falls to near 0 by
+copying. Details: [docs/NN_FLOW.md](docs/NN_FLOW.md), Variants.
 
 #### 3D plots
 
@@ -965,7 +980,7 @@ what its caption says, and the end puts all three back as they were.
 
 <a name="presets"></a>
 <details>
-<summary>Presets (46, in 8 groups)</summary>
+<summary>Presets (63, in 9 groups)</summary>
 
 **Basics**
 
@@ -1037,6 +1052,28 @@ what its caption says, and the end puts all three back as they were.
 | Two heads: max and min (`multihead`) | 3×2 → 3×2 Q, K, V → 3×2 attention, 2 heads | Max and min of x₁ (3 tokens × 2) | heads = 2 splits Q, K and V by column: head 1 uses column 1 of each, head 2 column 2, and each head has its own A. Train: one head learns to find the largest x₁, the other the smallest. |
 | Transformer block (2 tokens) (`transformer`) | 2×2 → 2×2 Q, K, V → 2×2 attention → 2×2 → 2×4 ReLU → 2×2 | ReLU(own + max token) (2 tokens × 2) | One block, all weights tied: Z = softmax(QKᵀ/√2)V, H = X + ZW_O, Y = H + ReLU(HW₁)W₂, the + X and + H being fixed residual edges. No LayerNorm: with d = 2 it sends every token to (±1, ∓1). |
 | Tiny language model: next word (train it) (`tiny_lm`) | 5×23 → 5×8 → 5×8 Q, K, V → 5×8 causal attention, 2 heads → 5×8 → 5×32 ReLU → 5×8 → 5×23 Softmax | Next word: the cat sat on the mat (5 positions × 23 words) | Five words in, a softmax over 23 words out at each position: embedding + position, 2 causal heads, W_O, a ReLU FFN. Open Flow (G) and train: after the cat sat on the, mat wins. |
+
+**Tiny LM variants**
+
+| Preset | Net | Dataset | What to notice |
+|---|---|---|---|
+| Tiny LM: no positions (NoPE) (`tiny_lm_nope`) | 5×23 → 5×8 → 5×8 Q, K, V → 5×8 causal attention, 2 heads → 5×8 → 5×32 ReLU → 5×8 → 5×23 Softmax | Next word: the cat sat on the mat (5 positions × 23 words) | No position vector: X = O W_E. Word order reaches the model only through the causal mask (position 1 sees one word, position 5 sees five). Compare its loss with the tiny language model. |
+| Tiny LM: sinusoidal positions (`tiny_lm_sin`) | 5×23 → 5×8 → 5×8 Q, K, V → 5×8 causal attention, 2 heads → 5×8 → 5×32 ReLU → 5×8 → 5×23 Softmax | Next word: the cat sat on the mat (5 positions × 23 words) | P is fixed, not learned: sin and cos of the position at four frequencies, one per pair of columns. Flow shows P beside O W_E; its rows never change as you train. |
+| Tiny LM: RoPE (rotary positions) (`tiny_lm_rope`) | 5×23 → 5×8 → 5×8 Q, K, V → 5×8 causal attention, 2 heads, RoPE → 5×8 → 5×32 ReLU → 5×8 → 5×23 Softmax | Next word: the cat sat on the mat (5 positions × 23 words) | RoPE, no P: before the scores, each pair of columns of q and k turns by an angle that grows with the position, so q·k depends only on how far apart the two are. Flow shows the turned Q and K. |
+| Tiny LM: ALiBi (distance bias) (`tiny_lm_alibi`) | 5×23 → 5×8 → 5×8 Q, K, V → 5×8 causal attention, 2 heads, ALiBi → 5×8 → 5×32 ReLU → 5×8 → 5×23 Softmax | Next word: the cat sat on the mat (5 positions × 23 words) | ALiBi, no P: each head adds a fixed penalty to its scores, its slope times the distance back (1/2 and 1/4 per position), so nearby words start out favoured. Flow adds the bias B to the scores. |
+| Tiny LM: multi-query attention (`tiny_lm_mqa`) | 5×23 → 5×8 → 5×8 Q, K, V → 5×8 causal attention, 2 heads → 5×8 → 5×32 ReLU → 5×8 → 5×23 Softmax | Next word: the cat sat on the mat (5 positions × 23 words) | Multi-query: both heads share one K and one V (W_K and W_V are 8 × 4, not 8 × 8); each head keeps its own Q. Generating then stores half the keys and values. Flow marks the shared K, V. |
+| Tiny LM: grouped-query attention (4 heads) (`tiny_lm_gqa`) | 5×23 → 5×8 → 5×8 Q, K, V → 5×8 causal attention, 4 heads → 5×8 → 5×32 ReLU → 5×8 → 5×23 Softmax | Next word: the cat sat on the mat (5 positions × 23 words) | Grouped-query: 4 heads of d_h = 2 in 2 groups, each group sharing one K and V: between multi-head (4 K, V heads) and multi-query (1). Flow marks which heads share. |
+| Tiny LM: sliding window (3) (`tiny_lm_window`) | 5×23 → 5×8 → 5×8 Q, K, V → 5×8 causal attention, 2 heads, window 3 → 5×8 → 5×32 ReLU → 5×8 → 5×23 Softmax | Next word: the cat sat on the mat (5 positions × 23 words) | Sliding window 3: each position reads itself and the 2 before it. The last position no longer sees the subject, so after sat on the it has to guess between mat, rug and branch. Flow shows the band mask. |
+| Tiny LM: linear attention (no softmax) (`tiny_lm_linear`) | 5×23 → 5×8 → 5×8 Q, K, V → 5×8 linear causal attention, 2 heads → 5×8 → 5×32 ReLU → 5×8 → 5×23 Softmax | Next word: the cat sat on the mat (5 positions × 23 words) | Linear attention, no softmax: the weights are φ(q)·φ(k) over their row sum (φ = elu + 1), so Z can be summed as a running d_h × d_h state. The weights come out flatter than softmax ones. |
+| Tiny LM: no mask (it cheats) (`tiny_lm_nomask`) | 5×23 → 5×8 → 5×8 Q, K, V → 5×8 attention, 2 heads → 5×8 → 5×32 ReLU → 5×8 → 5×23 Softmax | Next word: the cat sat on the mat (5 positions × 23 words) | No causal mask: every position reads the whole sentence, including the next word it is trained to predict. The loss drops fast by copying; only the last position, with nothing to copy, has to learn. |
+| Tiny LM: pre-norm LayerNorm (`tiny_lm_prenorm`) | 5×23 → 5×8 → 5×8 LayerNorm → 5×8 Q, K, V → 5×8 causal attention, 2 heads → 5×8 → 5×8 LayerNorm → 5×32 ReLU → 5×8 → 5×8 LayerNorm → 5×23 Softmax | Next word: the cat sat on the mat (5 positions × 23 words) | Pre-norm: LayerNorm each position before Q, K, V, before the FFN and before the logits (no gain or shift); the residual stream itself is never normalized. How GPT-2 and most LLMs stack. |
+| Tiny LM: post-norm LayerNorm (`tiny_lm_postnorm`) | 5×23 → 5×8 → 5×8 Q, K, V → 5×8 causal attention, 2 heads → 5×8 LayerNorm → 5×32 ReLU → 5×8 LayerNorm → 5×23 Softmax | Next word: the cat sat on the mat (5 positions × 23 words) | Post-norm, as in the first transformer: H = LN(X + Z W_O) and Y = LN(H + FFN), so the residual stream is renormalized after each branch: every row of H and Y has mean 0 and spread 1. |
+| Tiny LM: pre-norm RMSNorm (`tiny_lm_rmsnorm`) | 5×23 → 5×8 → 5×8 RMSNorm → 5×8 Q, K, V → 5×8 causal attention, 2 heads → 5×8 → 5×8 RMSNorm → 5×32 ReLU → 5×8 → 5×8 RMSNorm → 5×23 Softmax | Next word: the cat sat on the mat (5 positions × 23 words) | Pre-norm with RMSNorm (LLaMA): N = X / rms(X), with no mean taken out. Cheaper than LayerNorm and trains about as well: compare with the pre-norm LayerNorm variant. |
+| Tiny LM: GELU FFN (`tiny_lm_gelu`) | 5×23 → 5×8 → 5×8 Q, K, V → 5×8 causal attention, 2 heads → 5×8 → 5×32 GELU → 5×8 → 5×23 Softmax | Next word: the cat sat on the mat (5 positions × 23 words) | The FFN uses GELU instead of ReLU: a smooth curve, slightly negative below 0, so no unit is ever fully off and every one gets a gradient. Flow shows F with small negative entries. |
+| Tiny LM: SwiGLU FFN (`tiny_lm_swiglu`) | 5×23 → 5×8 → 5×8 Q, K, V → 5×8 causal attention, 2 heads → 5×8 → 5×32 G, U SwiGLU → 5×8 → 5×23 Softmax | Next word: the cat sat on the mat (5 positions × 23 words) | SwiGLU FFN (LLaMA): two matrices up, G = H W₁ and U = H W₃, then F = silu(G) ⊙ U, so one half gates the other. 50% more FFN weights than ReLU at the same width. |
+| Tiny LM: tied embeddings (`tiny_lm_tied`) | 5×23 → 5×8 → 5×8 Q, K, V → 5×8 causal attention, 2 heads → 5×8 → 5×32 ReLU → 5×8 → 5×23 Softmax | Next word: the cat sat on the mat (5 positions × 23 words) | Tied embeddings: the logits reuse W_E, transposed (ℓ = Y W_Eᵀ + b_U), so a word's score is y times its embedding. 184 fewer weights, and training moves W_E from both ends. |
+| Tiny LM: 2 layers (pre-norm) (`tiny_lm_2layer`) | 5×23 → 5×8 → 5×8 LayerNorm → 5×8 Q, K, V → 5×8 causal attention, 2 heads → 5×8 → 5×8 LayerNorm → 5×32 ReLU → 5×8 → 5×8 LayerNorm → 5×8 Q, K, V → 5×8 causal attention, 2 heads → 5×8 → 5×8 LayerNorm → 5×32 ReLU → 5×8 → 5×8 LayerNorm → 5×23 Softmax | Next word: the cat sat on the mat (5 positions × 23 words) | Two pre-norm blocks: the second block's heads read what the first wrote into the residual stream. Without the norms two blocks blow up at this rate. Twice the weights and the stages. |
+| Tiny LM: 2 layers, sliding window (pre-norm) (`tiny_lm_window2`) | 5×23 → 5×8 → 5×8 LayerNorm → 5×8 Q, K, V → 5×8 causal attention, 2 heads, window 3 → 5×8 → 5×8 LayerNorm → 5×32 ReLU → 5×8 → 5×8 LayerNorm → 5×8 Q, K, V → 5×8 causal attention, 2 heads, window 3 → 5×8 → 5×8 LayerNorm → 5×32 ReLU → 5×8 → 5×8 LayerNorm → 5×23 Softmax | Next word: the cat sat on the mat (5 positions × 23 words) | Two pre-norm blocks with window 3: one block can't bring the subject to the last position, two can, as the verb and the preposition read it first. Reach grows with depth. |
 
 **Embeddings & autoencoders**
 

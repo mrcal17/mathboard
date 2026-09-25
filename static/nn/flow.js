@@ -56,38 +56,13 @@ export function cleanFlow(v) {
 }
 
 // Every head of an attention layer (g = model.attnSpec) from its Q, K, V layer's activations x (the Q
-// block, then K, then V, each token-major), computed as model.js does. out is the heads' Z side by
-// side, token-major, with the columns of the heads in `off` left at 0 (knocked out).
+// block, then K, then V, each token-major), computed by model.js itself (model.attend: the variants'
+// RoPE, ALiBi, window and linear attention included). out is the heads' Z side by side, token-major,
+// with the columns of the heads in `off` left at 0 (knocked out).
 export function attendHeads(x, g, off = new Set()) {
-  const { tokens: n, d, heads: H, dh, scale, causal } = g, ko = n * d, vo = 2 * n * d;
-  const out = new Array(n * d).fill(0), heads = [];
-  for (let h = 0; h < H; h++) {
-    const c = h * dh;
-    const Q = grid(n, dh, (i, f) => x[i * d + c + f]);
-    const K = grid(n, dh, (i, f) => x[ko + i * d + c + f]);
-    const V = grid(n, dh, (i, f) => x[vo + i * d + c + f]);
-    const S = grid(n, n, (i, j) => {
-      if (causal && j > i) return -Infinity;
-      let s = 0;
-      for (let f = 0; f < dh; f++) s += Q[i][f] * K[j][f];
-      return s * scale;
-    });
-    const A = S.map(row => {
-      let m = -Infinity;
-      for (const s of row) if (s > m) m = s;
-      const e = row.map(s => Math.exp(s - m));
-      const t = e.reduce((a, b) => a + b, 0);
-      return e.map(v => v / t);
-    });
-    const Z = grid(n, dh, (i, f) => {
-      let s = 0;
-      for (let j = 0; j < n; j++) s += A[i][j] * V[j][f];
-      return s;
-    });
-    heads.push({ Q, K, V, S, A, Z });
-    if (!off.has(h)) for (let i = 0; i < n; i++) for (let f = 0; f < dh; f++) out[i * d + c + f] = Z[i][f];
-  }
-  return { heads, out };
+  const { tokens: n, d, heads: H, dh } = g, r = M.attend(x, g), out = r.out;
+  for (let h = 0; h < H; h++) if (off.has(h)) for (let i = 0; i < n; i++) for (let f = 0; f < dh; f++) out[i * d + h * dh + f] = 0;
+  return { heads: r.heads, out };
 }
 
 // softmax (and any activation) runs per token on a token layer, as in model.js's plan().
@@ -110,6 +85,7 @@ export function propagate(net, a0, from = 1, { off = [] } = {}) {
       a[l] = r.out;
       z[l] = r.out.slice();
       attn[l] = { heads: r.heads, tokens: g.tokens, dk: g.dh, scale: g.scale, causal: g.causal };
+      for (const k of ['window', 'pos', 'linear']) if (g[k]) attn[l][k] = g[k];
       continue;
     }
     const m = mats[l - 1], zl = m.b.slice();
@@ -147,8 +123,8 @@ export function ablate(net, fwd, off = []) {
 // label letter (h_{1,2} -> H, \hat y_{1} -> Ŷ), else a^{(l)}.
 function symOf(net, l) {
   const name = String(net.layers[l]?.name || '');
-  const m = /^\s*([A-Za-z])\s*=/.exec(name);
-  if (m) return m[1].toUpperCase();
+  const m = /^\s*([A-Za-z])([₀-₉]*)\s*=/.exec(name);   // H₂ = ... (a block's) -> H_{2}
+  if (m) return m[1].toUpperCase() + (m[2] ? `_{${[...m[2]].map(c => c.charCodeAt(0) - 0x2080).join('')}}` : '');
   const lab = String(M.nodesIn(net, l)[0]?.label || '');
   const h = /^\s*\\hat\s*\{?\s*([a-zA-Z])\s*\}?\s*_/.exec(lab);
   if (h) return `\\hat ${h[1].toUpperCase()}`;
@@ -156,6 +132,8 @@ function symOf(net, l) {
   return b ? b[1].toUpperCase() : `a^{(${l})}`;
 }
 const tieBase = tie => (typeof tie === 'string' ? tie.replace(/:[\d,]+$/, '') : null);
+// a cell's name in a tip: H<sub>2,3</sub>, or (N<sub>1</sub>)<sub>2,3</sub> for a symbol that has its own subscript (i, j 0-based)
+const cellName = (sym, i, j) => `${/_/.test(sym) ? `(${texHtml(sym)})` : texHtml(sym)}<sub>${i + 1},${j + 1}</sub>`;
 
 // KaTeX-ish source to plain HTML for tips and captions: W_{out} -> W<sub>out</sub>, K^{\top} -> Kᵀ.
 export function texHtml(s) {
@@ -167,6 +145,29 @@ export function texHtml(s) {
   t = t.replace(/_\{([^}]*)\}/g, '<sub>$1</sub>').replace(/_([A-Za-z0-9])/g, '<sub>$1</sub>')
     .replace(/\^\{([^}]*)\}/g, '<sup>$1</sup>').replace(/\^([A-Za-z0-9])/g, '<sup>$1</sup>');
   return t.replace(/[{}]/g, '');
+}
+
+// The tiny language model's family (model.PRESETS with family 'tiny_lm'): the preset a net was built
+// from, matched by its title (as train.js matches presets), as { key, axis, short, note }, else null.
+let familyTitles = null;
+export function variantOf(net) {
+  if (!familyTitles) {
+    familyTitles = new Map();
+    for (const [key, p] of Object.entries(M.PRESETS)) if (p.family === 'tiny_lm') familyTitles.set(p.title, key);
+  }
+  const key = familyTitles.get(net?.meta?.title);
+  const p = key && M.PRESETS[key];
+  return p ? { key, axis: p.axis, short: p.short, note: p.note } : null;
+}
+// The family's presets for the variant picker, by axis in menu order: [[axis, [{ key, short }]]].
+export function variantMenu() {
+  const by = new Map();
+  for (const [key, p] of Object.entries(M.PRESETS)) {
+    if (p.family !== 'tiny_lm') continue;
+    if (!by.has(p.axis)) by.set(p.axis, []);
+    by.get(p.axis).push({ key, short: p.short });
+  }
+  return [...by];
 }
 
 const fwdFits = (net, fwd) => !!fwd && Array.isArray(fwd.a) && fwd.a.length === net.layers.length
@@ -196,7 +197,8 @@ export function buildFlow(net, { fwd = null, off = [], every = false } = {}) {
   const L = net?.layers?.length || 0;
   const F = {
     stages: [], tiles: {}, nodeCell: {}, words: [], labels: [], numbered: false, next: null, lm: false, every: !!every,
-    residual: [], ffn: null, dims: null, dimsText: '', attention: false, why: null, max: { act: 1 }, heads: 1, T: 1,
+    residual: [], ffn: null, dims: null, dimsText: '', attention: false, why: null, max: { act: 1, bias: 1 }, heads: 1, T: 1,
+    norms: [], variant: variantOf(net),
   };
   if (L < 2 || !net.nodes?.length) { F.why = 'empty'; return F; }
   const base = fwdFits(net, fwd) ? fwd : M.forward(net);
@@ -214,6 +216,17 @@ export function buildFlow(net, { fwd = null, off = [], every = false } = {}) {
   V.a.forEach(r => r?.forEach(v => { if (isNum(v)) mx = Math.max(mx, Math.abs(v)); }));
   V.z.forEach(r => r?.forEach(v => { if (isNum(v)) mx = Math.max(mx, Math.abs(v)); }));
   F.max.act = mx || 1;
+  // ALiBi's biases have their own colour scale (they reach -slope · (n - 1))
+  let mb = 0;
+  V.attn.forEach(r => r?.heads?.forEach(h => h.B?.forEach(row => row.forEach(v => { mb = Math.max(mb, Math.abs(v)); }))));
+  F.max.bias = mb || 1;
+  // how position reaches the model when X has no position vector, and whether every attention layer is causal
+  const causalAll = att.filter(Boolean).every(g => g.causal);
+  const pe = att.find(g => g?.pos)?.pos;
+  const posHow = pe === 'rope' ? 'RoPE brings position in at the attention layer, turning q and k by their positions.'
+    : pe === 'alibi' ? 'ALiBi brings position in at the attention layer, as a penalty on the scores of distant words.'
+      : causalAll ? `the order reaches the model only through the causal mask (position 1 sees one word, position ${T} sees all ${T}), so it has to tell positions apart by what they can see.`
+        : 'with no mask either, nothing tells the model the order of the words.';
 
   // ---- positions: a one-hot input over meta.vocab names its words
   const voc = Array.isArray(net.meta?.vocab) && net.meta.vocab.length ? net.meta.vocab.map(w => String(w)) : null;
@@ -293,7 +306,7 @@ export function buildFlow(net, { fwd = null, off = [], every = false } = {}) {
       tex: o.tex || (groups ? groups[gi] : symOf(net, l)),
       node: (i, j) => ns[l][off0 + i * d + j]?.id ?? null,
       src: (i, j) => nodeSrc(ns[l][off0 + i * d + j]?.id),
-      tip: (i, j) => nodeTip(ns[l][off0 + i * d + j]?.id, `${texHtml(t.tex)}<sub>${i + 1},${j + 1}</sub>`),
+      tip: (i, j) => nodeTip(ns[l][off0 + i * d + j]?.id, cellName(t.tex, i, j)),
       ...o,
     });
     for (let i = 0; i < tokens; i++) for (let j = 0; j < d; j++) {
@@ -336,14 +349,24 @@ export function buildFlow(net, { fwd = null, off = [], every = false } = {}) {
   function qkvStage(l) {
     const g = att[l + 1], H = g.heads, dh = g.dh, d = g.d, n = g.tokens, heads = V.attn[l + 1]?.heads || [];
     const tm = M.tiedMatrices(net, l), src = tm.length && tm[0].k !== null ? symOf(net, tm[0].k) : 'X';
+    // Heads that share their K and V (multi-query, grouped-query): every column of theirs is the same
+    // shared weights and bias (the same tie ids), so their K (V) are one matrix. rep[G][h] = the first
+    // head with head h's K (V).
+    const sig = (G, h) => range(dh).map(f => {
+      const nd = ns[l][QKV.indexOf(G) * n * d + h * dh + f];
+      return [nd?.tie || nd?.id, ...(inEdges.get(nd?.id) || []).map(e => e.tie || e.id).sort()].join('|');
+    }).join('/');
+    const rep = Object.fromEntries(['K', 'V'].map(G => { const s = range(H).map(h => sig(G, h)); return [G, s.map(x => s.indexOf(x))]; }));
+    const shared = H > 1 && ['K', 'V'].some(G => rep[G].some((r, h) => r !== h));
     const rows = [];
     for (let h = 0; h < H; h++) {
       const ids = QKV.map((G, gi) => {
         const id = H > 1 ? `${G.toLowerCase()}${l}.${h}` : `L${l}.${G}`;
         const at = (i, f) => gi * n * d + i * d + h * dh + f;
         const texName = H > 1 ? `${G}_{${h + 1}}` : G;
+        const same = G !== 'Q' && H > 1 && rep[G][h] !== h ? `${G}_{${rep[G][h] + 1}}` : null;
         tile(id, {
-          l, head: H > 1 ? h : null, rows: n, cols: dh, tex: texName,
+          l, head: H > 1 ? h : null, rows: n, cols: dh, tex: texName, same,
           v: grid(n, dh, (i, f) => (heads[h] ? heads[h][G][i][f] : V.a[l][at(i, f)])),
           node: (i, f) => ns[l][at(i, f)]?.id ?? null,
           src: (i, f) => nodeSrc(ns[l][at(i, f)]?.id),
@@ -357,10 +380,18 @@ export function buildFlow(net, { fwd = null, off = [], every = false } = {}) {
     for (let gi = 0; gi < 3; gi++) (layerTileOf[l] ||= [])[gi] = rows[0].tiles[gi];
     const W = G => tm.find(m => m.toGroup === G)?.name || `W_${G}`;
     const b = G => tieBase(ns[l][QKV.indexOf(G) * n * d]?.tie) || `b_${G}`;
+    let text = `Three shared matrices turn every position's ${texHtml(src)} row into a query, a key and a value${H > 1 ? `, each then cut by columns into ${H} heads of ${dh}` : ''}.`;
+    if (shared) {
+      const kv = new Set(rep.K).size, wk = tm.find(m => m.toGroup === 'K')?.W, size = wk ? `${wk.length} × ${wk[0]?.length}` : '';
+      const groups = [...new Set(rep.K)].map(r => range(H).filter(h => rep.K[h] === r).map(h => h + 1).join(' and ')).join(', ');
+      text += kv === 1 ? ` Multi-query: all ${H} heads read one K and one V (heads ${groups}); only Q is their own.`
+        : ` Grouped-query: heads ${groups} share a K and a V each, ${kv} K, V heads for ${H} queries.`;
+      text += `${size ? ` W_K and W_V are ${size}, not ${d} × ${d}` : ''}: while generating, a model stores ${H / kv} times fewer keys and values.`;
+    }
     stage({
       key: `qkv${l}`, title: H > 1 ? 'Q, K, V per head' : 'Q, K, V', layer: lid(l), rows,
       tex: QKV.map(G => `${G} = ${src}\\,${W(G)} + ${b(G)}`).join(',\\;'),
-      text: `Three shared matrices turn every position's ${texHtml(src)} row into a query, a key and a value${H > 1 ? `, each then cut by columns into ${H} heads of ${dh}` : ''}.`,
+      text,
     });
   }
 
@@ -374,25 +405,96 @@ export function buildFlow(net, { fwd = null, off = [], every = false } = {}) {
     const at = (sym, h, i, j) => (H > 1 ? `${sym}<sub>${h + 1}</sub>[${i + 1},${j + 1}]` : `${sym}<sub>${i + 1},${j + 1}</sub>`);
     // rows are the queries, columns the keys: by word, or by position number when the rows name the words
     const lab = F.labels.slice(0, n), keys = F.numbered ? range(n).map(t => String(t + 1)) : lab;
-    const mask = grid(n, n, (i, j) => g.causal && j > i);
-    const rows = p => Array.from({ length: H }, (_, h) => ({ head: H > 1 ? h : null, tiles: [hid(p, h)], ops: [] }));
+    const mask = grid(n, n, (i, j) => !M.attnVisible(g, i, j));
+    const rows = (...ps) => Array.from({ length: H }, (_, h) => ({ head: H > 1 ? h : null, tiles: ps.map(p => hid(p, h)), ops: ps.slice(1).map(() => '') }));
     const hs = h => A?.heads?.[h];
+    const rope = g.pos === 'rope', alibi = g.pos === 'alibi', lin = !!g.linear, hsub = h => (H > 1 ? `<sub>${h + 1}</sub>` : '');
+    const deg = p => (M.ropeFreq(p, dh) * 180) / Math.PI;
+    // RoPE: q and k turned by their position's angles, in their own stage before the scores
+    if (rope) {
+      for (let h = 0; h < H; h++) {
+        for (const [G, key, srcT] of [['Q', 'Qr', tq(h)], ['K', 'Kr', tk(h)]]) {
+          const raw = () => hs(h)?.[G], rot = () => hs(h)?.[key], s = G.toLowerCase();
+          tile(hid(`r${s}`, h), {
+            l, head: H > 1 ? h : null, rows: n, cols: dh, tex: `\\tilde ${G}${sub(h)}`, v: rot() || grid(n, dh, () => NaN), rowLab: lab,
+            src: (i, f) => { const p0 = f - (f % 2); return [[srcT, i, p0], ...(p0 + 1 < dh ? [[srcT, i, p0 + 1]] : [])]; },
+            tip: (i, f) => {
+              const p = Math.floor(f / 2), x = raw()[i], a = `${i} × ${M.fmt(deg(p), 1)}°`, y = rot()[i][f];
+              if (2 * p + 1 >= dh) return `${s}̃<sub>${i + 1},${f + 1}</sub> = ${s}<sub>${i + 1},${f + 1}</sub> = ${f2(y)} (an odd last column is not turned)`;
+              const u = x[2 * p], v = x[2 * p + 1], th = i * M.ropeFreq(p, dh), co = Math.cos(th), si = Math.sin(th);
+              const expr = f % 2 === 0 ? `${f2(u)}·cos − ${f2(v)}·sin = ${f2(u)}·${f2(co)} − ${f2(v)}·${f2(si)}` : `${f2(u)}·sin + ${f2(v)}·cos = ${f2(u)}·${f2(si)} + ${f2(v)}·${f2(co)}`;
+              return `${s}̃${hsub(h)}[${i + 1},${f + 1}]: pair ${p + 1} of ${posName(i)} turned by ${a}<br>= ${expr} = ${f2(y)}`;
+            },
+          });
+        }
+      }
+      const angles = range(Math.floor(dh / 2)).map(p => `pair ${p + 1} by ${M.fmt(deg(p), deg(p) < 1 ? 2 : 1)}°`).join(', ');
+      stage({
+        key: `rope${l}`, title: 'Rotate q, k (RoPE)', layer: lid(l), part: 'scores', rows: rows('rq', 'rk'),
+        tex: `\\tilde q_t = R(t\\,\\theta)\\,q_t,\\;\\; \\tilde k_t = R(t\\,\\theta)\\,k_t`,
+        text: `RoPE turns every pair of a head's columns of q and k by an angle that grows with the position, ${angles} per position (position 1 is not turned). `
+          + 'A turned q against a turned k sees only the difference of their angles, so the scores depend on how far apart two words are, not where they are. No position vector was added to X.',
+      });
+    }
+    // Linear attention: every entry of q and k through phi = elu + 1, so the scores are positive
+    if (lin) {
+      for (let h = 0; h < H; h++) {
+        for (const [G, key, srcT] of [['Q', 'Qf', rope ? hid('rq', h) : tq(h)], ['K', 'Kf', rope ? hid('rk', h) : tk(h)]]) {
+          const pre = () => (rope ? hs(h)?.[`${G}r`] : hs(h)?.[G]), out = () => hs(h)?.[key], s = G.toLowerCase();
+          tile(hid(`f${s}`, h), {
+            l, head: H > 1 ? h : null, rows: n, cols: dh, tex: `\\phi(${G}${sub(h)})`, v: out() || grid(n, dh, () => NaN), rowLab: lab,
+            src: (i, f) => [[srcT, i, f]],
+            tip: (i, f) => {
+              const x = pre()[i][f];
+              return `φ(${s}${hsub(h)}[${i + 1},${f + 1}]) = ${x > 0 ? `${f2(x)} + 1` : `e<sup>${f2(x)}</sup>`} = ${f2(out()[i][f])}<br>φ(x) = x + 1 above 0, e<sup>x</sup> below: always positive`;
+            },
+          });
+        }
+      }
+      stage({
+        key: `phi${l}`, title: 'Feature map φ', layer: lid(l), part: 'scores', rows: rows('fq', 'fk'),
+        tex: '\\phi(x) = \\operatorname{elu}(x) + 1',
+        text: 'Linear attention has no softmax. Instead φ makes every entry of q and k positive, so every score φ(q)·φ(k) is positive too and the weights can be the scores over their sum.',
+      });
+    }
+    const dq = h => (lin ? hid('fq', h) : rope ? hid('rq', h) : tq(h)), dkT = h => (lin ? hid('fk', h) : rope ? hid('rk', h) : tk(h));
+    const qOf = h => (lin ? hs(h).Qf : rope ? hs(h).Qr : hs(h).Q), kOf = h => (lin ? hs(h).Kf : rope ? hs(h).Kr : hs(h).K);
+    const qs = lin ? 'φ(q' : rope ? 'q̃' : 'q', ks = lin ? 'φ(k' : rope ? 'k̃' : 'k', cl = lin ? ')' : '';
+    const why = (i, j) => (j > i && g.causal ? `can't see the later ${posName(j)}` : g.window && Math.abs(i - j) >= g.window
+      ? `can't see ${posName(j)}: it is ${Math.abs(i - j)} away, outside the window of ${g.window}` : `can't see ${posName(j)}`);
+    const slope = h => M.alibiSlope(h), frac = v => (v === 0.5 ? '½' : v === 0.25 ? '¼' : M.fmt(v, 3));
     for (let h = 0; h < H; h++) {
       const off = offs.has(h) && H > 1;
+      const dot = (i, j) => qOf(h)[i].reduce((s, x, f) => s + x * kOf(h)[j][f], 0);
+      if (alibi) {
+        tile(hid('qk', h), {
+          l, head: H > 1 ? h : null, rows: n, cols: n, tex: `Q${sub(h)}K${sub(h)}^{\\top}\\!/\\sqrt{d}`, mask, rowLab: lab, colLab: keys, off,
+          v: hs(h) ? grid(n, n, (i, j) => (mask[i][j] ? -Infinity : dot(i, j) * g.scale)) : grid(n, n, () => NaN),
+          src: (i, j) => (mask[i][j] ? [] : [...rowSrc(tq(h), i), ...rowSrc(tk(h), j)]),
+          tip: (i, j) => (mask[i][j] ? `masked: ${posName(i)} ${why(i, j)}` : `q<sub>${i + 1}</sub>·k<sub>${j + 1}</sub> × ${f2(g.scale)} = ${f2(dot(i, j) * g.scale)}: the content part of the score`),
+        });
+        tile(hid('ab', h), {
+          l, head: H > 1 ? h : null, rows: n, cols: n, tex: `B${sub(h)}`, v: hs(h)?.B || grid(n, n, () => NaN), mask, rowLab: lab, colLab: keys, off, scale: 'bias',
+          tip: (i, j) => `B${hsub(h)}[${i + 1},${j + 1}] = −${frac(slope(h))} × ${Math.abs(i - j)} = ${f2(hs(h).B[i][j])}<br>head ${h + 1}'s slope ${frac(slope(h))} times how far apart ${posName(i)} and ${posName(j)} are: fixed, never trained`,
+        });
+      }
       tile(hid('s', h), {
-        l, head: H > 1 ? h : null, rows: n, cols: n, tex: `S${sub(h)}`, v: hs(h)?.S || grid(n, n, () => NaN), mask, rowLab: lab, colLab: keys, off,
-        src: (i, j) => (mask[i][j] ? [] : [...rowSrc(tq(h), i), ...rowSrc(tk(h), j)]),
+        l, head: H > 1 ? h : null, rows: n, cols: n, tex: `S${sub(h)}`, v: hs(h)?.S || grid(n, n, () => NaN), mask, rowLab: lab, colLab: keys, off, maskBlank: lin,
+        src: (i, j) => (mask[i][j] ? [] : alibi ? [[hid('qk', h), i, j], [hid('ab', h), i, j]] : [...rowSrc(dq(h), i), ...rowSrc(dkT(h), j)]),
         tip: (i, j) => {
-          if (mask[i][j]) return `${at('S', h, i, j)} = −∞: ${posName(i)} can't see the later ${posName(j)}`;
-          const q = hs(h).Q[i], k = hs(h).K[j];
-          return `${at('S', h, i, j)} = q<sub>${i + 1}</sub>·k<sub>${j + 1}</sub> × ${f2(g.scale)}`
-            + `<br>= (${q.map((x, f) => `${f2(x)}·${f2(k[f])}`).join(' + ')}) × ${f2(g.scale)} = ${f2(hs(h).S[i][j])}`;
+          if (mask[i][j]) return `${at('S', h, i, j)} = −∞: ${posName(i)} ${why(i, j)}`;
+          if (alibi) return `${at('S', h, i, j)} = q<sub>${i + 1}</sub>·k<sub>${j + 1}</sub> × ${f2(g.scale)} + B${hsub(h)}[${i + 1},${j + 1}]<br>= ${f2(dot(i, j) * g.scale)} + (${f2(hs(h).B[i][j])}) = ${f2(hs(h).S[i][j])}`;
+          const q = qOf(h)[i], k = kOf(h)[j], sc = lin ? '' : ` × ${f2(g.scale)}`;
+          return `${at('S', h, i, j)} = ${qs}<sub>${i + 1}</sub>${cl}·${ks}<sub>${j + 1}</sub>${cl}${sc}`
+            + `<br>= (${q.map((x, f) => `${f2(x)}·${f2(k[f])}`).join(' + ')})${sc} = ${f2(hs(h).S[i][j])}`;
         },
       });
       tile(hid('a', h), {
         l, head: H > 1 ? h : null, rows: n, cols: n, tex: `A${sub(h)}`, v: hs(h)?.A || grid(n, n, () => NaN), mask, rowLab: lab, colLab: keys, scale: 'attn', off,
         src: (i, j) => (mask[i][j] ? [] : rowSrc(hid('s', h), i).filter(([, , jj]) => !mask[i][jj])),
         tip: (i, j) => (mask[i][j] ? `${at('A', h, i, j)} = 0 (masked)`
+          : lin ? `${at('A', h, i, j)} = S<sub>${i + 1},${j + 1}</sub> / Σ<sub>k</sub> S<sub>${i + 1},k</sub> = ${f2(hs(h).S[i][j])} / ${f2(hs(h).S[i].reduce((s, v) => s + (v === -Infinity ? 0 : v), 0))} = ${f2(hs(h).A[i][j])}`
+            + `<br>how much ${posName(i)} reads ${posName(j)}`
           : `${at('A', h, i, j)} = e<sup>S<sub>${i + 1},${j + 1}</sub></sup> / Σ<sub>k</sub> e<sup>S<sub>${i + 1},k</sub></sup> = ${f2(hs(h).A[i][j])}`
             + `<br>how much ${posName(i)} reads ${posName(j)}`),
       });
@@ -408,17 +510,37 @@ export function buildFlow(net, { fwd = null, off = [], every = false } = {}) {
       if (H === 1) for (let i = 0; i < n; i++) for (let f = 0; f < dh; f++) { const nid = ns[l][zAt(i, f)]?.id; if (nid) cellOfNode(nid, [zt, i, f]); }
     }
     const sc = H > 1 ? '_h' : '', dk = H > 1 ? 'd_h' : 'd_k';
+    const masked = g.causal || !!g.window;
+    // the mask's shape: causal (a triangle), a window (a band), or none
+    const maskText = g.causal && g.window ? ` Causal, window ${g.window}: a position sees itself and the ${g.window - 1} before it, nothing older or later (−∞).`
+      : g.window ? ` Window ${g.window}: a position sees the positions less than ${g.window} away, on both sides (−∞ elsewhere).`
+        : g.causal ? ' Causal: a position sees itself and the positions before it, never after (−∞).'
+          : oneHot && n > 1 ? ' No mask: every position sees every other, the later ones too, so each can read the very word it is trained to predict next.' : '';
+    let sTex = `S${sc} = Q${sc} K${sc}^{\\top} / \\sqrt{${dk}}${masked ? ' + M' : ''}`;
+    let sText = `Every query against every key, times 1/√${dh} = ${f2(g.scale)}.${maskText}`;
+    if (rope) {
+      sTex = `S${sc} = \\tilde Q${sc} \\tilde K${sc}^{\\top} / \\sqrt{${dk}}${masked ? ' + M' : ''}`;
+      sText = `Every turned query against every turned key, times 1/√${dh} = ${f2(g.scale)}.${maskText}`;
+    } else if (lin) {
+      sTex = `S${sc} = \\phi(Q${sc})\\,\\phi(K${sc})^{\\top}`;
+      sText = `Every φ(q) against every φ(k): all positive, and no scale (the weights divide it out).${maskText.replace(' (−∞).', ' (left out).').replace(' (−∞ elsewhere).', ' (left out elsewhere).')}`;
+    } else if (alibi) {
+      sTex = `S${sc} = Q${sc} K${sc}^{\\top} / \\sqrt{${dk}} + B${sc}${masked ? ' + M' : ''}`;
+      sText = `The content scores plus B${H > 1 ? '<sub>h</sub>' : ''}, ALiBi's fixed penalty: ${range(H).map(h => `head ${h + 1} loses ${frac(slope(h))}`).join(', ')} per position of distance, `
+        + `so each head starts out favouring nearby words, head ${H} the least. No position vector was added to X: this is where position comes in.${maskText}`;
+    }
     stage({
-      key: `scores${l}`, title: 'Scores', layer: lid(l), part: 'scores', rows: rows('s'),
-      tex: `S${sc} = Q${sc} K${sc}^{\\top} / \\sqrt{${dk}}${g.causal ? ' + M' : ''}`,
-      text: `Every query against every key, times 1/√${dh} = ${f2(g.scale)}.${g.causal ? ' Causal: a position sees itself and the positions before it, never after (−∞).' : ''}`,
+      key: `scores${l}`, title: 'Scores', layer: lid(l), part: 'scores', rows: alibi ? rows('qk', 'ab', 's').map(r => ({ ...r, ops: ['+', '='] })) : rows('s'),
+      tex: sTex, text: sText,
     });
     const last = n - 1, peek = h => (hs(h) ? argmax(hs(h).A[last]) : 0);
+    const reads = Array.from({ length: H }, (_, h) => `${posName(peek(h))} most${H > 1 ? ` in head ${h + 1}` : ''} (${f2(hs(h)?.A[last][peek(h)])})`).join(', ');
     stage({
-      key: `softmax${l}`, title: 'Attention A', layer: lid(l), part: 'softmax', rows: rows('a'),
-      tex: `A${sc} = \\operatorname{softmax}(S${sc})`,
-      text: `Each row sums to 1: where that position looks. ${posName(last)} reads `
-        + Array.from({ length: H }, (_, h) => `${posName(peek(h))} most${H > 1 ? ` in head ${h + 1}` : ''} (${f2(hs(h)?.A[last][peek(h)])})`).join(', ') + '.',
+      key: `softmax${l}`, title: lin ? 'Weights A' : 'Attention A', layer: lid(l), part: 'softmax', rows: rows('a'),
+      tex: lin ? `A${sc} = S${sc} \\,/\\, \\textstyle\\sum_j S${sc}[:, j]` : `A${sc} = \\operatorname{softmax}(S${sc})`,
+      text: lin ? `Each row of S over its sum, so it sums to 1 as softmax rows do, but with no exponential to sharpen them the weights stay flatter. ${posName(last)} reads ${reads}. `
+          + 'With no softmax, Z = φ(Q)(φ(K)ᵀV) can be summed right to left: a d_h × d_h running state instead of the n × n matrix, which is what makes linear attention cheap on long inputs.'
+        : `Each row sums to 1: where that position looks. ${posName(last)} reads ${reads}.`,
     });
     stage({
       key: `mix${l}`, title: 'A V', layer: lid(l), part: 'mix', rows: rows('z'),
@@ -448,6 +570,23 @@ export function buildFlow(net, { fwd = null, off = [], every = false } = {}) {
   }
 
   // ---- dense layers: tokenwise products and sums, else one tile per layer
+  // A layer's activation as a function name in KaTeX (post-norm's LN included), and its norm line for a tip.
+  function fnTexOf(act) {
+    return act === 'identity' ? '' : act === 'softmax' ? '\\operatorname{softmax}' : act === 'layernorm' ? '\\operatorname{LN}'
+      : `\\operatorname{${M.ACTS[act]?.label || act}}`;
+  }
+  function isNorm(act) { return act === 'layernorm' || act === 'rmsnorm'; }
+  // row t of layer l normalized (LayerNorm / RMSNorm): its mean, its sigma and cell j's arithmetic
+  function normLine(l, t, j) {
+    const { d } = shp[l], act = actOf(l), z = V.z[l].slice(t * d, (t + 1) * d);
+    const mu = act === 'layernorm' ? z.reduce((s, v) => s + v, 0) / d : 0;
+    const sg = Math.sqrt(z.reduce((s, v) => s + (v - mu) ** 2, 0) / d + M.NORM_EPS), a = V.a[l][t * d + j];
+    return act === 'layernorm'
+      ? `= (${f2(z[j])} − μ) / σ = (${f2(z[j])} − ${f2(mu)}) / ${f2(sg)} = ${f2(a)}<br>μ = the row's mean, σ = √(its variance + ε): each row comes out with mean 0, spread 1`
+      : `= ${f2(z[j])} / rms = ${f2(z[j])} / ${f2(sg)} = ${f2(a)}<br>rms = √(mean of the row's squares + ε): no mean taken out`;
+  }
+  // a matrix's name, transposed when a shared matrix is read the other way (tied embeddings: W_Eᵀ)
+  function mname(m) { return m.transposed ? `${m.name}^{\\top}` : m.name; }
   function denseStages(l) {
     const { tokens: n, d, groups } = shp[l], nodes = ns[l], act = actOf(l);
     const tm = M.tiedMatrices(net, l);
@@ -465,9 +604,19 @@ export function buildFlow(net, { fwd = null, off = [], every = false } = {}) {
     if (resOk) for (const k of resK) if (fixed.filter(e => slot(e.from).l === k).length !== n * d) resOk = false;
     const tokenwise = !groups && tm.length > 0 && tm.every(m => m.tokenwise && m.k !== null && shp[m.k].tokens === n) && resOk;
     const title = String(net.layers[l].name || `Layer ${l}`);
+    // biases fixed (node.fixed): at 0, there is no bias term at all; else a fixed P (sinusoidal)
+    const fixedB = nodes.length > 0 && nodes.every(nd => nd.fixed === true), noB = fixedB && nodes.every(nd => !nd.bias);
+    // A pre-norm layer: a fixed identity copy of one earlier layer, normalized per position.
+    if (!groups && isNorm(act) && !tm.length && resOk && resK.size === 1 && noB) { normStage(l, [...resK][0]); return; }
+    // SwiGLU: groups G, U from one source, silu(G) ⊙ U.
+    if (act === 'swiglu' && groups?.length === 2 && !fixed.length && tm.length === 2
+      && tm.every(m => m.tokenwise && m.k !== null && m.k === tm[0].k && shp[m.k].tokens === n) && new Set(tm.map(m => m.toGroup)).size === 2) {
+      gluStages(l, tm);
+      return;
+    }
     if (!tokenwise) {
       const ids = (groups || [null]).map((_, g) => layerTile(l, groups ? g : null, { rowLab: n > 1 ? F.labels.slice(0, n) : null }));
-      const fn = act === 'identity' ? '' : act === 'softmax' ? '\\operatorname{softmax}' : `\\operatorname{${M.ACTS[act]?.label || act}}`;
+      const fn = fnTexOf(act);
       stage({
         key: `layer${l}`, title, layer: lid(l), rows: [{ head: null, tiles: ids, ops: [] }],
         tex: `${symOf(net, l)} = ${fn}${fn ? '(' : ''}W a + b${fn ? ')' : ''}`,
@@ -476,77 +625,84 @@ export function buildFlow(net, { fwd = null, off = [], every = false } = {}) {
       return;
     }
     const sym = symOf(net, l), bias = tieBase(nodes[0]?.tie);
-    const untied = n > 1 && nodes.every(nd => !nd.tie);   // a bias per position: P
+    const untied = n > 1 && !fixedB && nodes.every(nd => !nd.tie);   // a bias per position: P
+    const fixedP = n > 1 && fixedB && !noB;                            // a fixed P (sinusoidal positions)
     // products: the source rows times each shared matrix
     const prods = tm.map((m, mi) => {
       const src = (M.reshape(net, m.k, V.a[m.k])[m.fromGroup || 'X']);
       const rows = src.length, dout = m.W[0]?.length || 0;
       const v = grid(rows, d, (t, j) => (j < dout ? src[t].reduce((s, x, i) => s + x * (m.W[i]?.[j] ?? 0), 0) : 0));
-      const ssym = m.fromGroup || symOf(net, m.k), id = `P${l}.${mi}`, onehotSrc = m.k === 0 && oneHot;
+      // SwiGLU's gated half is F, whatever its group is called
+      const ssym = actOf(m.k) === 'swiglu' && m.fromGroup && m.fromGroup === shp[m.k].groups?.[0] ? 'F' : m.fromGroup || symOf(net, m.k);
+      const id = `P${l}.${mi}`, onehotSrc = m.k === 0 && oneHot, nm = mname(m);
       tile(id, {
-        l, rows, cols: d, v, tex: `${oneHot && m.k === 0 ? 'O' : ssym}\\,${m.name}`,
+        l, rows, cols: d, v, tex: `${oneHot && m.k === 0 ? 'O' : ssym}\\,${nm}`,
         src: t => rowCells(m.k, m.fromGroup, t),
         tip: (t, j) => (onehotSrc
-          ? `(O ${texHtml(m.name)})<sub>${t + 1},${j + 1}</sub> = ${texHtml(m.name)}[${esc(F.words[t])}, ${j + 1}] = ${f2(v[t][j])}<br>a one-hot row picks one row of ${texHtml(m.name)}`
-          : `(${texHtml(ssym)} ${texHtml(m.name)})<sub>${t + 1},${j + 1}</sub> = ${texHtml(ssym)}<sub>${t + 1}</sub> · ${texHtml(m.name)}[:,${j + 1}]<br>= `
+          ? `(O ${texHtml(nm)})<sub>${t + 1},${j + 1}</sub> = ${texHtml(nm)}[${esc(F.words[t])}, ${j + 1}] = ${f2(v[t][j])}<br>a one-hot row picks one row of ${texHtml(nm)}`
+          : `(${texHtml(ssym)} ${texHtml(nm)})<sub>${t + 1},${j + 1}</sub> = ${texHtml(ssym)}<sub>${t + 1}</sub> · ${texHtml(nm)}[:,${j + 1}]<br>= `
             + `${src[t].map((x, i) => `${f2(x)}·${f2(m.W[i]?.[j] ?? 0)}`).join(' + ')} = ${f2(v[t][j])}`),
       });
-      return { id, m, ssym };
+      return { id, m, ssym, nm };
     });
     const res = [...resK].map(k => ({ k, id: layerTileOf[k]?.[0], sym: symOf(net, k) }));
     const outTip = (t, j) => {
       const parts = [];
       for (const r of res) parts.push(`${texHtml(r.sym)} ${f2(V.a[r.k][t * d + j])}`);
-      for (const p of prods) parts.push(`${texHtml(p.m.k === 0 && oneHot ? 'O' : p.ssym)}·${texHtml(p.m.name)} ${f2(F.tiles[p.id].v[t][j])}`);
+      for (const p of prods) parts.push(`${texHtml(p.m.k === 0 && oneHot ? 'O' : p.ssym)}·${texHtml(p.nm)} ${f2(F.tiles[p.id].v[t][j])}`);
       const b = nodes[t * d + j]?.bias || 0;
-      parts.push(`${untied ? 'P' : bias ? texHtml(bias) : 'b'} ${f2(b)}`);
-      const fn = act === 'identity' ? '' : act === 'softmax' ? 'softmax' : M.ACTS[act]?.label || act;
+      if (!noB) parts.push(`${untied || fixedP ? 'P' : bias ? texHtml(bias) : 'b'} ${f2(b)}`);
+      const fn = act === 'identity' ? '' : act === 'softmax' ? 'softmax' : act === 'layernorm' ? 'LN' : M.ACTS[act]?.label || act;
       const z = V.z[l]?.[t * d + j], a = V.a[l]?.[t * d + j];
-      return `${texHtml(sym)}<sub>${t + 1},${j + 1}</sub> = ${fn ? `${fn}(` : ''}${parts.join(' + ')}${fn ? ')' : ''}`
-        + `<br>= ${fn && act !== 'softmax' ? `${fn}(${f2(z)}) = ` : ''}${f2(a)}`;
+      return `${cellName(sym, t, j)} = ${fn ? `${fn}(` : ''}${parts.join(' + ')}${fn ? ')' : ''}`
+        + (isNorm(act) ? `<br>${normLine(l, t, j)}` : `<br>= ${fn && act !== 'softmax' ? `${fn}(${f2(z)}) = ` : ''}${f2(a)}`);
     };
     const outSrc = (t, j) => [
       ...res.map(r => (r.id ? [r.id, t, j] : null)).filter(Boolean),
       ...prods.map(p => [p.id, t, j]),
-      ...(untied ? [[`B${l}`, t, j]] : []),
+      ...(untied || fixedP ? [[`B${l}`, t, j]] : []),
     ];
-    const fnTex = act === 'identity' ? '' : act === 'softmax' ? '\\operatorname{softmax}' : `\\operatorname{${M.ACTS[act]?.label || act}}`;
-    const sumTex = [...res.map(r => r.sym), ...prods.map(p => `${oneHot && p.m.k === 0 ? 'O' : p.ssym}\\,${p.m.name}`), untied ? 'P' : bias || 'b'].join(' + ');
+    const fnTex = fnTexOf(act);
+    const sumTex = [...res.map(r => r.sym), ...prods.map(p => `${oneHot && p.m.k === 0 ? 'O' : p.ssym}\\,${p.nm}`), ...(noB ? [] : [untied || fixedP ? 'P' : bias || 'b'])].join(' + ');
     if (res.length) {
       stage({
-        key: `proj${l}`, title: prods.map(p => `· ${texHtml(p.m.name)}`).join(', '), layer: lid(l), part: null,
+        key: `proj${l}`, title: prods.map(p => `· ${texHtml(p.nm)}`).join(', '), layer: lid(l), part: null,
         rows: [{ head: null, tiles: prods.map(p => p.id), ops: [] }],
-        tex: prods.map(p => `${p.ssym}\\,${p.m.name}`).join(',\\;'),
-        text: prods.map(p => `${texHtml(p.ssym)} times ${texHtml(p.m.name)}`).join(', ')
+        tex: prods.map(p => `${p.ssym}\\,${p.nm}`).join(',\\;'),
+        text: prods.map(p => `${texHtml(p.ssym)} times ${texHtml(p.nm)}`).join(', ')
           + (prods.some(p => p.ssym === 'Z') ? ': the heads\' outputs mixed back together' : ': the branch the residual adds')
           + `, brought back to ${d} columns so it can be added.`,
       });
       const id = layerTile(l, null, { src: outSrc, tip: outTip });
       // the branch a residual adds, by what it is: attention (its heads) or the FFN
-      const branch = p => (att[p.m.k] ? 'attention' : actOf(p.m.k) === 'relu' && shp[p.m.k].d > d ? 'FFN' : `${texHtml(p.ssym)} ${texHtml(p.m.name)}`);
+      const branch = p => (att[p.m.k] ? 'attention' : ['relu', 'gelu', 'swiglu'].includes(actOf(p.m.k)) && shp[p.m.k].d > d ? 'FFN' : `${texHtml(p.ssym)} ${texHtml(p.nm)}`);
       F.residual.push({ l, sym: texHtml(sym), from: res.map(r => texHtml(r.sym)), branch: prods.map(branch), d, tiles: [id, ...prods.map(p => p.id)], src: res.map(r => r.id).filter(Boolean) });
       const who = res.map(r => texHtml(r.sym)).join(', ');
       stage({
-        key: `sum${l}`, title: '+ residual', layer: lid(l), rows: [{ head: null, tiles: [id], ops: [] }],
+        key: `sum${l}`, title: isNorm(act) ? `+ residual, ${M.ACTS[act].label}` : '+ residual', layer: lid(l), rows: [{ head: null, tiles: [id], ops: [] }],
         tex: `${sym} = ${fnTex}${fnTex ? '(' : ''}${sumTex}${fnTex ? ')' : ''}`,
-        text: `The residual: ${who} comes through unchanged and ${prods.map(p => `${texHtml(p.ssym)} ${texHtml(p.m.name)}`).join(', ')} is added${bias ? `, plus ${texHtml(bias)}` : ''}. `
-          + `The sum goes cell by cell, so ${texHtml(sym)} keeps ${who}'s ${d} columns: that is why the residual stream has one width.`,
+        text: `The residual: ${who} comes through unchanged and ${prods.map(p => `${texHtml(p.ssym)} ${texHtml(p.nm)}`).join(', ')} is added${bias ? `, plus ${texHtml(bias)}` : ''}. `
+          + `The sum goes cell by cell, so ${texHtml(sym)} keeps ${who}'s ${d} columns: that is why the residual stream has one width.`
+          + (isNorm(act) ? ` Then each row is normalized (post-norm): ${act === 'layernorm' ? 'its mean taken out and divided by its spread' : 'divided by its root mean square'}, so the stream is rescaled after every branch.` : ''),
       });
       return;
     }
-    if (untied) {
+    if (untied || fixedP) {
       const bid = `B${l}`;
       tile(bid, {
         l, rows: n, cols: d, tex: 'P', v: grid(n, d, (t, j) => nodes[t * d + j]?.bias || 0),
-        tip: (t, j) => `P<sub>${t + 1},${j + 1}</sub> = ${f2(nodes[t * d + j]?.bias || 0)}: the learned vector of position ${t + 1} (the layer's own biases)`,
+        tip: (t, j) => (fixedP
+          ? `P<sub>${t + 1},${j + 1}</sub> = ${j % 2 ? 'cos' : 'sin'}(${t} / 10000<sup>${2 * Math.floor(j / 2)}/${d}</sup>) = ${f2(nodes[t * d + j]?.bias || 0)}: fixed, the same in every sentence and never trained`
+          : `P<sub>${t + 1},${j + 1}</sub> = ${f2(nodes[t * d + j]?.bias || 0)}: the learned vector of position ${t + 1} (the layer's own biases)`),
       });
       const id = layerTile(l, null, { src: outSrc, tip: outTip });
       stage({
-        key: `embed${l}`, title: oneHot && prods.some(p => p.m.k === 0) ? 'Embed + position' : `${texHtml(sym)} + position`, layer: lid(l),
+        key: `embed${l}`, title: oneHot && prods.some(p => p.m.k === 0) ? `Embed + position${fixedP ? ' (fixed)' : ''}` : `${texHtml(sym)} + position`, layer: lid(l),
         rows: [{ head: null, tiles: [...prods.map(p => p.id), bid, id], ops: [...prods.map((_, i) => (i ? '+' : '')).slice(1), '+', '='] }],
         tex: `${sym} = ${fnTex}${fnTex ? '(' : ''}${sumTex}${fnTex ? ')' : ''}`,
-        text: oneHot ? 'Each one-hot row picks its word\'s row of the embedding; P adds a learned vector for each position.'
-          : `The shared product plus P, a learned vector for each position.`,
+        text: fixedP ? `Each one-hot row picks its word's row of the embedding; P adds a fixed vector per position: sin and cos of the position at ${Math.ceil(d / 2)} frequencies (1, 1/10, 1/100, ...), one per pair of columns. Nothing learns it: every sentence gets the same P.`
+          : oneHot ? 'Each one-hot row picks its word\'s row of the embedding; P adds a learned vector for each position.'
+            : `The shared product plus P, a learned vector for each position.`,
       });
       return;
     }
@@ -573,12 +729,14 @@ export function buildFlow(net, { fwd = null, off = [], every = false } = {}) {
       });
       // only the last row of the layer before goes on: its other rows fade
       if (one && src0 && F.tiles[src0]?.rows === n) F.tiles[src0].dimRows = range(n - 1);
-      const ysym = single ? single.ssym : 'Y';
+      const ysym = single ? single.ssym : 'Y', yrow = ysym.includes('_') ? `(${ysym.toLowerCase()})` : ysym.toLowerCase();   // (n_{3})_{5}: row 5 of N₃
+      const tied = !!single?.m.transposed && vocOut;
       stage({
         key: `logits${l}`, title: 'Logits', layer: lid(l), rows: [{ head: null, tiles: [lg], ops: [] }],
-        tex: one ? `\\ell_{${n}} = ${ysym.toLowerCase()}_{${n}}\\,${single?.m.name || 'W'} + ${bias || 'b'}` : `\\ell = ${prods.map(p => `${p.ssym}\\,${p.m.name}`).join(' + ')} + ${bias || 'b'}`,
-        text: one ? `One score per word, from the last position's row of ${texHtml(ysym)} only (position ${n}, “${esc(F.labels[n - 1])}”): the row that predicts the next word.`
-          : vocOut ? 'One score per word, at each position.' : 'One score per output, before the softmax.',
+        tex: one ? `\\ell_{${n}} = ${yrow}_{${n}}\\,${single ? single.nm : 'W'} + ${bias || 'b'}` : `\\ell = ${prods.map(p => `${p.ssym}\\,${p.nm}`).join(' + ')} + ${bias || 'b'}`,
+        text: (one ? `One score per word, from the last position's row of ${texHtml(ysym)} only (position ${n}, “${esc(F.labels[n - 1])}”): the row that predicts the next word.`
+          : vocOut ? 'One score per word, at each position.' : 'One score per output, before the softmax.')
+          + (tied ? ` Tied embeddings: the matrix is ${texHtml(single.m.name)} itself, turned around, the one that embedded the words, so a word's score is the row times that word's embedding.` : ''),
       });
       const targets = nodes.map(nd => nd.target);
       const hasT = targets.every(isNum);
@@ -608,30 +766,87 @@ export function buildFlow(net, { fwd = null, off = [], every = false } = {}) {
         F.next = { word: voc[k], p: row[k], target: tgt?.[t] !== null && tgt?.[t] !== undefined ? voc[tgt[t]] : null, t };
       }
       const nx = F.next;
+      const upTo = causalAll ? 'given the words up to it (causal)' : 'given the whole sentence (no mask: the later words too)';
       stage({
         key: `probs${l}`, title: lm ? (one ? 'Next word' : 'Next word, every position') : vocOut ? 'Next word' : 'Softmax', layer: lid(l), mode: lm,
         rows: [{ head: null, tiles: [id], ops: [] }],
         tex: one ? `p_{${n}} = \\operatorname{softmax}(\\ell_{${n}})` : 'p = \\operatorname{softmax}(\\ell)',
         text: one ? `The next word's distribution, after “${esc(ctxOf(n - 1))}”: ${esc(nx.word)} gets ${f2(nx.p)}${nx.target ? `, and the true next word is ${esc(nx.target)}` : ''}. `
             + 'Generating reads only this last row; every position (how it\'s trained) shows the rest.'
-          : lm ? `Every position predicts its own next word, given the words up to it (causal): the whole sentence trains at once. The loss is the mean over the ${n} positions of −log p(true next word); generating reads only the last row.`
-            : vocOut ? 'A probability for every word at each position, given the words up to it (causal). The ringed bar is the target.'
+          : lm ? `Every position predicts its own next word, ${upTo}: the whole sentence trains at once. The loss is the mean over the ${n} positions of −log p(true next word); generating reads only the last row.`
+            : vocOut ? `A probability for every word at each position, ${upTo}. The ringed bar is the target.`
               : 'Each row turned into probabilities that sum to 1.',
       });
       return;
     }
-    const id = layerTile(l, null, { src: t => rowsIn(t), tip: (t, j) => nodeTip(nodes[t * d + j]?.id, `${texHtml(sym)}<sub>${t + 1},${j + 1}</sub>`) });
-    const widens = act === 'relu' && !!single && d > shp[single.m.k].d;   // the FFN: d -> 4d
+    const id = layerTile(l, null, { src: t => rowsIn(t), tip: (t, j) => nodeTip(nodes[t * d + j]?.id, cellName(sym, t, j)) });
+    const widens = (act === 'relu' || act === 'gelu') && !!single && d > shp[single.m.k].d;   // the FFN: d -> 4d
+    const embeds = noB && oneHot && !!single && single.m.k === 0;   // X = O W_E, no position vector
+    const how = single ? `${texHtml(single.ssym)} ${texHtml(single.nm)}` : 'the products';
     stage({
-      key: `layer${l}`, title: widens ? 'FFN' : title, layer: lid(l),
+      key: `layer${l}`, title: widens ? 'FFN' : embeds ? 'Embed' : title, layer: lid(l),
       rows: [{ head: null, tiles: [id], ops: [] }],
       tex: `${sym} = ${fnTex}${fnTex ? '(' : ''}${sumTex}${fnTex ? ')' : ''}`,
       text: act === 'relu'
-        ? `The feed-forward layer, at each position on its own: ${single ? `${texHtml(single.ssym)} ${texHtml(single.m.name)}` : 'the products'} + ${bias ? texHtml(bias) : 'b'}, then ReLU (${V.a[l].filter(v => v > 0).length} of ${n * d} units are on).`
+        ? `The feed-forward layer, at each position on its own: ${how} + ${bias ? texHtml(bias) : 'b'}, then ReLU (${V.a[l].filter(v => v > 0).length} of ${n * d} units are on).`
           + (widens ? ` It is wider than the stream, ${d} columns from ${shp[single.m.k].d}: room to compute in, and the next matrix brings it back to ${shp[single.m.k].d}.` : '')
-        : `${sumTex.includes('+') ? 'The products and the bias' : 'The product and the bias'}${act === 'identity' ? '' : ', then the activation'}, at each position.`,
+        : act === 'gelu'
+          ? `The feed-forward layer, at each position on its own: ${how} + ${bias ? texHtml(bias) : 'b'}, then GELU, z·Φ(z): smooth, and a little below 0 for negative z, where ReLU would give exactly 0 (${V.a[l].filter(v => v < 0).length} of ${n * d} units are slightly negative, so none is off).`
+            + (widens ? ` It is wider than the stream, ${d} columns from ${shp[single.m.k].d}; the next matrix brings it back.` : '')
+          : embeds ? `Each one-hot row picks its word's row of the embedding, and nothing marks its position: ${posHow}`
+            : `${sumTex.includes('+') ? 'The products and the bias' : noB ? 'The product' : 'The product and the bias'}${act === 'identity' ? '' : ', then the activation'}, at each position.`,
     });
     if (widens) F.ffn = { id, d, from: shp[single.m.k].d };
+  }
+
+  // A pre-norm layer: row t of layer k normalized on its own (LayerNorm or RMSNorm, no gain or shift).
+  function normStage(l, k) {
+    const act = actOf(l), rms = act === 'rmsnorm', sym = symOf(net, l), from = symOf(net, k);
+    const id = layerTile(l, null, { src: t => rowCells(k, null, t), tip: (t, j) => `${cellName(sym, t, j)} ${normLine(l, t, j)}` });
+    F.norms.push(id);
+    stage({
+      key: `norm${l}`, title: rms ? 'RMSNorm' : 'LayerNorm', layer: lid(l), rows: [{ head: null, tiles: [id], ops: [] }],
+      tex: rms ? `${sym} = ${from} \\,/\\, \\operatorname{rms}(${from})` : `${sym} = (${from} - \\mu) \\,/\\, \\sigma`,
+      text: (rms ? `Each position's row of ${texHtml(from)} divided by its root mean square, √(mean(x²) + ε), with no mean taken out: cheaper than LayerNorm, and it trains about as well.`
+        : `Each position's row of ${texHtml(from)} on its own: its mean μ taken out, then divided by its spread σ, so every row of ${texHtml(sym)} has mean 0 and spread 1 whatever the size of the stream.`)
+        + ` Pre-norm: only the branch reads ${texHtml(sym)}; the residual stream ${texHtml(from)} goes on unnormalized. No learned gain or shift here: right before a matrix they would fold into it.`,
+    });
+  }
+
+  // SwiGLU: G = H W_1 + b_1 and U = H W_3 + b_3 (the layer's groups), then F = silu(G) ⊙ U (group 1's activations).
+  function gluStages(l, tm) {
+    const { tokens: n, d, groups } = shp[l], k = tm[0].k, from = symOf(net, k), off = n * d;
+    const mG = tm.find(m => m.toGroup === groups[0]), mU = tm.find(m => m.toGroup === groups[1]);
+    const gid = `gate${l}`, zg = (t, j) => V.z[l][t * d + j];
+    const bOf = g => tieBase(ns[l][g * off]?.tie) || `b_{${groups[g]}}`;
+    tile(gid, {
+      l, rows: n, cols: d, tex: 'G', v: grid(n, d, zg), src: t => rowCells(k, mG.fromGroup, t),
+      tip: (t, j) => `G<sub>${t + 1},${j + 1}</sub> = ${texHtml(from)}<sub>${t + 1}</sub> · ${texHtml(mG.name)}[:,${j + 1}] + ${texHtml(bOf(0))} = ${f2(zg(t, j))}: the gate`,
+    });
+    const uid = layerTile(l, 1, {
+      tex: 'U', src: t => rowCells(k, mU.fromGroup, t),
+      tip: (t, j) => `U<sub>${t + 1},${j + 1}</sub> = ${texHtml(from)}<sub>${t + 1}</sub> · ${texHtml(mU.name)}[:,${j + 1}] + ${texHtml(bOf(1))} = ${f2(V.a[l][off + t * d + j])}: the value the gate lets through`,
+    });
+    stage({
+      key: `gate${l}`, title: 'Gate and up', layer: lid(l), rows: [{ head: null, tiles: [gid, uid], ops: [] }],
+      tex: `G = ${from}\\,${mG.name} + ${bOf(0)},\\;\\; U = ${from}\\,${mU.name} + ${bOf(1)}`,
+      text: `Two matrices up from ${texHtml(from)}, both to ${d} columns: G will gate, U carries the values. A ReLU FFN has one matrix up; SwiGLU's second one is its 50% more weights.`,
+    });
+    const silu = v => v / (1 + Math.exp(-v));
+    const fid = layerTile(l, 0, {
+      tex: 'F', src: (t, j) => [[gid, t, j], [uid, t, j]],
+      tip: (t, j) => {
+        const g = zg(t, j), u = V.a[l][off + t * d + j];
+        return `F<sub>${t + 1},${j + 1}</sub> = silu(G) · U = silu(${f2(g)}) · ${f2(u)} = ${f2(silu(g))} · ${f2(u)} = ${f2(V.a[l][t * d + j])}<br>silu(g) = g·σ(g): near 0 for negative g (the gate shut), near g for positive`;
+      },
+    });
+    const open = range(n * d).filter(i => silu(V.z[l][i]) > 0.5).length;
+    stage({
+      key: `glu${l}`, title: 'SwiGLU', layer: lid(l), rows: [{ head: null, tiles: [fid], ops: [] }],
+      tex: 'F = \\operatorname{silu}(G) \\odot U',
+      text: `Each unit of U times its gate silu(G), cell by cell: the gate depends on the input too, so the FFN multiplies two functions of it where ReLU only cuts one (${open} of ${n * d} gates are above 0.5). The next matrix reads F and brings it back to ${shp[k].d}.`,
+    });
+    F.ffn = { id: fid, d, from: shp[k].d };
   }
 
   // ---- every matrix of positions names its rows: the first tile of each stage row carries the
@@ -654,6 +869,7 @@ export function buildFlow(net, { fwd = null, off = [], every = false } = {}) {
     const dmodel = `d<sub>model</sub> = ${model}`;
     const mark = (id, kind, html) => { if (F.tiles[id] && F.tiles[id].cols === (kind === 'model' ? model : F.tiles[id].cols)) F.tiles[id].dim = { kind, html }; };
     for (const r of F.residual) if (r.d === model) for (const id of [...r.src, ...r.tiles]) mark(id, 'model', dmodel);
+    for (const id of F.norms) mark(id, 'model', dmodel);   // a pre-norm N: the stream's width
     if (ffn) mark(F.ffn.id, 'ffn', ffn === 4 * model ? `4 d<sub>model</sub> = ${ffn}` : `d<sub>ff</sub> = ${ffn}`);
     const chain = [...new Set([...F.residual[0].from, ...F.residual.map(r => r.sym)])];
     const list = a => (a.length > 1 ? `${a.slice(0, -1).join(', ')} and ${a.at(-1)}` : a[0]);
@@ -668,8 +884,12 @@ export function buildFlow(net, { fwd = null, off = [], every = false } = {}) {
 
 // A structure key: the DOM is rebuilt only when it changes (not on new values).
 export function flowKey(F) {
+  // a variant's (not the tiny language model's own): its key, the shared K, V tiles and the masks
+  const v = F.variant && F.variant.key !== 'tiny_lm'
+    ? [F.variant.key, Object.values(F.tiles).filter(t => t.same || t.mask).map(t => [t.id, t.same || null, t.mask])] : null;
   return JSON.stringify([F.why, F.every, F.dimsText, F.stages.map(s => [s.key, s.title, s.tex, s.mode, s.rows.map(r => [r.head, r.tiles, r.ops])]),
-    Object.values(F.tiles).map(t => [t.id, t.kind, t.rows, t.cols, t.tex, t.rowLab, t.rowNo, t.colLab, t.head, t.off, t.offCols, t.onehot, t.dim, t.dimRows, t.note])]);
+    Object.values(F.tiles).map(t => [t.id, t.kind, t.rows, t.cols, t.tex, t.rowLab, t.rowNo, t.colLab, t.head, t.off, t.offCols, t.onehot, t.dim, t.dimRows, t.note]),
+    ...(v ? [v] : [])]);
 }
 
 // ================================================================ the view
@@ -765,6 +985,7 @@ export function install(ctx) {
     play: on => V?.play(on),
     every: (on = !cur()?.every) => put({ every: !!on }),
     head: h => V?.head(h),
+    variant: key => V?.variant(key),   // another variant of the tiny language model, on the same data
     fit: () => V?.fit(),
     info: () => V?.info() ?? null,
   };
@@ -783,6 +1004,7 @@ export function install(ctx) {
     const sizer = mk('div', 'nnf-sizer', scroll);
     const content = mk('div', 'nnf-content', sizer);
     const head = mk('div', 'nnf-head', content);
+    const varEl = mk('div', 'nnf-variant', content);   // a variant of the tiny language model: what it changes
     const dimsEl = mk('div', 'nnf-dims', content);   // why the residual stream keeps one width
     const msg = mk('div', 'nnf-msg', content);
     const strip = mk('div', 'nnf-strip', content);
@@ -840,6 +1062,9 @@ export function install(ctx) {
       root.classList.toggle('cmp', CW < 28);
       dimsEl.innerHTML = F.dimsText || '';
       dimsEl.hidden = !F.dimsText;
+      const vr = F.variant && F.variant.key !== 'tiny_lm' ? F.variant : null;
+      varEl.innerHTML = vr ? `<b>${esc(vr.short)}</b>, one change from the tiny language model: ${esc(vr.note)}` : '';
+      varEl.hidden = !vr;
       msg.hidden = !F.why;
       msg.innerHTML = F.why === 'error' ? 'The forward pass failed on this net, so there is nothing to draw.'
         : F.why === 'empty' ? 'This net has no neurons yet: nothing flows.'
@@ -883,6 +1108,11 @@ export function install(ctx) {
       const nm = mk('div', 'nnf-tn', el);
       mk('span', 'nnf-name', nm, texOf(t.tex));
       mk('span', 'nnf-shape', nm, `${t.rows}×${t.cols}`);
+      if (t.same) {   // a head that shares its K or V (multi-query, grouped-query)
+        const b = mk('span', 'nnf-same', nm, `= ${texOf(t.same)}`);
+        b.title = `The same matrix as ${texHtml(t.same).replace(/<[^>]+>/g, '')}: these heads share it`;
+        el.classList.add('shared');
+      }
       const cw = cellW(t), list = [];
       // the bracket under a tile: its width, by what sets it (d_model, the FFN's, the vocabulary)
       const bracket = (g, from) => {
@@ -959,7 +1189,7 @@ export function install(ctx) {
       for (const t of Object.values(F.tiles)) {
         const list = cells.get(t.id);
         if (!list) continue;
-        const max = t.scale === 'act' ? F.max.act : 1, fmtC = cellW(t) >= 28 ? f2 : fc;
+        const max = t.scale === 'act' ? F.max.act : t.scale === 'bias' ? F.max.bias : 1, fmtC = cellW(t) >= 28 ? f2 : fc;
         const bars = t.kind === 'bars' || t.kind === 'dist', tops = bars ? t.v.map(row => argmax(row || [])) : null;
         for (const c of list) {
           const x = t.v[c.i]?.[c.j];
@@ -980,7 +1210,7 @@ export function install(ctx) {
           if (c.el._c !== col) { c.el._c = col; c.el.style.background = col; }
           if (c.el._z !== zero) { c.el._z = zero; c.el.classList.toggle('zero', zero); }
           // narrow cells leave a 0 blank (the unfilled cell says it: a ReLU that is off)
-          const s = masked ? (t.scale === 'attn' ? '' : '−∞') : t.onehot ? (x === 1 ? '1' : '') : nums && !(zero && fmtC === fc) ? fmtC(x) : '';
+          const s = masked ? (t.scale === 'attn' || t.scale === 'bias' || t.maskBlank ? '' : '−∞') : t.onehot ? (x === 1 ? '1' : '') : nums && !(zero && fmtC === fc) ? fmtC(x) : '';
           if (c.el._t !== s) c.el.textContent = c.el._t = s;
         }
         if (bars) {
@@ -1038,6 +1268,12 @@ export function install(ctx) {
     function renderCtl() {
       const v = cur(), n = F?.stages.length || 0, i = v?.stage ?? null;
       let h = '<span class="nnf-title">Flow</span>';
+      // the tiny language model's variants: the same data, one change each (the picker rebuilds on it)
+      if (F?.variant && !audience) {
+        h += `<select class="ui-field sm nnf-varsel" title="Variants of the tiny language model: the same data and sizes, one change each. Picking one builds it (Ctrl+Z goes back)" aria-label="Variant">`
+          + variantMenu().map(([axis, list]) => `<optgroup label="${esc(axis)}">${list.map(it => `<option value="${esc(it.key)}"${it.key === F.variant.key ? ' selected' : ''}>${esc(it.short)}</option>`).join('')}</optgroup>`).join('')
+          + '</select><span class="nnf-sep"></span>';
+      }
       h += `<button class="ui-btn sm icon" data-a="whole" title="The whole pass: no stage lit"${i === null ? ' disabled' : ''}>${icon('stop', '&#9632;')}</button>`;
       h += `<button class="ui-btn sm icon" data-a="prev" title="Previous stage (←)"${!n ? ' disabled' : ''}>${icon('step-back', '&#9664;')}</button>`;
       h += `<button class="ui-btn sm icon${v?.play ? ' on' : ''}" data-a="play" title="${v?.play ? 'Pause' : 'Play the stages one by one'} (Shift+G)"${!n ? ' disabled' : ''}>${v?.play ? icon('pause', '&#10074;&#10074;') : icon('play', '&#9654;')}</button>`;
@@ -1058,6 +1294,12 @@ export function install(ctx) {
       }
       if (ctl._h !== h) { ctl._h = h; ctl.innerHTML = h; }
     }
+    ctl.addEventListener('change', e => {
+      const sel = e.target.closest?.('.nnf-varsel');
+      if (!sel || audience) return;
+      sel.blur();   // the keys go back to the tab
+      switchVariant(sel.value);
+    });
     ctl.addEventListener('click', e => {
       const b = e.target.closest('button');
       if (!b || audience) return;
@@ -1107,6 +1349,28 @@ export function install(ctx) {
     function play(on) {
       if (audience) return;
       setPlay(on === undefined ? !cur()?.play : !!on);
+    }
+    // Another variant of the tiny language model on the same data: the Train panel's data settings,
+    // batch, speed and init seed carry over, and so does the sentence in the inputs (with its targets and
+    // token names); the variant keeps its own recorded rate. store.load: Ctrl+Z comes back.
+    function switchVariant(key) {
+      const p = M.PRESETS[key], old = store.net;
+      if (!p?.family || audience || variantOf(old)?.key === key) return;
+      const ot = isObj(old.meta?.train) ? old.meta.train : {};
+      const seed = Number.isInteger(ot.initSeed) ? ot.initSeed : 1;
+      let net;
+      try { net = p.build(seed); } catch (err) { console.error('[nn/flow] variant:', err); ctx.toast?.(`Could not build that variant: ${err.message}`); return; }
+      for (const k of ['n', 'noise', 'seed', 'batch', 'speed', 'initSeed']) if (ot[k] !== undefined) net.meta.train[k] = ot[k];
+      const io = n => [M.nodesIn(n, 0), M.nodesIn(n, n.layers.length - 1)], [i0, o0] = io(old), [i1, o1] = io(net);
+      if (i0.length === i1.length && o0.length === o1.length) {
+        i1.forEach((nd, j) => { nd.value = i0[j].value; });
+        o1.forEach((nd, j) => { nd.target = o0[j].target; });
+        if (Array.isArray(old.meta?.tokenNames)) net.meta.tokenNames = old.meta.tokenNames.slice();
+      }
+      setPlay(false);
+      store.load(net);
+      put({ stage: null, off: [], hover: null });
+      ctx.toast?.(`${p.short}: ${p.note}`, 5000);
     }
     function headToggle(h) {
       if (audience) return;
@@ -1438,11 +1702,11 @@ export function install(ctx) {
       invalidate(all) { if (all) for (const list of cells.values()) for (const c of list) { c.el._c = undefined; } needPaint = true; needState = true; kick(); },
       restate() { needState = true; kick(); },
       shown(on) { visible = on; if (on) { needFit = needPaint = needState = true; kick(); } },
-      step, play, head: headToggle, fit: () => { needFit = true; kick(); }, dispose,
+      step, play, head: headToggle, variant: switchVariant, fit: () => { needFit = true; kick(); }, dispose,
       info: () => ({
         stages: F?.stages.map(s => s.key) || [], stage: cur()?.stage ?? null, scale, area,
         tiles: F ? Object.keys(F.tiles).length : 0, why: F?.why ?? null, next: F?.next ?? null,
-        lm: !!F?.lm, every: !!F?.every, cell: CW,
+        lm: !!F?.lm, every: !!F?.every, cell: CW, variant: F?.variant?.key ?? null,
       }),
     };
   }

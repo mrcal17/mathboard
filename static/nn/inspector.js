@@ -38,6 +38,7 @@ const MAX_TERMS = 9;   // longer sums are elided with \cdots
 const FN = {
   identity: '', relu: '\\operatorname{ReLU}', leaky: '\\operatorname{LReLU}',
   sigmoid: '\\sigma', tanh: '\\tanh', softmax: '\\operatorname{softmax}',
+  gelu: '\\operatorname{GELU}', layernorm: '\\operatorname{LN}', rmsnorm: '\\operatorname{RMSNorm}', swiglu: '\\operatorname{SwiGLU}',
 };
 const DEF = {
   identity: 'a = z', relu: 'a = \\max(0,\\, z)', sigmoid: 'a = \\dfrac{1}{1 + e^{-z}}',
@@ -1215,6 +1216,31 @@ export function install(ctx) {
     zs.forEach((z, k) => { if (k !== i && Number.isFinite(z)) s += Math.exp(z - m); });
     return { f: z => 1 / (1 + s * Math.exp(m - z)), key: `softmax|${m.toFixed(2)}|${s.toFixed(3)}` };
   }
+  // The other layer-wide activations (LayerNorm, RMSNorm per token; SwiGLU's halves): output i as z_i
+  // moves, the rest held, through model.activate.
+  function vecSlice(L, i, act) {
+    const zs = Array.from(store.state.fwd?.z?.[L] || []);
+    if (act === 'swiglu') {
+      const h2 = zs.length >> 1, u = zs[i + h2];
+      return i < h2 ? { f: z => (M.ACTS.swiglu.f(z) * u), key: `swiglu|${fmt(u, 3)}` } : { f: z => z, key: 'swiglu|u' };
+    }
+    const [b0, b1] = softBlock(L, i), blk = zs.slice(b0, b1), k = i - b0, key = `${act}|${blk.map(v => fmt(v, 2)).join(',')}|${k}`;
+    return { f: z => { blk[k] = z; return M.activate(act, blk)[k]; }, key };
+  }
+  // A fixed bias (a sinusoidal position, a norm layer's 0): shown, never edited.
+  function fixedBiasRow(c, id, labTex) {
+    const sw = h('span', { class: 'nn-sw' }), name = h('span', { class: 'nn-sl-lab' }), val = h('span', { class: 'nn-fixed-val' });
+    const row = h('div', { class: 'nn-sl fixed', title: 'Fixed bias: training, Randomize and editing never change it' },
+      sw, name, h('span', { class: 'nn-masked-txt', text: 'fixed' }), val);
+    hoverable(c, row, { kind: 'bias', id });
+    c.binds.push(() => {
+      setTex(name, labTex());
+      const b = node(id)?.bias;
+      setText(val, numText(b));
+      setStyle(sw, 'background', Number.isFinite(b) ? colorFor(b, maxB, theme()) : 'transparent');
+    });
+    return row;
+  }
 
   // ---------------------------------------------------------------- node card
 
@@ -1314,7 +1340,7 @@ export function install(ctx) {
       }
       if (!rows.length) rows.push(h('div', { class: 'nn-hint', text: 'No incoming edges.' }));
       const bt = biasTie(id);   // a shared bias (one per feature, used by every token): setNode moves them all
-      const brow = slider(c, {
+      const brow = node(id)?.fixed === true ? fixedBiasRow(c, id, () => `b^{(${L})}_{${I}}`) : slider(c, {
         lab: el => setTex(el, bt ? tieTex(bt) : `b^{(${L})}_{${I}}`),
         get: () => node(id)?.bias,
         set: v => M.setNode(net(), id, { bias: v }),
@@ -1350,7 +1376,7 @@ export function install(ctx) {
         const fw = fwdNode(id);
         const pt = { z: fw?.z, a: fw?.a, hi: true };   // this sample's point
         if (isVec(act)) {
-          const { f, key } = softmaxSlice(L, i);
+          const { f, key } = act === 'softmax' ? softmaxSlice(L, i) : vecSlice(L, i, act);
           plot.draw(f, [pt], key);
         } else {
           plot.draw(actFn(act), [pt], act);
@@ -1704,7 +1730,9 @@ export function install(ctx) {
     const act = actOf(L);
     const fn = FN[act] ?? `\\operatorname{${act}}`;
     if (act === 'identity') lines.push(`${aS} &= ${zS} = ${fmt(a)}`);
-    else if (isVec(act)) {
+    else if (isVec(act) && act !== 'softmax') {   // LayerNorm, RMSNorm (over the token), SwiGLU (its halves)
+      lines.push(`${aS} &= ${String(M.ACTS[act]?.tex || '').replace(/_i\b/g, `_{${I}}`)} = ${fmt(a)}`);
+    } else if (isVec(act)) {
       lines.push(`${aS} &= ${fn || `\\operatorname{${act}}`}(z^{(${L})})_{${I}} = \\frac{e^{${zS}}}{\\sum_j e^{z^{(${L})}_{j}}} = ${fmt(a)}`);
     } else lines.push(`${aS} &= ${fn}(${zS}) = ${fn}(${fmt(z)}) = ${fmt(a)}`);
     return aligned(lines);
@@ -1773,7 +1801,11 @@ export function install(ctx) {
     if (L > 0 && !fused) {
       const z = fw?.z, a = fw?.a;
       if (act === 'identity') lines.push(`${dS} &= ${dZ} = ${dA} = ${g3(g.dz)}`);
-      else if (isVec(act)) {
+      else if (isVec(act) && act !== 'softmax') {
+        // LayerNorm, RMSNorm and SwiGLU couple the layer too: every output they touch sends its share back
+        const aj = `a^{(${L})}_{j}`;
+        lines.push(`${dS} &= ${dZ} = \\textstyle\\sum_j \\frac{\\partial ${aj}}{\\partial ${zS}}\\,\\frac{\\partial L}{\\partial ${aj}} = ${g3(g.dz)}`);
+      } else if (isVec(act)) {
         // softmax couples the layer: delta_i = a_i (dL/da_i - sum_j a_j dL/da_j)
         const aj = `a^{(${L})}_{j}`, dAj = `\\frac{\\partial L}{\\partial ${aj}}`;
         const [b0, b1] = softBlock(L, I - 1);   // per token on a token layer
@@ -2185,7 +2217,7 @@ export function install(ctx) {
 
     // bias vector (or the input vector, which is the input layer's one-line)
     const vec = L === 0 ? null : texBox(c, () => vecTex(L), false, 'nn-math nn-inline');
-    const rows = nodes().map(q => slider(c, L === 0 ? {
+    const rows = nodes().map(q => (L > 0 && q.fixed === true ? fixedBiasRow(c, q.id, () => label(q.id)) : slider(c, L === 0 ? {
       lab: el => setTex(el, label(q.id)),
       get: () => node(q.id)?.value,
       set: v => M.setNode(net(), q.id, { value: v }),
@@ -2198,7 +2230,7 @@ export function install(ctx) {
       what: 'bias', hover: { kind: 'bias', id: q.id }, other: q.id, scale: () => maxB,
       onLabel: () => select({ kind: 'node', id: q.id }),
       labelTitle: biasTie(q.id) ? `Shared bias ${tieText(biasTie(q.id))}: open this neuron` : 'Open this neuron',
-    }));
+    })));
     rows.forEach((r, k) => {
       const q = nodes()[k];
       if (biasTie(q?.id)) r.classList.add('tied');

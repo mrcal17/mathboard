@@ -8,7 +8,8 @@ tiles with their shapes, down to the softmax over the next word. Like the 3D vie
 back); the cards, the Train and Attention panels, the lens bar and Explain keep working over it and
 stay linked through the store.
 It adds one store key, `flow`, which the audience window mirrors, and one preset made for it:
-**Tiny language model** (`tiny_lm`) on the next-word dataset `nl_lm`.
+**Tiny language model** (`tiny_lm`) on the next-word dataset `nl_lm`, with 17 variants of it that
+each change one thing (Variants, below), reachable from a picker in the Flow bar.
 
 Toggle it with the toolbar's **Flow** button (group `view`, beside 3D) or **G**. Shift+G plays the
 stages. The Flow view and the 3D view replace the canvas one at a time: opening one closes the other.
@@ -48,11 +49,10 @@ as the net has a ReLU, biases 0, so P starts at 0), except W_Q, W_K, W_O and W_2
 first reads its past about evenly, and the block starts near Y = X. Reset with init seed 1 gives
 back the preset's exact weights. `PRESETS.tiny_lm.lr` is 0.2 and `noise` 0.
 
-**No LayerNorm.** model.js has no per-token normalization, and adding one cleanly means a new
-vector activation whose Jacobian the matrix panel and the cards would also have to show (they
-special-case softmax as the only vector activation). With one block, d = 8 and the small init
-above, training is stable without it. Pre-norm would slot in as a normalization before Q, K, V and
-before the FFN; the Flow view would then show it as one more stage per branch.
+**No LayerNorm.** With one block, d = 8 and the small init above, training is stable without it,
+so tiny_lm has none. The norm variants add it (and RMSNorm) as layer-wide activations: pre-norm as
+a normalization before Q, K, V, before the FFN and before the logits, each one more stage in the
+Flow view, and post-norm on the two sums (Variants).
 
 ### The next-word datasets (`nl_lm`, and `nl_next`)
 
@@ -218,6 +218,119 @@ every position". Any other softmax output keeps every row.
 - **Live.** The tiles repaint on every `values` event, so they follow the Train panel as it
   trains, the samples it loads and every edit.
 
+## Variants (the tiny language model's family)
+
+Seventeen presets, each the tiny language model with one change, all on `nl_lm` with the same
+sizes (d_model 8, 5 positions, 23 words, an FFN of 32), the same recipe (He, biases 0, W_Q, W_K,
+W_O and W_2 small, recorded as `meta.train.init`, so Reset with init seed 1 gives the preset back)
+and the same headline sentence. They make the New net menu's **Tiny LM variants** section. In
+`PRESETS` each (tiny_lm too) has `family: 'tiny_lm'`, an `axis` (Baseline, Positions, Attention,
+Norm, FFN, Other), a `short` name and the `title` its nets carry.
+
+**The picker.** While the flow shows a net of the family, its bar starts with a select
+(`.ui-field.sm`, inside the bar's `.ui-chrome`, so H and the audience hide it) listing the whole
+family by axis. Picking one builds it (`store.load`, so Ctrl+Z comes back; `ctx.flow.variant(key)`
+does the same) on the same data: the Train panel's points, noise, data seed, batch, speed and init
+seed carry over (the net is built with that init seed, as Reset would draw it), and so does the
+sentence in the inputs, with its targets and token names. The variant keeps its own recorded
+learning rate. The lit stage and knocked-out heads reset, and the note toasts. Under the sentence
+a line says what the variant changes (its note).
+
+| key | axis | what changes | what the flow shows | lr |
+|---|---|---|---|---|
+| `tiny_lm_nope` | Positions | no position vector: X's biases fixed at 0 (`node.fixed`) | "Embed", X = O W_E as one tile; the caption says the order reaches the model only through the causal mask | 0.2 |
+| `tiny_lm_sin` | Positions | P fixed: sin(t / 10000^(2i/8)) in column 2i + 1, cos in 2i + 2 (t the position, 0-based), as fixed biases | "Embed + position (fixed)", P beside O W_E, each cell's tip its formula | 0.2 |
+| `tiny_lm_rope` | Positions | no P; the attention layer's `pos: 'rope'` | "Rotate q, k (RoPE)" before the scores: Q̃_h, K̃_h per head, the tip the rotation with numbers; the scores read them | 0.2 |
+| `tiny_lm_alibi` | Positions | no P; `pos: 'alibi'` | the scores as QKᵀ/√d + B = S per head, B the fixed penalty on its own colour scale | 0.2 |
+| `tiny_lm_mqa` | Attention | one K and one V for both heads: K and V tied across heads, so W_K and W_V are 8 × 4 | head 2's K and V lighter, with a "= K₁" badge; the Q, K, V caption says multi-query and the sizes | 0.2 |
+| `tiny_lm_gqa` | Attention | 4 heads of d_h = 2, 2 K, V heads (heads 1, 2 and 3, 4 share) | the badges on heads 2 and 4; four head chips | 0.2 |
+| `tiny_lm_window` | Attention | `window: 3`: a position reads itself and the 2 before it | the band mask in S and A; a masked tip says "outside the window of 3" | 0.2 |
+| `tiny_lm_linear` | Attention | `linear: true`: no softmax | "Feature map φ" (φ(Q_h), φ(K_h)), the scores φ(q)·φ(k) with no scale and the masked cells blank, then "Weights A" = S over its row sum | 0.2 |
+| `tiny_lm_nomask` | Attention | `causal: false` | no hatching; the captions say every position sees its own next word | 0.2 |
+| `tiny_lm_prenorm` | Norm | N₁ = LN(X), N₂ = LN(H), N₃ = LN(Y) before Q, K, V, the FFN and the logits (fixed identity edges, fixed zero biases); the residuals skip them | a LayerNorm stage each, the tip (x − μ)/σ with numbers | 0.5 |
+| `tiny_lm_postnorm` | Norm | H = LN(X + Z W_O + b_O), Y = LN(H + F W_2 + b_2) | "+ residual, LayerNorm" sums, LN(…) in the formulas and the tips | 0.5 |
+| `tiny_lm_rmsnorm` | Norm | pre-norm with RMSNorm | RMSNorm stages, the tip x / rms | 0.5 |
+| `tiny_lm_gelu` | FFN | the FFN's GELU | "FFN" with GELU in its caption | 0.2 |
+| `tiny_lm_swiglu` | FFN | the FFN layer as groups G, U (5 × 32 each), act `swiglu`: W_1 into G, W_3 into U, W_2 reading G | "Gate and up" (G before silu, and U), then "SwiGLU" (F = silu(G) ⊙ U), which F W_2 reads | 0.2 |
+| `tiny_lm_tied` | Other | no W_U: the logits' edges tie to W_E's entries | the logits read W_Eᵀ, and the caption says why | 0.2 |
+| `tiny_lm_2layer` | Other | two pre-norm blocks, each with its own matrices (W_Q^(1), W_Q^(2), ...) | 29 stages; the stream is X, H₁, Y₁, H₂, Y₂ | 0.5 |
+| `tiny_lm_window2` | Other | the same with a window of 3 in both blocks | the band mask in both attention layers | 0.5 |
+
+**The model's side** (model.js, listed in docs/NN_CONTRACT.md):
+- Activations `gelu` (the tanh form), `layernorm` and `rmsnorm` (per token on a token layer, as
+  softmax; no learned gain or shift; ε = 1e-5 under the root) and `swiglu` (the layer's first half
+  gates its second: a = [silu(g) ⊙ u, u]). The last three are layer-wide (`vector: true`), with
+  their Jacobians in the backward pass.
+- `node.fixed`: a bias that is never trained, randomized or set (X's in NoPE, RoPE and ALiBi, the
+  sinusoidal P, the norm layers' zeros). Its gradient is still reported.
+- Attention layers take `window`, `pos` (`'rope'` | `'alibi'`) and `linear`. RoPE turns pair p of
+  a head's columns (2p + 1, 2p + 2) by t · 10000^(−2p/d_h) at position t (0-based): with d_h = 4,
+  57.3° and 0.57° per position. ALiBi's slopes are 2^−(h+1) (½, ¼, …), the paper's first ones for
+  8 heads; its 2-head slopes (1/16, 1/256) would barely show over 5 positions. Linear attention
+  uses φ = elu + 1: S = φ(q)·φ(k) on the visible cells and A = S over its row's sum. `fwd.attn`'s
+  heads then also carry Qr, Kr (RoPE's turned q, k), Qf, Kf (φ of them) and B (ALiBi's bias); Q
+  and K stay the Q, K, V layer's own.
+- Multi-query and grouped-query attention need no new maths: the ties share K and V. Tied
+  embeddings neither; `tiedMatrices` reads the logits' matrix as W_E transposed (`transposed`).
+- `attend(x, spec)` computes one attention layer as `forward` does (the flow's knock-outs use it);
+  `attnVisible(spec, i, j)`, `ropeFreq(p, d_h)`, `alibiSlope(h)` and `NORM_EPS` are exported.
+
+**Learning rates.** 0.2, as tiny_lm, except the normalized variants (the three norms and the two
+blocks): 0.5, where they train best. At 0.5 NoPE, the sinusoidal P and multi-query diverge. The
+two-block variants are pre-norm because without the norms two blocks diverge even at 0.1 (at
+0.05 they train, slowly: p(mat) 0.84 after 600 steps).
+
+**What they show**, trained from the preset in node (batch 10 from 300 sentences, the recorded
+rate, 600 steps; the loss over the 300, and how many of the 20 sentences get more than 0.8 on
+their last word):
+
+| variant | loss | p(mat \| the cat sat on the) | last word > 0.8 |
+|---|---|---|---|
+| tiny_lm | 0.631 | 0.998 | 20 / 20 |
+| no positions, sinusoidal, RoPE, ALiBi | 0.635, 0.643, 0.636, 0.634 | 0.997, 0.988, 0.996, 0.996 | 20 / 20 each |
+| multi-query, grouped-query | 0.641, 0.635 | 0.997, 0.998 | 20 / 20 each |
+| window 3 | 0.811 | 0.406 | 1 / 20 |
+| linear attention | 0.643 | 0.992 | 19 / 20 |
+| no mask | 0.002 | 0.999 | 20 / 20 |
+| pre-norm LN, post-norm LN, pre-norm RMSNorm | 0.630, 0.635, 0.626 | 0.980, 0.976, 0.983 | 20, 18, 20 / 20 |
+| GELU, SwiGLU | 0.633, 0.615 | 0.998, 0.997 | 20 / 20 each |
+| tied embeddings | 0.625 | 0.990 | 20 / 20 |
+| 2 layers, 2 layers with window 3 | 0.632, 0.637 | 0.973, 0.951 | 18, 19 / 20 |
+
+- **Positions don't matter here.** The task is about content (which subject, which preposition),
+  and the causal mask alone tells position 1 from position 5 (one sees one word, the other five),
+  so no position vector, a fixed one, RoPE and ALiBi all end where tiny_lm does.
+- **The window.** The last position sees only "sat on the", so cat, dog and bird get exactly the
+  same distribution there (mat 0.41, rug 0.31, branch 0.28), while "the dog ran to the" still gets
+  park (only the dog runs). Two blocks with the same window get it back (0.95): in the first the
+  verb and the preposition read the subject, in the second the last position reads them.
+- **No mask.** Positions 1 to 4 copy their next word from the position after them (after "the",
+  dog gets more than 0.95 when the sentence is about a dog), so the loss falls far below the causal
+  floor of about 0.60; the last position has nothing to copy and learns as before.
+- **Linear attention** does nearly as well with flatter weights: the last row's entropy is 1.52
+  against softmax's 1.30 (uniform over 5 is 1.61).
+- **The norms** start higher (loss 3.65 against 3.06: every row normalized makes larger logits)
+  and train as well at 0.5.
+
+**Building rules they add** (`buildFlow`, for any net):
+- A layer whose biases are all fixed at 0 has no bias term; a token layer's fixed non-zero biases
+  are a fixed P.
+- A norm layer (layernorm or rmsnorm, fed only by fixed identity edges from one earlier layer,
+  fixed zero biases): one stage (`norm<l>`), its tile marked d_model. A sum with a norm activation
+  is the "+ residual, LayerNorm" stage (post-norm).
+- A SwiGLU layer (groups G, U from one source): `gate<l>` (tiles `gate<l>`, the gate before silu,
+  and `L<l>.U`) and `glu<l>` (`L<l>.G`, F, the FFN for the widths); the next layer's product reads F.
+  GELU widens like ReLU (the FFN).
+- A shared matrix read transposed is named `W^⊤`.
+- RoPE adds `rope<l>` (tiles `rq<l>.<h>`, `rk<l>.<h>`), linear attention `phi<l>` (`fq`, `fk`) and
+  the weights stage "Weights A"; ALiBi makes each head's scores row `qk<l>.<h>` + `ab<l>.<h>` =
+  `s<l>.<h>`, the B tiles on scale `'bias'` (`F.max.bias`). The mask comes from `attnVisible`.
+- Heads whose K (V) columns carry the same tie ids share it: their K, V tiles get `same` (the
+  first such head's name), drawn lighter with a badge, and the Q, K, V caption names the kind.
+- A layer named `H₂ = …` is H_{2}; a row of a symbol with a subscript reads (n_{3})_{5}.
+- `F.variant` = `variantOf(net)` (`{ key, axis, short, note }` or null, matched by title) and
+  `variantMenu()` the picker's list; a variant's structure key includes its key and masks.
+
 ## `state.flow` (owner: flow.js)
 
 ```js
@@ -263,8 +376,10 @@ flow = null | {
   unchanged colours and text.
 
 `ctx.flow` (test and console handle) = `{ on, toggle(on?), open(patch?), step(±1), play(on?),
-every(on?), head(h), fit(), info() }`; `info()` reports the stage keys, the lit stage, the zoom, the
-free area, the tile count, `why`, the prediction, `lm`, `every` and the cell width.
+every(on?), head(h), variant(key), fit(), info() }`; `variant(key)` builds another variant of the
+tiny language model on the same data, as the picker does; `info()` reports the stage keys, the lit
+stage, the zoom, the free area, the tile count, `why`, the prediction, `lm`, `every`, the cell
+width and the `variant` key.
 
 ## Keys (when `ctx.active(e)`; never in the audience window)
 
@@ -278,20 +393,26 @@ free area, the tile count, `why`, the prediction, `lm`, `every` and the cell wid
 
 ```js
 cleanFlow(v) -> flow | null
-attendHeads(x, spec, off = Set) -> { heads: [{ Q, K, V, S, A, Z }], out }   // model.js's attention, heads in off
-                                                                            //   left out of out (their columns 0)
+attendHeads(x, spec, off = Set) -> { heads: [{ Q, K, V, S, A, Z, ... }], out }   // model.attend (the variants'
+                                                                            //   fields too), heads in off left out of out
 propagate(net, a, from = 1, { off }) -> { a, z, attn }   // the forward pass again from layer `from`
 ablate(net, fwd, off) -> { a, z, attn, from }            // fwd with those heads knocked out (from = -1: unchanged)
 buildFlow(net, { fwd, off, every }) -> { stages, tiles, nodeCell, words, labels, numbered, next, lm, every,
-                                         residual, ffn, dims, dimsText, attention, why, max, heads, T }
+                                         residual, ffn, dims, dimsText, attention, why, max: { act, bias },
+                                         heads, T, norms, variant }
 flowKey(F) -> string                                     // the structure key
 texHtml(tex) -> html                                     // W_{out} -> W<sub>out</sub>, for tips and titles
+variantOf(net) -> { key, axis, short, note } | null      // the tiny language model's family, by meta.title
+variantMenu() -> [[axis, [{ key, short }]]]              // the picker's list, in menu order
 ```
 
 A tile is `{ id, l, tex, kind: 'mat' | 'bars' | 'dist', rows, cols, v, pos, rowLab, rowNo, colLab,
 head, off, mask, scale, onehot, target, dim, dimRows, note, node, src, tip }`: `pos` maps its rows to
 positions (the last-position tiles have `[4]`), `rowNo` numbers them, `dim` is its bracket
-(`{ kind: 'model' | 'ffn' | 'vocab', html }`) and `dimRows` the rows that fade.
+(`{ kind: 'model' | 'ffn' | 'vocab', html }`) and `dimRows` the rows that fade. `scale` is `'act'`,
+`'attn'`, `'prob'` or `'bias'` (ALiBi's B); a K or V tile of a head that shares it has `same` (the
+name of the one it equals), and a linear attention's scores `maskBlank` (masked cells are left out,
+not −∞).
 
 The tests check that `attendHeads` gives `fwd.attn` exactly and `propagate` reproduces
 `model.forward` from any layer on eight presets; that knocking head h out equals zeroing the rows
@@ -312,6 +433,21 @@ cross-entropy over the vocabulary at each position), that training puts more tha
 "the cat sat on the" (and more than 0.8 on every sentence's last word, with the open positions
 still spread), and Adapt.
 
+For the variants, `tests/nn_model.test.mjs` checks the new activations' values and their backward
+pass against finite differences (as hidden and output layers, and per token), the attention
+variants against a formula-by-formula reference (window, RoPE, ALiBi, linear, and together, with
+`attend` equal to `forward`) and every one of their gradients against finite differences, that RoPE's
+scores depend only on the distance, the new fields in validate, normalize and setLayer,
+`node.fixed`, the transposed tie, each variant's architecture, Reset and a sampled finite-difference
+check of its whole backward pass (every untied and shared bias, and a sample of shared entries,
+edges and inputs), and what training shows (four variants learn as tiny_lm does; the window's last
+position gives every subject exactly the same guess while two windows recover it; no mask falls
+below a loss of 0.05). `tests/nn_flow.test.mjs` checks `variantOf` and `variantMenu`, that
+`attendHeads` and `propagate` give `forward` exactly on every variant, the knock-out equivalence on
+five of them, and each variant's stages and tiles (the turned Q and K, S = QKᵀ/√d + B, the band
+mask, φ and A = S over its row sum, the shared K and V, the norm rows, F = silu(G) ⊙ U, W_Eᵀ and the
+block symbols); the every-preset tests cover them too.
+
 ## Limitations
 
 - PNG and To board picture the 2D canvas, not the Flow view.
@@ -321,12 +457,34 @@ still spread), and Adapt.
   is most of the flow.
 - The fallback for layers that are not tokenwise tied shows each layer as one row of numbers and
   its weights only in the tip.
+- **The variants elsewhere.** Only the Flow view draws what a variant changes. The canvas, the
+  matrix panel, the cards, the Attention panel and the 3D view show the variants' true numbers (S, A
+  and Z come from the model, and so do the norms' values), but write attention as
+  softmax(QKᵀ/√d_h), without RoPE's turn, ALiBi's B or linear attention's φ, and the canvas and the
+  3D view hatch only causal cells, so a window's older keys show as zero weights instead of masked.
+  The matrix panel and the cards give LayerNorm, RMSNorm and SwiGLU's backward step as the
+  Jacobian product δ = Jᵀ ∂L/∂a, with its value but not its entries.
+- LayerNorm and RMSNorm have no learned gain or shift. Right before a matrix (pre-norm) those would
+  fold into it; in post-norm they would not, so there the residual stream stays exactly normalized
+  where the first transformer's γ and β could rescale it.
+- Multi-query and grouped-query attention share K and V by ties, so the Q, K, V layer still holds a
+  K column per query column (the shared ones repeated): the saving they bring when generating, a
+  smaller cache of keys and values, is stated in the caption, not drawn.
+- The two-block variants change two things, depth and the pre-norm that lets two blocks train.
+- SwiGLU keeps the FFN at 32 wide, so it has 50% more FFN weights than ReLU; LLaMA shrinks it to
+  about ⅔ to match (a width of 21 here).
 - **Training speed.** The tiny language model is 7.5 times the first one's size (5760 edges against
   768), and the other panels' per-frame work grows with it: the Train panel's evaluation of the
   whole dataset and its sequence plot, the matrix panel, the hidden SVG canvas and the audience
   mirror. In the headless test browser it trains about 27 steps a second at 7 frames a second
   (the first one: 206 steps at 41), so 400 steps take about 15 s there. The Flow view itself is
-  about 3% of the frame.
+  about 3% of the frame. Measured again when the variants came in, on a machine busy with other
+  work (single runs ranged from 5 to 34 steps a second), interleaving the code before and after:
+  over 23 runs each, a median of 13.9 steps a second before and 15.0 after, the best 31.8 and
+  34.3. In node, best of 24, a batch-10 step costs 1.18 to 1.25 ms either way, the Train panel's
+  pass over the 300 sentences 5.1 ms and the Flow view's `buildFlow` 4.5 to 5.5 ms. The one-block
+  variants cost the same per step as tiny_lm (1.14 to 1.22 ms) except SwiGLU (1.42 ms, its second
+  matrix up); the two-block ones twice (2.05 ms).
 
 ## Testing
 
@@ -337,3 +495,5 @@ into the Flow view; `mathboardNet.ctx.train.play()` / `pause()` train it, `ctx.f
 `.nnf-c[data-t="<tile>"][data-i="<row>"][data-j="<col>"]` (bars `.nnf-b`) to point at. For
 `docs/media/net-flow.png` the preset was trained through the Train panel (1000 steps of batch 10 at
 lr 0.2, speed 5), the Train panel folded (`ctx.train.fold(true)`), and the pointer put on A₂[5,2].
+A variant opens the same way (`#nn=tiny_lm_rope`), or from the open view with
+`ctx.flow.variant('tiny_lm_rope')` or the picker (`select.nnf-varsel`).

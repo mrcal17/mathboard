@@ -120,9 +120,10 @@ export function readSettings(net, model) {
 // bypasses layer `from` (then later layers are not a function of it alone). outOnly: the caller
 // reads only the output layer (a loss); a net with attention then leaves the hidden layers null.
 export function forwardMany(net, model, X, n, from = 0, M = model.matrices(net), outOnly = false) {
-  // Attention multiplies activations together, which the matrices can't express: the model's own
-  // forward pass then does every sample (only from the inputs).
-  if (M.some(m => m.kind === 'attention')) return from === 0 ? predictMany(net, model, X, n, outOnly) : null;
+  // Attention multiplies activations together, which the matrices can't express, and a layer-wide
+  // activation other than softmax (LayerNorm, RMSNorm, SwiGLU) couples a layer's entries: the model's
+  // own forward pass then does every sample (only from the inputs).
+  if (M.some(m => m.kind === 'attention' || (m.act !== 'softmax' && model.ACTS?.[m.act]?.vector))) return from === 0 ? predictMany(net, model, X, n, outOnly) : null;
   const L = net.layers.length;
   const sizes = [], pos = Object.create(null);
   for (let l = 0; l < L; l++) {

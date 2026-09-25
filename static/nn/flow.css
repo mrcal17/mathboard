@@ -217,3 +217,21 @@
 
 .nnf-tip { max-width: 440px; white-space: normal; line-height: 1.5; }
 .nnf-tip sub, .nnf-tip sup { font-size: 0.75em; line-height: 0; }
+
+/* ---------------------------------------------------------------- the tiny language model's variants */
+/* what the variant changes, under the sentence (the note of its preset) */
+.nnf-variant {
+  max-width: 1100px; margin: calc(-1 * var(--sp-8, 8px)) auto var(--sp-12, 12px); text-align: center;
+  font-size: var(--fs-sm, 12px); line-height: var(--lh, 1.4); color: var(--text-2, var(--fg));
+}
+.nnf-variant[hidden] { display: none; }
+.nnf-variant b { font-weight: var(--fw-strong, 600); color: var(--text-1, var(--fg)); }
+/* a head's K or V shared with another head (multi-query, grouped-query): a badge naming it, the copy lighter */
+.nnf-same {
+  padding: 0 6px; border-radius: var(--r-pill, 999px); background: var(--well, rgba(127, 127, 127, 0.12));
+  font-size: 11px; color: var(--text-2, var(--fg)); cursor: help;
+}
+.nnf-same .katex { font-size: 1em; }
+.nnf-tile.shared .nnf-g { opacity: 0.55; }
+/* the variant picker in the bar */
+.nnf-ctl .nnf-varsel { max-width: 230px; }

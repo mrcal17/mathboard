@@ -30,6 +30,7 @@ const ATT_RGB = { dark: [183, 148, 255], light: [116, 66, 214] };   // --att, if
 const ACT_TEX = {
   identity: '', relu: '\\operatorname{ReLU}', leaky: '\\operatorname{LReLU}', sigmoid: '\\sigma',
   tanh: '\\tanh', softmax: '\\operatorname{softmax}',
+  gelu: '\\operatorname{GELU}', layernorm: '\\operatorname{LN}', rmsnorm: '\\operatorname{RMSNorm}', swiglu: '\\operatorname{SwiGLU}',
 };
 const KX = { throwOnError: false, strict: 'ignore', trust: c => c.command === '\\htmlData' };
 const NN_VISUAL = /^(?:transform\(W(?:\d+|eff), t\)|map\(W(?:\d+|eff)\))$/;   // rows we add to the 3D tab
@@ -282,7 +283,7 @@ export function install(ctx) {
       let g = maxAbs(bwd.dZ, bwd.dA);
       for (let l = 1; l <= L; l++) {
         const act = net.layers[l].act, z = d.fwd.z[l], a = d.fwd.a[l];
-        d.sp[l] = act === 'softmax' ? z.map(() => NaN) : z.map((zi, i) => model.ACTS[act].df(zi, a[i]));
+        d.sp[l] = model.ACTS[act]?.vector ? z.map(() => NaN) : z.map((zi, i) => model.ACTS[act].df(zi, a[i]));   // a layer-wide act: a Jacobian, no slope
         for (const t of d.M[l].terms) g = Math.max(g, maxAbs(bwd.dZ[l]) * maxAbs(d.fwd.a[t.k]));
       }
       d.max.g = g || 1;
@@ -778,9 +779,9 @@ export function install(ctx) {
       const att = d.T?.[l + 1]?.mode === 'attn' ? l + 1 : 0;
       const sum = [...ups.map(u => `\\big(${wName(u.m, l)}\\big)^{\\!\\top}\\delta^{(${u.m})}`),
         ...(att ? [`\\partial [Q\\,K\\,V]^{(${att})}`] : [])].join(' + ');
-      const soft = act === 'softmax';
+      const soft = !!model.ACTS[act]?.vector;   // softmax, and LayerNorm, RMSNorm, SwiGLU: a Jacobian
       els.push(line(soft
-        ? `\\delta^{(${l})} = J_{\\operatorname{softmax}}^{\\top}\\big(${sum}\\big)`
+        ? `\\delta^{(${l})} = J_{${actTex(act)}}^{\\top}\\big(${sum}\\big)`
         : `\\delta^{(${l})} = \\big(${sum}\\big) \\odot ${primeVec(act, `z^{(${l})}`)}`));
       const groups = ups.map((u, j) => [
         op(j ? '+' : `\\delta^{(${l})} = ${soft ? 'J^{\\top}' : ''}\\Big(`),
@@ -1324,7 +1325,7 @@ export function install(ctx) {
 
   // ---------------------------------------------------------------- token layers: backward
   function tokDelta(d, l) {
-    const S = d.T[l], els = [], act = S.act, idn = act === 'identity', soft = act === 'softmax';
+    const S = d.T[l], els = [], act = S.act, idn = act === 'identity', soft = !!model.ACTS[act]?.vector;
     const bk = i => [`brow:${l}:${i}`];
     const dZg = (g, cap) => tvals(d, l, g, (dd, i) => dd.bwd.dZ[l][i], 'g', cap ?? dSym(d, l, g), bk);
     const dAg = (g, cap) => tvals(d, l, g, (dd, i) => dd.bwd.dA[l][i], 'g', cap ?? `\\partial L / \\partial ${symOf(d, l, g)}`, bk);
@@ -1833,6 +1834,8 @@ export function install(ctx) {
       return `${ds} = ${as}\\Big(${dAs} - \\sum_j ${symOf(d, l, p.g)}_{${p.t + 1},j} \\frac{\\partial L}{\\partial ${symOf(d, l, p.g)}_{${p.t + 1},j}}\\Big)
         = ${f2(d.fwd.a[l][i])}\\,\\big(${g2(d.bwd.dA[l][i])} - ${parg(s)}\\big) = ${g2(dz)}`;
     };
+    // LayerNorm, RMSNorm, SwiGLU: the same coupling, stated as the Jacobian product
+    const jacTex = () => `${ds} = \\big(J_{${actTex(act)}}^{\\top}\\,\\tfrac{\\partial L}{\\partial ${symOf(d, l, p.g)}}\\big)_{${tf}} = ${g2(dz)}`;
     let l0 = '', l1;
     if (l === d.L) {
       const kind = outCase(d), yh = d.fwd.a[l][i], y = d.y[i], fr = n > 1 ? `\\tfrac{1}{${n}}` : '';
@@ -1844,6 +1847,7 @@ export function install(ctx) {
       }
       else if (kind === 'bce') l1 = `${ds} = ${fr}(${Yh} - ${Yt}) = ${fr}(${f2(yh)} - ${par(y)}) = ${g2(dz)}`;
       else if (act === 'softmax') { l0 = `${dAs} = ${fr}(${Yh} - ${Yt}) = ${g2(d.bwd.dA[l][i])}`; l1 = softTex(); }
+      else if (model.ACTS[act]?.vector) { l0 = `${dAs} = ${fr}(${Yh} - ${Yt}) = ${g2(d.bwd.dA[l][i])}`; l1 = jacTex(); }
       else {
         const g = act === 'identity' ? '' : `\\,${primeTex(act, zs)}`, gv = act === 'identity' ? '' : ` \\cdot ${spTex(act, sp)}`;
         l1 = `${ds} = ${fr}(${Yh} - ${Yt})${g} = ${fr}(${f2(yh)} - ${par(y)})${gv} = ${g2(dz)}${side}`;
@@ -1877,6 +1881,7 @@ export function install(ctx) {
       const bare = nums.length === 1 && !nums[0].includes('\\cdot');   // one plain term: its number is the result
       if (act === 'identity') l1 = `${ds} = ${dAs} = ${ups} = ${bare ? '' : `${sum} = `}${g2(dz)}`;
       else if (act === 'softmax') { l0 = `${dAs} = ${ups} = ${bare ? '' : `${sum} = `}${g2(d.bwd.dA[l][i])}`; l1 = softTex(); }
+      else if (model.ACTS[act]?.vector) { l0 = `${dAs} = ${ups} = ${bare ? '' : `${sum} = `}${g2(d.bwd.dA[l][i])}`; l1 = jacTex(); }
       else l1 = `${ds} = \\Big(${ups}\\Big)\\,${primeTex(act, zs)} = (${sum}) \\cdot ${spTex(act, sp)} = ${g2(dz)}${side}`;
     }
     const out = [l0, l1];
@@ -1993,6 +1998,9 @@ export function install(ctx) {
       if (act === 'softmax') {
         l0 = `${dAs} = ${ups} = ${sum} = ${g2(d.bwd.dA[l][i])}`;
         l1 = softTex();
+      } else if (model.ACTS[act]?.vector) {   // LayerNorm, RMSNorm, SwiGLU: the Jacobian product
+        l0 = `${dAs} = ${ups} = ${sum} = ${g2(d.bwd.dA[l][i])}`;
+        l1 = `${ds} = \\big(J_{${actTex(act)}}^{\\top}\\,\\tfrac{\\partial L}{\\partial a^{(${l})}}\\big)_${idx(i)} = ${g2(dz)}`;
       } else {
         l1 = `${ds} = \\Big(${ups}\\Big)${times}${primeTex(act, zs)} = (${sum}) \\cdot ${spTex(act, sp)} = ${g2(dz)}${side}`;
       }

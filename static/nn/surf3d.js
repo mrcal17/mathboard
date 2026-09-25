@@ -353,7 +353,8 @@ export function forwardZA(net, model, X, n, M = model.matrices(net)) {
     sizes.push(ns.length);
     ns.forEach((nd, i) => { pos[nd.id] = i; });
   }
-  if (M.some(m => m.kind === 'attention')) {
+  // attention, or a layer-wide activation other than softmax (LayerNorm, RMSNorm, SwiGLU): the model's own pass
+  if (M.some(m => m.kind === 'attention' || (m.act !== 'softmax' && model.ACTS?.[m.act]?.vector))) {
     const d0 = sizes[0], rows = new Array(n);
     for (let s = 0; s < n; s++) rows[s] = Array.from(X.subarray ? X.subarray(s * d0, (s + 1) * d0) : X.slice(s * d0, (s + 1) * d0));
     const per = model.predict(net, rows, { layer: 'all' });
