@@ -1,195 +1,214 @@
-/* Net tab inspector cards. See static/nn/inspector.js. */
+/* Net tab inspector cards. See static/nn/inspector.js and docs/DESIGN.md (A13 to A21).
+   A card is a .ui-float (head, body, foot); this file places and sizes its parts. Quiet by
+   default: the head, a line on where it sits, a parameter's slider, the one-line computation,
+   then folded sections with a summary. Colour is for data only: sign colours on swatches,
+   sliders and weights in the maths, --att on attention bars, --hi for what is linked or lit. */
 
 .nn-insp-layer { position: absolute; inset: 0; z-index: 20; pointer-events: none; overflow: hidden; }
 
 .nn-insp {
   position: absolute; left: 0; top: 0;
-  display: flex; flex-direction: column;
-  max-height: calc(100% - 16px);
+  max-height: min(70%, 640px);
   pointer-events: auto;
-  background: var(--ui-bg); color: var(--ui-fg);
-  border: 1px solid var(--ui-line); border-radius: 12px;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
-  -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
-  font-size: 13px; line-height: 1.35;
   user-select: text; -webkit-user-select: text;
 }
-.nn-insp.sel { border-color: color-mix(in srgb, #ffd54a 65%, var(--ui-line)); }
-.nn-insp.pinned { box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35), 0 0 0 1px var(--accent); }
-.nn-insp.flash { animation: nn-insp-flash 0.6s ease-out; }
-@keyframes nn-insp-flash { 0% { box-shadow: 0 0 0 4px #ffd54a; } }
+.nn-insp [hidden] { display: none !important; }
 
+/* ---------------------------------------------------------------- head */
 .nn-insp-head {
-  display: flex; align-items: center; gap: 6px;
-  padding: 6px 6px 6px 12px; min-height: 36px;
-  border-bottom: 1px solid var(--ui-line);
-  cursor: grab; user-select: none; -webkit-user-select: none; touch-action: none;
+  gap: var(--sp-6); border-radius: 11px 11px 0 0;
+  user-select: none; -webkit-user-select: none;
 }
 .nn-insp-head.grabbing { cursor: grabbing; }
-.nn-insp-title { font-size: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 170px; }
-.nn-insp-kind { color: var(--ui-muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.nn-insp-sp { flex: 1; }
-.nn-insp-btn {
-  width: 26px; height: 26px; padding: 0; flex: none;
-  display: inline-grid; place-items: center;
-  font-size: 17px; line-height: 1; color: var(--ui-muted); border-radius: 7px;
+.nn-insp-title {
+  flex: 0 1 auto; min-width: 0; max-width: 62%;
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  font-size: var(--fs-lg); font-weight: var(--fw-strong); line-height: var(--lh-tight); color: var(--text-1);
 }
-.nn-insp-btn:hover { color: var(--ui-fg); }
-.nn-insp-pin.on { color: var(--accent); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, transparent); }
-
-.nn-insp-body { overflow-y: auto; overflow-x: hidden; padding: 2px 0 8px; min-height: 0; }
-
-/* sections */
-.nn-sec { padding: 6px 12px 4px; }
-.nn-sec + .nn-sec { border-top: 1px solid var(--ui-line); }
-.nn-sec-h {
-  display: flex; align-items: baseline; gap: 6px;
-  margin: 0 0 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
-  color: var(--ui-muted); cursor: pointer; user-select: none; -webkit-user-select: none;
-  border-radius: 5px;
+.nn-insp-title .katex { font-size: 1.1em; }
+.nn-insp[data-kind="edge"] .nn-insp-title { display: inline-flex; align-items: center; max-width: 72%; overflow: visible; }
+.nn-insp-val {
+  flex: none; display: inline-flex; align-items: baseline; gap: 5px;
+  font-size: var(--fs-lg); font-weight: var(--fw-strong); color: var(--text-1); font-variant-numeric: tabular-nums;
 }
-.nn-sec-h:hover { color: var(--ui-fg); }
-.nn-sec-h.hi { color: #ffd54a; }
-.nn-sec-sub { text-transform: none; letter-spacing: 0; font-weight: 400; font-size: 12px; }
-.nn-fold::before { content: '\25BE'; display: inline-block; width: 9px; transition: transform 0.12s; }
-.nn-sec.folded .nn-fold::before { transform: rotate(-90deg); }
-.nn-sec.folded .nn-sec-b { display: none; }
-.nn-sub { color: var(--ui-muted); font-size: 11.5px; margin: 6px 0 2px; }
+.nn-insp-eq { font-weight: 400; color: var(--text-3); }
+.nn-insp-kind { flex: 0 1 auto; padding-left: 2px; }
 
-/* inputs */
-.nn-insp input, .nn-insp select { font: inherit; color: inherit; }
-.nn-text, .nn-num, .nn-insp select {
-  background: rgba(127, 127, 127, 0.12); color: var(--ui-fg);
-  border: 1px solid var(--ui-line); border-radius: 6px; padding: 3px 6px; min-width: 0;
+/* an edge's title: source -> target, each end opens its neuron */
+.nn-insp-end {
+  padding: 1px 4px; margin: 0 -2px; border: 0; border-radius: var(--r-sm);
+  font: inherit; line-height: inherit; color: inherit;
 }
-.nn-insp select option { background: var(--ui-bg); color: var(--ui-fg); }
-.nn-text:focus, .nn-num:focus, .nn-insp select:focus { outline: none; border-color: var(--accent); }
-.nn-text { width: 100%; }
-.nn-tex-src, .nn-pk, .nn-pv { font: 12.5px/1.3 Consolas, "Cascadia Mono", monospace; }
-.nn-num { width: 100%; font-size: 12px; padding: 2px 4px; font-variant-numeric: tabular-nums; text-align: right; -moz-appearance: textfield; appearance: textfield; }
-.nn-num::-webkit-inner-spin-button, .nn-num::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
-.nn-insp input:disabled, .nn-insp select:disabled, .nn-insp button:disabled { opacity: 0.45; cursor: default; }
-.nn-insp.ro input:disabled, .nn-insp.ro select:disabled { opacity: 0.85; }
+.nn-insp-end:hover { background: var(--hover); }
+.nn-insp-end.hi { background: var(--hi-soft); }
+.nn-insp-arrow { margin: 0 5px; color: var(--text-3); }
+.nn-insp-arrow .katex { font-size: 1em; }
+.nn-insp.ro .nn-insp-end { cursor: default; }
+.nn-insp.ro .nn-insp-end:hover { background: transparent; }
 
-.nn-top { padding: 8px 12px 6px; display: flex; flex-direction: column; gap: 4px; }
-.nn-bias { margin-top: 3px; padding-top: 3px; border-top: 1px dashed var(--ui-line); }
-.nn-field { margin: 2px 0 4px; }
-.nn-grid2 { display: grid; grid-template-columns: 44px 1fr; gap: 6px; align-items: center; }
-.nn-k { color: var(--ui-muted); font-size: 12px; }
-.nn-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 4px; }
-.nn-mini {
-  font-size: 12px; padding: 2px 8px; border-radius: 6px;
-  border: 1px solid var(--ui-line); color: var(--ui-fg);
-}
-.nn-mini.danger:hover { border-color: #ff6b6b; color: #ff6b6b; }
-.nn-chip {
-  padding: 1px 8px; border-radius: 999px; font-size: 12px;
-  border: 1px solid var(--ui-line); color: var(--ui-fg); max-width: 130px; overflow: hidden; text-overflow: ellipsis;
-}
-.nn-chip .katex { font-size: 1.05em; }
-.nn-chip.hi { border-color: #ffd54a; }
-.nn-arrow { color: var(--ui-muted); }
-.nn-where-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
-.nn-where { color: var(--ui-muted); font-size: 12px; overflow-x: auto; overflow-y: hidden; max-width: 100%; }
-.nn-where .katex { font-size: 1.02em; }
+/* actions: rename, pin, close. Faint until the card is hovered; pinned shows as a filled pin. */
+.nn-insp-head .nn-insp-btn.ui-btn { color: var(--text-4); }
+.nn-insp:hover .nn-insp-head .nn-insp-btn.ui-btn { color: var(--text-3); }
+.nn-insp .nn-insp-head .nn-insp-btn.ui-btn:hover { color: var(--text-1); }
+.nn-insp-head .nn-insp-pin.on,
+.nn-insp:hover .nn-insp-head .nn-insp-pin.on { color: var(--text-1); background: transparent; box-shadow: none; }
+.nn-insp-head .nn-insp-pin.on:hover { background: var(--hover); }
+.nn-insp-pin.on .ui-icon path:first-child { fill: currentColor; }
+.nn-insp-edit { opacity: 0; transition: opacity var(--dur-1) var(--ease), color var(--dur-1) var(--ease), background-color var(--dur-1) var(--ease); }
+.nn-insp-head:hover .nn-insp-edit, .nn-insp-edit:focus-visible { opacity: 1; }
+.nn-insp-head.editing .nn-insp-title, .nn-insp-head.editing .nn-insp-val,
+.nn-insp-head.editing .nn-insp-kind, .nn-insp-head.editing .nn-insp-edit { display: none; }
+.nn-insp-rename { flex: 1 1 auto; width: 0; min-width: 0; }
 
-/* sliders */
+/* a pinned card's target selected again: its head glows and fades */
+.nn-insp.flash .nn-insp-head { animation: nn-insp-flash 600ms var(--ease-out); }
+@keyframes nn-insp-flash { from { background-color: var(--hi-soft); } to { background-color: transparent; } }
+
+/* ---------------------------------------------------------------- body: the default block */
+.nn-insp-body { font-size: var(--fs-md); line-height: var(--lh); color: var(--text-2); }
+.nn-top { display: flex; flex-direction: column; gap: var(--sp-6); }
+.nn-top + .nn-sec { margin-top: var(--sp-12); }
+
+/* where it sits: one --text-3 line of words with maths, and a chip that opens the layer */
+.nn-insp-sub { margin-top: -2px; font-size: var(--fs-sm); line-height: 1.45; color: var(--text-3); }
+.nn-insp-sub + .nn-insp-sub { margin-top: -4px; }
+.nn-insp-sub .katex, .nn-share .katex, .nn-line-note .katex { font-size: 1.08em; }
+.nn-where-row { display: flex; flex-wrap: wrap; align-items: center; gap: 2px var(--sp-8); }
+.nn-where { min-width: 0; }
+.nn-where-row .nn-chip { height: 20px; max-width: 150px; padding: 0 4px 0 8px; gap: 1px; }
+.nn-where-row .nn-chip > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nn-where-row .nn-chip .ui-icon { width: 12px; height: 12px; opacity: 0.7; }
+.nn-insp.ro .nn-chip:disabled { opacity: 1; cursor: default; }
+.nn-insp.ro .nn-chip:disabled .ui-icon { display: none; }
+
+/* the one-line computation */
+.nn-line { white-space: nowrap; color: var(--text-1); overflow-x: auto; overflow-y: hidden; padding: 1px 0; }
+.nn-line > .katex { font-size: 1.12em; }
+.nn-line-row { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: var(--sp-8); }
+.nn-line-row .nn-line { min-width: 0; max-width: 100%; }
+.nn-line-note { font-size: var(--fs-sm); color: var(--text-3); white-space: nowrap; }
+.nn-fixed-note { margin: 0; }
+
+/* ---------------------------------------------------------------- sections (.ui-sec) */
+.nn-sec-h { gap: var(--sp-6); min-width: 0; }
+.nn-sec-t { flex: none; }
+.nn-sec-h.hi { color: var(--hi-text); }
+.nn-sec-sub, .nn-sec-h .nn-sec-sum {
+  margin-left: auto; min-width: 0; max-width: 68%;
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  font-size: var(--fs-sm); font-weight: 400; color: var(--text-4);
+}
+.nn-sec-sub .katex { font-size: 1.04em; }
+.nn-sec.folded .nn-sec-sub { display: none; }   /* the summary (.ui-sec-sum) shows only while folded */
+.nn-sec-h:hover .nn-sec-sum, .nn-sec-h:hover .nn-sec-sub { color: var(--text-3); }
+.nn-sec-b { padding: 2px 0 var(--sp-4); }
+.nn-sub { color: var(--text-3); font-size: var(--fs-sm); margin: var(--sp-8) 0 2px; }
+.nn-sub .katex { font-size: 1.04em; }
+
+/* ---------------------------------------------------------------- slider rows */
 .nn-sl {
-  display: grid; grid-template-columns: 10px 64px 1fr 58px; gap: 6px; align-items: center;
-  padding: 1px 4px; margin: 0 -4px; border-radius: 6px; min-height: 26px;
+  display: grid; grid-template-columns: 8px 60px minmax(0, 1fr) 58px; gap: var(--sp-8); align-items: center;
+  min-height: 28px; padding: 0 6px; margin: 0 -6px; border-radius: var(--r-sm);
+  transition: background-color var(--dur-1) var(--ease);
 }
-.nn-sl.hi { background: color-mix(in srgb, #ffd54a 22%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, #ffd54a 70%, transparent); }
-.nn-sw { width: 10px; height: 10px; border-radius: 50%; border: 1px solid var(--ui-line); }
-.nn-sl-lab { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
+.nn-sl:hover { background: var(--hover); }
+.nn-sl.hi { background: var(--hi-soft); }
+.nn-sw { width: 8px; height: 8px; border-radius: 50%; box-shadow: inset 0 0 0 1px var(--line-2); }
+.nn-sl-lab { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: var(--fs-md); color: var(--text-1); }
+.nn-sl-lab .katex { font-size: 1.1em; }
 .nn-sl-lab.link { cursor: pointer; }
-.nn-sl-lab.link:hover { text-decoration: underline; text-decoration-color: var(--ui-muted); }
-.nn-sl input[type="range"] { width: 100%; min-width: 0; margin: 0; }
-.nn-sl input[type="range"]:focus { outline: none; }
-.nn-sl input[type="range"]:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
-.nn-sl.masked { grid-template-columns: 10px 64px 1fr auto; opacity: 0.7; }
-.nn-sl.masked .nn-sw { border-style: dashed; background: transparent; }
-.nn-masked-txt { color: var(--ui-muted); font-size: 11.5px; font-style: italic; }
-.nn-sl.masked .nn-mini { padding: 0 6px; font-size: 11.5px; }
-.nn-size-row { display: inline-flex; align-items: center; gap: 4px; }
-.nn-size { min-width: 26px; text-align: center; font-variant-numeric: tabular-nums; font-weight: 600; }
-.nn-size-row .nn-mini { width: 26px; padding: 1px 0; font-size: 14px; }
+.nn-sl-lab.link:hover { text-decoration: underline; text-decoration-color: var(--line-3); text-underline-offset: 3px; }
+.nn-sl .ui-range { display: block; }
+.nn-sl .nn-num { width: 58px; }
+.nn-bias { margin-top: var(--sp-6); }
 
-/* maths */
-.nn-math { overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
+/* a shared parameter: a ring round the swatch; a masked entry or a fixed weight: a dashed one */
+.nn-sl.tied .nn-sw { box-shadow: 0 0 0 1.5px var(--float), 0 0 0 2.5px var(--text-3); }
+.nn-sl.tied.wide { grid-template-columns: 8px auto minmax(0, 1fr) 58px; }
+.nn-sl.tied.wide .nn-sl-lab { max-width: 110px; }
+.nn-sl.masked, .nn-sl.fixed { grid-template-columns: 8px 60px minmax(0, 1fr) auto; }
+.nn-sl.masked .nn-sw, .nn-sl.fixed .nn-sw { box-shadow: none; border: 1px dashed var(--line-3); }
+.nn-sl.masked .nn-sw { background: transparent; }
+.nn-sl.masked .nn-sl-lab { color: var(--text-3); }
+.nn-masked-txt { font-size: var(--fs-sm); font-style: italic; color: var(--text-4); }
+.nn-fixed-val { min-width: 40px; text-align: right; font-size: var(--fs-sm); font-variant-numeric: tabular-nums; color: var(--text-2); }
+
+/* ---------------------------------------------------------------- maths, plots */
+.nn-math { overflow-x: auto; overflow-y: hidden; padding: 2px 0; color: var(--text-1); }
 .nn-math .katex-display { margin: 2px 0; text-align: left; }
 .nn-math .katex-display > .katex { text-align: left; font-size: 1.02em; }
-.nn-math.nn-inline { font-size: 13px; }
-.nn-def { font-size: 12.5px; color: var(--ui-muted); overflow-x: auto; overflow-y: hidden; }
-.nn-act-row { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
-.nn-act-row select { flex: none; }
-.nn-hint { color: var(--ui-muted); font-size: 12px; margin: 2px 0; }
-.nn-hint.err { color: #ff6b6b; }
-.nn-hint[hidden], .nn-math[hidden], .nn-plot[hidden] { display: none; }
+.nn-math.nn-inline { font-size: var(--fs-md); }
+.nn-def { overflow-x: auto; overflow-y: hidden; font-size: 12.5px; color: var(--text-3); }
+.nn-act-row { display: flex; align-items: center; gap: 10px; margin: var(--sp-6) 0 2px; }
+.nn-act-row select { flex: none; min-width: 104px; }
+.nn-hint { margin: var(--sp-4) 0 2px; font-size: var(--fs-sm); line-height: var(--lh); color: var(--text-3); }
+.nn-hint.err { color: var(--danger); }
 
-.nn-plot { display: block; width: 100%; height: auto; margin: 2px 0; overflow: visible; }
-.nn-plot-axis { stroke: var(--ui-muted); stroke-width: 1; opacity: 0.45; fill: none; }
-.nn-plot-curve { stroke: var(--accent); stroke-width: 2; fill: none; stroke-linejoin: round; }
-.nn-plot-guide { stroke: var(--ui-fg); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0.5; fill: none; }
-.nn-plot-dots circle { fill: var(--ui-fg); stroke: var(--ui-bg); stroke-width: 1.5; }
-.nn-plot-dots circle.hi { fill: #ffd54a; }
-.nn-plot-tick { fill: var(--ui-muted); font-size: 10px; font-family: system-ui, sans-serif; }
-.nn-plot-var { font: italic 12px "KaTeX_Math", "Times New Roman", serif; }
+.nn-plot { display: block; width: 100%; height: auto; margin: var(--sp-8) 0 2px; overflow: visible; }
+.nn-plot-axis { stroke: var(--line-2); stroke-width: 1; fill: none; }
+.nn-plot-curve { stroke: var(--text-1); stroke-width: 1.75; fill: none; stroke-linejoin: round; stroke-linecap: round; }
+.nn-plot-guide { stroke: var(--text-3); stroke-width: 1; stroke-dasharray: 2 3; fill: none; }
+.nn-plot-dots circle { fill: var(--text-2); stroke: var(--float); stroke-width: 1.5; }
+.nn-plot-dots circle.hi { fill: var(--hi); }
+.nn-plot-tick { fill: var(--text-3); font: 11px var(--font-ui); font-variant-numeric: tabular-nums; }
+.nn-plot-var { font: italic 12px var(--font-math); }
 
-.nn-target-row { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; }
+.nn-target-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: var(--sp-8); align-items: center; }
 .nn-target-row .nn-num { text-align: left; }
 
-/* wiring */
-.nn-rand { display: inline-flex; gap: 4px; align-items: center; }
-.nn-rand select { font-size: 12px; padding: 1px 4px; }
-.nn-actions { padding: 6px 12px 0; border-top: 1px solid var(--ui-line); }
+/* ---------------------------------------------------------------- layer controls */
+.nn-row { display: flex; flex-wrap: wrap; gap: var(--sp-6); align-items: center; margin-top: 2px; }
+.nn-rand { display: inline-flex; gap: var(--sp-4); align-items: center; }
+.nn-size-row { display: inline-flex; align-items: center; gap: var(--sp-6); }
+.nn-size { min-width: 20px; text-align: center; font-weight: var(--fw-strong); font-variant-numeric: tabular-nums; color: var(--text-1); }
+.nn-k { font-size: var(--fs-sm); color: var(--text-3); }
 
-/* shared (tied) and fixed weights */
-.nn-sl.tied .nn-sw { box-shadow: 0 0 0 2px var(--ui-bg), 0 0 0 3px var(--accent); }
-.nn-sl.tied.wide { grid-template-columns: 10px auto 1fr 58px; }
-.nn-sl.tied.wide .nn-sl-lab { max-width: 110px; }
-.nn-sl.fixed { grid-template-columns: 10px 64px 1fr auto; }
-.nn-sl.fixed .nn-sw { border-style: dashed; }
-.nn-fixed-val { font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; min-width: 40px; }
-.nn-tok { margin-top: 1px; }
-.nn-share { color: var(--ui-fg); margin-top: 3px; }
-.nn-used { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 2px; }
-.nn-used-chip { max-width: none; font-size: 11.5px; padding: 1px 7px; }
-.nn-used-chip.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+/* shared (tied) weights: the edges that use one parameter */
+.nn-share { color: var(--text-2); }
+.nn-used { display: flex; flex-wrap: wrap; gap: var(--sp-4); margin: var(--sp-8) 0 2px; }
+.nn-used-chip .katex { font-size: 1em; }
 
-/* attention: a neuron's row of A as bars, the layer's fields and heatmaps */
+/* ---------------------------------------------------------------- attention */
+/* a neuron's row of A as bars */
 .nn-att-row {
-  display: grid; grid-template-columns: 58px 1fr 70px; gap: 6px; align-items: center;
-  padding: 1px 4px; margin: 0 -4px; border-radius: 6px; min-height: 24px;
+  display: grid; grid-template-columns: 58px minmax(0, 1fr) 70px; gap: var(--sp-8); align-items: center;
+  min-height: 26px; padding: 0 6px; margin: 0 -6px; border-radius: var(--r-sm);
+  transition: background-color var(--dur-1) var(--ease);
 }
-.nn-att-row.hi { background: color-mix(in srgb, #ffd54a 22%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, #ffd54a 70%, transparent); }
+.nn-att-row:hover { background: var(--hover); }
+.nn-att-row.hi { background: var(--hi-soft); }
 .nn-att-row.masked { opacity: 0.5; }
-.nn-att-lab { font-size: 12.5px; white-space: nowrap; display: flex; align-items: baseline; gap: 5px; min-width: 0; }
+.nn-att-lab { display: flex; align-items: baseline; gap: 5px; min-width: 0; white-space: nowrap; font-size: 12.5px; color: var(--text-1); }
 /* a named token (net.meta.tokenNames): the key's name after A_ij, the names as heatmap headers */
-.nn-att-name { color: var(--ui-muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.nn-att-name[hidden] { display: none; }
-.nn-att-row:has(.nn-att-name:not([hidden])) { grid-template-columns: 96px 1fr 70px; }
+.nn-att-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: var(--fs-sm); color: var(--text-3); }
+.nn-att-row:has(.nn-att-name:not([hidden])) { grid-template-columns: 96px minmax(0, 1fr) 70px; }
+.nn-att-bar { height: 8px; border-radius: var(--r-pill); background: var(--well); overflow: hidden; }
+.nn-att-bar i { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--att); transition: width 80ms linear; }
+.nn-att-val { text-align: right; white-space: nowrap; font-size: var(--fs-sm); font-variant-numeric: tabular-nums; color: var(--text-2); }
+
+/* a layer's settings */
+.nn-attn-grid { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: var(--sp-6) var(--sp-8); align-items: center; margin: 2px 0 var(--sp-6); }
+.nn-attn-grid .nn-size { text-align: left; font-weight: var(--fw-medium); }
+.nn-attn-grid select { justify-self: start; min-width: 60px; }
+.nn-check-row { font-size: var(--fs-sm); }
+.nn-scale-row { display: flex; align-items: center; gap: var(--sp-6); min-width: 0; }
+.nn-scale { flex: none; width: 64px; }
+.nn-scale-note { overflow: hidden; white-space: nowrap; }
+
+/* this sample's A, one map per head: colorFor cells (alpha capped at 0.72), 2 px apart */
+.nn-amaps { display: flex; flex-wrap: wrap; gap: var(--sp-12); margin: 2px 0; }
+.nn-amap { display: grid; gap: 2px; flex: 1 1 130px; max-width: 220px; font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
+.nn-amap-h, .nn-amap-c { align-self: center; padding: 0 3px; text-align: center; color: var(--text-3); cursor: default; }
+.nn-amap-c { font-weight: var(--fw-strong); color: var(--text-2); }
 .nn-amap-h.named { max-width: 64px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-style: italic; }
-.nn-att-bar { height: 10px; border-radius: 5px; background: rgba(127, 127, 127, 0.16); overflow: hidden; }
-.nn-att-bar i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 5px; transition: width 0.08s linear; }
-.nn-att-val { font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; color: var(--ui-muted); white-space: nowrap; }
-.nn-attn-grid { display: grid; grid-template-columns: 44px 1fr; gap: 5px 6px; align-items: center; margin-bottom: 4px; }
-.nn-attn-grid .nn-size { text-align: left; }
-.nn-attn-grid select { justify-self: start; min-width: 56px; }
-.nn-check-row { display: inline-flex; align-items: center; gap: 6px; color: var(--ui-muted); font-size: 12px; cursor: pointer; }
-.nn-check { accent-color: var(--accent); margin: 0; }
-.nn-scale-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.nn-scale { width: 64px; flex: none; }
-.nn-scale-note { font-size: 12px; white-space: nowrap; overflow: hidden; }
-.nn-amaps { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0; }
-.nn-amap { display: grid; gap: 2px; font-size: 11px; font-variant-numeric: tabular-nums; flex: 1 1 130px; max-width: 220px; }
-.nn-amap-h, .nn-amap-c { color: var(--ui-muted); text-align: center; align-self: center; padding: 0 3px; }
-.nn-amap-c { font-weight: 600; }
-.nn-amap-v { text-align: center; padding: 3px 0; border-radius: 4px; border: 1px solid var(--ui-line); }
-.nn-amap-v.masked { color: var(--ui-muted); background-image: repeating-linear-gradient(135deg, transparent 0 3px, rgba(127, 127, 127, 0.18) 3px 5px); }
+.nn-amap-v {
+  padding: 4px 0; border-radius: var(--r-xs); background: var(--well);
+  text-align: center; font-size: var(--fs-sm); color: var(--text-1); cursor: default;
+}
+.nn-amap-v.masked { color: var(--text-4); background-image: repeating-linear-gradient(135deg, transparent 0 3px, var(--line-2) 3px 5px); }
 /* a hovered token (canvas box, heatmap cell, matrix header): its row or column of A */
-.nn-amap-v.hi { border-color: #ffd54a; box-shadow: inset 0 0 0 1px #ffd54a; }
-.nn-amap-h.hi { color: #ffd54a; font-weight: 700; }
-.nn-amap-h, .nn-amap-v { cursor: default; }
+.nn-amap-v.hi { box-shadow: inset 0 0 0 1.5px var(--hi); }
+.nn-amap-h.hi { color: var(--hi-text); }
 
 /* the lens (docs/NN_LENS.md): what it de-emphasizes fades (inline opacity from focus.js's
    emphasis); what it hides fades further and loses its colour */
@@ -197,15 +216,19 @@
 .nn-lens-hid { filter: grayscale(1); }
 .nn-amap-v.nn-lens-hid { text-decoration: line-through; }
 
-/* params */
-.nn-params { display: flex; flex-direction: column; gap: 3px; }
-.nn-prow { display: grid; grid-template-columns: 0.8fr 1.2fr 24px; gap: 4px; align-items: center; }
-.nn-prow .nn-text { padding: 2px 5px; }
-.nn-pk { color: var(--accent); }
-.nn-pv.num { text-align: right; font-variant-numeric: tabular-nums; }
-.nn-pdel { width: 24px; height: 24px; font-size: 15px; opacity: 0.5; }
-.nn-prow:hover .nn-pdel, .nn-pdel:focus { opacity: 1; }
-.nn-prow.dup .nn-pk { border-color: #ff6b6b; }
-.nn-ppre { grid-column: 1 / -1; padding: 0 4px 2px; overflow-x: auto; font-size: 15px; }
-.nn-ppre[hidden] { display: none; }
+/* ---------------------------------------------------------------- params (key / value) */
+.nn-params { display: flex; flex-direction: column; gap: var(--sp-4); }
+.nn-prow { display: grid; grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr) 22px; gap: var(--sp-4); align-items: center; }
+.nn-prow .ui-field { width: 100%; }
+.nn-pk { color: var(--text-2); }
+.nn-prow .nn-pdel { opacity: 0; }
+.nn-prow:hover .nn-pdel, .nn-prow:focus-within .nn-pdel { opacity: 1; }
+.nn-prow.dup .nn-pk { border-color: var(--danger); }
+.nn-ppre { grid-column: 1 / -1; padding: 0 var(--sp-4) 2px; overflow-x: auto; font-size: 15px; color: var(--text-1); }
 .nn-add { margin-top: 2px; }
+.nn-params-sec .nn-hint { margin-top: 0; }
+
+/* ---------------------------------------------------------------- read-only (audience) */
+.nn-insp.ro .ui-field:disabled, .nn-insp.ro .ui-switch:disabled { opacity: 0.85; cursor: default; }
+.nn-insp.ro .nn-inert { pointer-events: none; }
+.nn-insp.ro .nn-sl:hover { background: transparent; }

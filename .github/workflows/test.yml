@@ -19,3 +19,7 @@ jobs:
         run: npm test
       - name: Compile server.py
         run: python -m py_compile server.py
+      - name: Server tests
+        run: |
+          pip install pillow
+          python tools/test_server.py

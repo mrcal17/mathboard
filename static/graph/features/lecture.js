@@ -45,6 +45,19 @@ export function planTransition(a, b) {
   return { mode: 'tween', tweens };
 }
 
+// The view preset a pose looks along (its direction only, so panning keeps it), or null.
+// `views`: name -> camera direction from the target, as scene.js VIEWS.
+export function presetOf(pose, views) {
+  if (!pose?.position || !views) return null;
+  const d = pose.position.map((x, i) => x - (pose.target?.[i] ?? 0)), n = Math.hypot(...d);
+  if (!(n > 0)) return null;
+  for (const [name, v] of Object.entries(views)) {
+    const m = Math.hypot(...v);
+    if (m > 0 && d.reduce((s, x, i) => s + x * v[i], 0) / (n * m) > 0.99995) return name;
+  }
+  return null;
+}
+
 const near = (a, b, eps) => Math.abs(a - b) <= eps * Math.max(1, Math.abs(a), Math.abs(b));
 const near3 = (a, b, eps) => [0, 1, 2].every(i => near(a[i], b[i], eps));
 export function samePose(a, b, eps = 1e-6) {
@@ -105,37 +118,49 @@ export function normalizeSteps(data, palette = null) {
 
 // ================================================================ shared DOM helpers
 const CSS = `
-#g-tools .lec-seg { display: inline-flex; }
-#g-tools .lec-seg button { border-radius: 0; margin-left: -1px; }
-#g-tools .lec-seg button:first-child { border-radius: 8px 0 0 8px; margin-left: 0; }
-#g-tools .lec-seg button:last-child { border-radius: 0 8px 8px 0; }
-#lec-steps { display: flex; flex-direction: column; flex: none; min-height: 0; max-height: 38%; padding: 6px 10px; border-bottom: 1px solid var(--ui-line); }
+#lec-steps {
+  display: flex; flex-direction: column; flex: none; min-height: 0; max-height: 38%;
+  padding: var(--sp-8) var(--sp-8) var(--sp-8) 10px; border-bottom: 1px solid var(--line-1);
+}
 #lec-steps[hidden] { display: none; }
-.lec-head { display: flex; gap: 4px; align-items: center; }
-.lec-head button { border-color: var(--ui-line); font-size: 13px; padding: 3px 8px; }
+.lec-head { display: flex; gap: var(--sp-2); align-items: center; }
 .lec-head .lec-sp { flex: 1; }
-.lec-pos { min-width: 44px; text-align: center; font-size: 13px; color: var(--ui-muted); font-variant-numeric: tabular-nums; }
-.lec-list { list-style: none; margin: 6px 0 0; padding: 0; overflow-y: auto; min-height: 0; }
-.lec-item { display: grid; grid-template-columns: 30px 1fr auto; gap: 2px; align-items: center; border-radius: 6px; cursor: pointer; }
-.lec-item:hover { background: rgba(127, 127, 127, 0.08); }
-.lec-item.cur { background: color-mix(in srgb, var(--accent) 16%, transparent); }
-.lec-num { padding: 2px 0; font-size: 12px; color: var(--ui-muted); font-variant-numeric: tabular-nums; }
-.lec-item.cur .lec-num { color: var(--accent); font-weight: 600; }
-.lec-title { min-width: 0; width: 100%; padding: 2px 5px; font: inherit; font-size: 13px; color: inherit; border: 1px solid transparent; border-radius: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.lec-title.untitled { color: var(--ui-muted); }
-input.lec-title { outline: none; border-color: var(--accent); background: rgba(127, 127, 127, 0.12); }
-.lec-acts { display: flex; }
-.lec-acts button { padding: 1px 5px; font-size: 13px; opacity: 0.35; }
-.lec-item:hover .lec-acts button, .lec-item.cur .lec-acts button { opacity: 0.85; }
-.lec-empty { margin: 6px 0 2px; font-size: 12px; color: var(--ui-muted); }
+.lec-head .lec-cap { margin-right: var(--sp-4); }
+.lec-head .ui-btn.icon { color: var(--text-3); }
+.lec-head .ui-btn.icon:hover { color: var(--text-1); }
+.lec-pos { min-width: 40px; text-align: center; font-size: var(--fs-sm); color: var(--text-3); font-variant-numeric: tabular-nums; }
+.lec-list { list-style: none; margin: var(--sp-6) 0 0; padding: 0; overflow-y: auto; min-height: 0; }
+.lec-item {
+  display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; gap: var(--sp-2); align-items: center;
+  min-height: 28px; padding-right: 3px; border-radius: var(--r-md); cursor: pointer;
+}
+.lec-item + .lec-item { margin-top: 1px; }
+.lec-item:hover { background: var(--hover); }
+.lec-item.cur { background: var(--on); box-shadow: inset 0 0 0 1px var(--on-line); }
+.lec-num { height: 22px; padding: 0; border: 0; font-size: var(--fs-sm); color: var(--text-3); font-variant-numeric: tabular-nums; }
+.lec-num:hover { background: transparent; color: var(--text-1); }
+.lec-item.cur .lec-num { color: var(--text-1); font-weight: var(--fw-strong); }
+.lec-title { min-width: 0; width: 100%; padding: 0 6px; font-size: var(--fs-md); color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lec-item.cur .lec-title { color: var(--text-1); }
+.lec-title.untitled { color: var(--text-3); }
+.lec-item.cur .lec-title.untitled { color: var(--text-2); }
+input.lec-title.ui-field { height: 24px; font-size: var(--fs-md); color: var(--text-1); }
+.lec-acts { display: flex; opacity: 0; transition: opacity var(--dur-1) var(--ease); }
+.lec-item:hover .lec-acts, .lec-item.cur .lec-acts, .lec-acts:focus-within { opacity: 1; } /* the current step keeps its actions in view */
+.lec-acts .ui-btn { color: var(--text-3); }
+.lec-empty { margin: var(--sp-8) 2px 2px; }
 .lec-empty[hidden] { display: none; }
 .lec-overlay {
-  position: absolute; right: 12px; bottom: 10px; z-index: 4; pointer-events: none;
-  max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  padding: 4px 11px; border-radius: 9px; font-size: 14px; font-variant-numeric: tabular-nums;
-  background: var(--ui-bg); color: var(--ui-fg); border: 1px solid var(--ui-line);
+  position: absolute; right: 12px; bottom: 12px; z-index: 4; pointer-events: none;
+  display: flex; align-items: baseline; gap: 8px;
+  max-width: 60%; overflow: hidden; white-space: nowrap;
+  padding: 5px 13px; border-radius: var(--r-pill);
+  background: var(--float); color: var(--text-1); border: 1px solid var(--float-line); box-shadow: var(--shadow-2);
+  font-size: var(--fs-lg); line-height: var(--lh); font-variant-numeric: tabular-nums;
 }
 .lec-overlay[hidden] { display: none; }
+.lec-ov-n { flex: none; color: var(--text-3); }
+.lec-ov-t { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: var(--fw-medium); }
 body.clean #graph { grid-template-columns: 1fr; }
 body.clean #g-panel, body.clean #g-expand { display: none; }
 `;
@@ -145,7 +170,7 @@ body.lec-audience #tabs, body.lec-audience #toolbar, body.lec-audience #status, 
 body.lec-audience #settings, body.lec-audience #toast, body.lec-audience #typeset, body.lec-audience #ink,
 body.lec-audience #fx, body.lec-audience #g-panel, body.lec-audience #g-expand { display: none !important; }
 body.lec-audience #graph { grid-template-columns: 1fr !important; }
-body.lec-audience .lec-overlay { right: 16px; bottom: 14px; font-size: 18px; }
+body.lec-audience .lec-overlay { right: 16px; bottom: 16px; padding: 6px 16px; font-size: 18px; }
 `;
 
 function whenReady(fn) {
@@ -185,7 +210,11 @@ export function install(api) {
   api.addOverlay(overlay);
   const paintOverlay = d => {
     overlay.hidden = !d;
-    if (d) overlay.textContent = overlayText(d);
+    if (!d || overlay.dataset.key === overlayText(d)) return;
+    overlay.dataset.key = overlayText(d);
+    const part = (cls, text) => Object.assign(document.createElement('span'), { className: cls, textContent: text });
+    overlay.replaceChildren(part('lec-ov-n', `${d.index >= 0 ? d.index + 1 : '–'} / ${d.count}`));
+    if (d.title) overlay.append(part('lec-ov-t', d.title));
   };
   const chan = typeof BroadcastChannel === 'function' ? new BroadcastChannel(CHANNEL) : null;
   if (api.params.has('audience')) installAudience(api, chan, paintOverlay);
@@ -248,8 +277,12 @@ function installAudience(api, chan, paintOverlay) {
 
 // ================================================================ presenter window
 function installPresenter(api, chan, paintOverlay) {
-  document.getElementById('g-help')?.insertAdjacentHTML('beforeend', '<p>Keys: <b>1</b>&ndash;<b>4</b> views &middot; ' +
-    '<b>O</b> ortho &middot; <b>R</b> rotate &middot; <b>H</b> hide UI &middot; <b>&larr; &rarr;</b> steps &middot; <b>P</b> PNG &middot; <b>V</b> record</p>');
+  (document.getElementById('g-help-keys') ?? document.getElementById('g-help'))?.insertAdjacentHTML('beforeend',
+    '<div class="g-keys"><span><kbd>1</kbd>&ndash;<kbd>4</kbd></span><span>views</span><kbd>O</kbd><span>orthographic</span>' +
+    '<kbd>R</kbd><span>rotate</span><kbd>H</kbd><span>hide the UI</span>' +
+    '<span><kbd>&larr;</kbd> <kbd>&rarr;</kbd></span><span>steps</span><kbd>P</kbd><span>PNG</span>' +
+    '<kbd>V</kbd><span>record</span></div>');
+  const ic = name => api.icon?.(name) ?? '';
   let steps = [], cur = -1, open = false;
   try {
     const saved = JSON.parse(localStorage.getItem(STORE));
@@ -311,6 +344,7 @@ function installPresenter(api, chan, paintOverlay) {
       lastPose = pose;
       lastFlat = sc.is2D;
       post({ camera: pose, flat: sc.is2D });
+      paintPreset(pose);
     }
     sync();
   }));
@@ -359,23 +393,30 @@ function installPresenter(api, chan, paintOverlay) {
   const toggleRotate = () => { api.scene?.setAutoRotate(!api.scene.autoRotate); sync(); };
   const toggleFlat = () => { if (api.scene) setFlat(!api.scene.is2D); };
 
-  const bar = (label, title, onClick) => api.addToolbarButton({ label, title, onClick });
-  const presetBtns = PRESETS.map(([name, label, long], i) => bar(label, `${long} view (${i + 1})`, () => preset(name)));
-  const seg = document.createElement('span');
-  seg.className = 'lec-seg';
-  presetBtns[0].before(seg);
-  seg.append(...presetBtns);
+  const bar = (label, title, onClick, opts) => api.addToolbarButton({ label, title, onClick, group: 'display', ...opts });
+  // The view presets share one segmented track; the one the camera looks along is marked.
+  const presetBtns = PRESETS.map(([name, label, long], i) => bar(label, `${long} view (${i + 1})`, () => preset(name),
+    { group: 'camera', seg: 'view' }));
+  let viewDirs = null, shownPreset;
+  import('../scene.js').then(S => { viewDirs = S.VIEWS; paintPreset(api.scene?.getPose()); }).catch(() => {});
+  function paintPreset(pose) {
+    const name = presetOf(pose, viewDirs);
+    if (name === shownPreset) return;
+    shownPreset = name;
+    presetBtns.forEach((b, i) => b.classList.toggle('on', PRESETS[i][0] === name));
+  }
   const btn = {
-    ortho: bar('Ortho', 'Orthographic projection: no perspective (O)', toggleOrtho),
+    ortho: bar('Ortho', 'Orthographic projection: no perspective (O)', toggleOrtho, { group: 'camera' }),
+    flat: bar('2D', '2D mode: top-down, flat, no rotation (for R² material)', toggleFlat, { group: 'camera' }),
     rotate: bar('Rotate', 'Slow auto-rotate (R)', toggleRotate),
-    flat: bar('2D', '2D mode: top-down, flat, no rotation (for R² material)', toggleFlat),
     steps: bar('Steps', 'Lecture steps: capture, reorder, jump. ←/→ or PageUp/PageDown step through them', () => {
       open = !open;
       panel.hidden = !open;
       saveSteps();
       sync();
     }),
-    audience: bar('Audience', 'Open an audience window: no UI, follows this window live in the 3D and Net tabs (drag it to the projector)', openAudience),
+    audience: bar('Audience', 'Open an audience window: no UI, follows this window live in the 3D and Net tabs (drag it to the projector)',
+      openAudience, { group: 'output', icon: 'audience' }),
   };
   function sync() {
     const sc = api.scene, on = (b, x) => b.classList.toggle('on', !!x);
@@ -392,18 +433,18 @@ function installPresenter(api, chan, paintOverlay) {
   panel.hidden = !open;
   panel.innerHTML = `
     <div class="lec-head">
-      <button class="lec-cap" title="Capture the rows, sliders and camera as a new step after the current one">+ Step</button>
+      <button class="lec-cap ui-btn sm soft" title="Capture the rows, sliders and camera as a new step after the current one">${ic('plus')}Step</button>
       <span class="lec-sp"></span>
-      <button class="lec-prev" title="Previous step (← / PageUp)">&lsaquo;</button>
+      <button class="lec-prev ui-btn sm icon" title="Previous step (← / PageUp)">${ic('chevron-left')}</button>
       <span class="lec-pos"></span>
-      <button class="lec-next" title="Next step (→ / PageDown)">&rsaquo;</button>
+      <button class="lec-next ui-btn sm icon" title="Next step (→ / PageDown)">${ic('chevron-right')}</button>
       <span class="lec-sp"></span>
-      <button class="lec-exp" title="Download the steps as a .json file">Export</button>
-      <button class="lec-imp" title="Load steps from a .json file (replaces the current ones)">Import</button>
+      <button class="lec-exp ui-btn sm icon" title="Export: download the steps as a .json file">${ic('download')}</button>
+      <button class="lec-imp ui-btn sm icon" title="Import: load steps from a .json file (replaces the current ones)">${ic('upload')}</button>
       <input class="lec-file" type="file" accept=".json,application/json" hidden>
     </div>
     <ol class="lec-list"></ol>
-    <p class="lec-empty">No steps yet. Set up the rows and camera, then press <b>+ Step</b>.</p>`;
+    <p class="lec-empty ui-caption">No steps yet. Set up the rows and camera, then press <b>Step</b>.</p>`;
   const q = sel => panel.querySelector(sel);
   const list = q('.lec-list'), pos = q('.lec-pos'), empty = q('.lec-empty'), file = q('.lec-file');
   const tools = api.panelEl.querySelector('#g-tools');
@@ -420,10 +461,10 @@ function installPresenter(api, chan, paintOverlay) {
         <button class="lec-num" title="Go to this step">${i + 1}</button>
         <span class="lec-title" title="Click to go here, double-click to rename"></span>
         <span class="lec-acts">
-          <button data-a="recap" title="Re-capture: replace this step with the current state">&#10227;</button>
-          <button data-a="up" title="Move up">&uarr;</button>
-          <button data-a="down" title="Move down">&darr;</button>
-          <button data-a="del" title="Delete this step">&times;</button>
+          <button class="ui-btn xs icon" data-a="recap" title="Re-capture: replace this step with the current state">${ic('reset')}</button>
+          <button class="ui-btn xs icon" data-a="up" title="Move up">${ic('chevron-up')}</button>
+          <button class="ui-btn xs icon" data-a="down" title="Move down">${ic('chevron-down')}</button>
+          <button class="ui-btn xs icon danger" data-a="del" title="Delete this step">${ic('close')}</button>
         </span>`;
       const t = li.querySelector('.lec-title');
       t.textContent = s.title || `Step ${i + 1}`;
@@ -464,7 +505,7 @@ function installPresenter(api, chan, paintOverlay) {
     const span = list.children[i]?.querySelector('span.lec-title');
     if (!span) return;
     const input = document.createElement('input');
-    Object.assign(input, { className: 'lec-title', value: steps[i].title, placeholder: `Step ${i + 1}`, spellcheck: false, autocomplete: 'off' });
+    Object.assign(input, { className: 'lec-title ui-field sm', value: steps[i].title, placeholder: `Step ${i + 1}`, spellcheck: false, autocomplete: 'off' });
     span.replaceWith(input);
     input.focus();
     input.select();
@@ -613,6 +654,7 @@ function installPresenter(api, chan, paintOverlay) {
   });
 
   renderList();
+  [...list.children].forEach((li, i) => li.classList.toggle('cur', i === cur)); // the saved current step
   renderPos();
   sync();
 }

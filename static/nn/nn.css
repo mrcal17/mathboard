@@ -1,5 +1,6 @@
-/* Net tab shell (static/nn/nn.js): section layout, toolbar, splitter, cheat sheet.
-   Each module styles its own content in nn/<module>.css. */
+/* Net tab shell (static/nn/nn.js): section layout, toolbar, menus, splitter, cheat sheet, the toast's
+   place in this tab, and the clean view. docs/DESIGN.md is the spec (area D). Each module styles
+   its own content in nn/<module>.css. */
 #nn {
   position: fixed; inset: 0; z-index: 5;
   display: grid; grid-template-rows: auto minmax(0, 1fr);
@@ -8,135 +9,199 @@
 #nn[hidden] { display: none; }
 
 /* ---------------------------------------------------------------- toolbar */
-/* Rounded clusters level with the Board / 3D / Net tabs, styled like the board's toolbar: sections
-   inside a cluster are split by dividers. Short of room, nn.js adds .nn-compact (no icons), then
-   .nn-tight (less padding). */
+/* Rounded clusters level with the Board / 3D / Net tabs and built like them: a float surface, quiet
+   buttons (--text-2, --text-1 on hover) with the shared on state, and 16 px line icons 6 px from
+   the label. Sections inside a cluster are split by short hairlines. Short of room, nn.js adds
+   .nn-snug (less room round the buttons, icons kept), then .nn-compact instead (no icons, but on
+   icon-only buttons and .nn-keepico), then .nn-tight too (less padding). */
 #nn-bar {
   position: relative; z-index: 30;   /* its menus open over the stage's panels */
   display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px;
   min-height: 59px; padding: 10px 12px 6px var(--nn-bar-left, 250px);
-  color: var(--ui-fg);
+  color: var(--text-2); font-size: var(--fs-bar);
 }
 #nn-bar .nn-cluster {
-  display: flex; gap: 6px; align-items: center; padding: 5px 6px; border-radius: 12px;
-  background: var(--ui-bg); border: 1px solid var(--ui-line);
-  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.25);
+  display: flex; align-items: center; padding: 5px; border-radius: var(--r-lg);
+  background: var(--float); border: 1px solid var(--float-line); box-shadow: var(--shadow-2);
 }
 #nn-bar .nn-cluster:empty { display: none; }
 #nn-bar .nn-cluster[data-cluster="tail"] { margin-left: auto; }   /* at the right end, on a second row too */
-#nn-bar .nn-group { display: flex; gap: 2px; align-items: center; padding: 0 4px; }
-#nn-bar .nn-group + .nn-group { border-left: 1px solid var(--ui-line); }
-#nn-bar button { font-size: 13.5px; line-height: 19px; padding: 5px 8px; }
-#nn-bar .nn-cluster button { height: 31px; }   /* as the tabs' buttons, whatever font the glyphs come from */
-#nn-bar button:disabled { opacity: 0.35; cursor: default; background: transparent; }
-#nn-bar .nn-ico { display: inline-block; min-width: 1em; margin-right: 6px; text-align: center; }
-#nn-bar .nn-caret { margin-left: 6px; font-size: 10px; color: var(--ui-muted); }
-#nn-bar .nn-new:not(.on):not(:hover) { background: rgba(127, 127, 127, 0.12); }
-#nn-bar .nn-help-btn { min-width: 31px; font-weight: 600; }
-#nn-bar.nn-compact .nn-ico { display: none; }
-#nn-bar.nn-tight .nn-cluster { gap: 3px; padding: 5px 4px; }
-#nn-bar.nn-tight .nn-group { padding: 0 3px; }
-#nn-bar.nn-tight button { padding: 5px 6px; }
+#nn-bar .nn-group { position: relative; display: flex; align-items: center; gap: 2px; }
+#nn-bar .nn-group + .nn-group { margin-left: 9px; }   /* as the board's toolbar */
+#nn-bar .nn-group + .nn-group::before {
+  content: ''; position: absolute; left: -5px; top: 50%; width: 1px; height: 20px; margin-top: -10px;
+  background: var(--line-1);
+}
+#nn-bar .nn-cluster button {
+  display: inline-flex; align-items: center; height: 31px; padding: 0 10px;   /* 31 px: as the tabs */
+  border: 0; border-radius: var(--r-md);
+  font-size: var(--fs-bar); font-weight: var(--fw-medium); line-height: 1; color: var(--text-2);
+}
+/* the icon side is a little tighter: a line icon has its own margin inside its 16 px */
+#nn-bar .nn-cluster button:not(.nn-iconbtn):has(> .nn-ico) { padding: 0 10px 0 8px; }
+#nn-bar .nn-cluster button:hover { background: var(--hover); color: var(--text-1); }
+#nn-bar .nn-cluster button:active { background: var(--press); }
+#nn-bar .nn-cluster button.on { background: var(--on); color: var(--text-1); box-shadow: inset 0 0 0 1px var(--on-line); }
+#nn-bar .nn-cluster button:disabled { opacity: 0.4; background: transparent; color: var(--text-2); cursor: default; }
+#nn-bar .nn-ico { display: inline-flex; align-items: center; justify-content: center; min-width: 16px; margin-right: 6px; }
+#nn-bar .nn-ico .ui-icon { display: block; }
+#nn-bar .nn-cluster .nn-iconbtn { width: 31px; padding: 0; justify-content: center; }
+#nn-bar .nn-iconbtn .nn-ico { margin: 0; }
+#nn-bar .nn-caret { display: inline-flex; margin: 0 -3px 0 5px; color: var(--text-3); transition: transform var(--dur-2) var(--ease); }
+#nn-bar .nn-caret .ui-icon { display: block; width: 12px; height: 12px; }
+#nn-bar button[aria-expanded="true"] .nn-caret { transform: rotate(180deg); }
+/* New net, the way in: the soft button */
+#nn-bar .nn-cluster .nn-new { background: var(--soft); color: var(--text-1); }
+#nn-bar .nn-cluster .nn-new:hover { background: var(--soft-hover); }
+#nn-bar .nn-cluster .nn-new.on { background: var(--on); }
+#nn-bar.nn-snug { column-gap: 6px; }
+#nn-bar.nn-snug .nn-cluster { padding: 5px 4px; }
+#nn-bar.nn-snug .nn-group + .nn-group { margin-left: 7px; }
+#nn-bar.nn-snug .nn-group + .nn-group::before { left: -4px; }
+#nn-bar.nn-snug .nn-cluster button:not(.nn-iconbtn):has(> .nn-ico) { padding: 0 7px 0 5px; }
+#nn-bar.nn-compact .nn-cluster button:not(.nn-iconbtn):not(.nn-keepico) .nn-ico { display: none; }
+#nn-bar.nn-compact .nn-cluster button:not(.nn-iconbtn) { padding: 0 9px; }
+#nn-bar.nn-compact .nn-cluster .nn-keepico { padding: 0 9px 0 7px; }
+#nn-bar.nn-compact .nn-keepico .nn-ico { margin-right: 4px; }
+#nn-bar.nn-tight { column-gap: 6px; }
+#nn-bar.nn-tight .nn-cluster { padding: 5px 4px; }
+#nn-bar.nn-tight .nn-group + .nn-group { margin-left: 7px; }
+#nn-bar.nn-tight .nn-group + .nn-group::before { left: -4px; }
+#nn-bar.nn-tight .nn-cluster button:not(.nn-iconbtn), #nn-bar.nn-tight .nn-cluster .nn-keepico { padding: 0 6px; }
+#nn-bar.nn-tight .nn-cluster .nn-iconbtn { width: 29px; }
 
 /* ---------------------------------------------------------------- toolbar menus (New net, File) */
+/* The popover recipe (.ui-menu): an opaque float with --shadow-3 and rows that --raise when active.
+   The row under the mouse is the active one (nn.js), so :hover adds nothing of its own. */
 #nn-bar .nn-pop {
   position: fixed; display: flex; flex-direction: column; overflow: hidden;
-  background: var(--ui-bg); color: var(--ui-fg);
-  border: 1px solid var(--ui-line); border-radius: 12px;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
-  -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+  background: var(--float); color: var(--text-1);
+  border: 1px solid var(--float-line); border-radius: var(--r-lg); box-shadow: var(--shadow-3);
+  font-size: var(--fs-md); line-height: var(--lh);
+  animation: nn-pop-in var(--dur-2) var(--ease-out);
 }
+@keyframes nn-pop-in { from { opacity: 0; transform: translateY(-4px); } }
 #nn-bar .nn-pop[hidden], #nn-bar .nn-pop [hidden] { display: none; }
-#nn-bar .nn-pop button { display: block; width: 100%; text-align: left; white-space: normal; }
-#nn-bar .nn-pop button.act { background: color-mix(in srgb, var(--accent) 18%, transparent); }
-#nn-bar .nn-pop kbd {
-  font: 11.5px Consolas, "Cascadia Mono", monospace; padding: 0 4px;
-  border: 1px solid var(--ui-line); border-radius: 4px; background: rgba(127, 127, 127, 0.12);
-}
 
 /* New net: search field, presets in columns (a section never splits), the active preset's note */
 .nn-presets { width: min(880px, calc(100vw - 24px)); }
-.nn-presets .np-top { display: flex; align-items: center; gap: 14px; padding: 10px 12px; border-bottom: 1px solid var(--ui-line); }
-.nn-presets .np-find {
-  flex: 1; min-width: 0; font: inherit; color: inherit; outline: none;
-  background: rgba(127, 127, 127, 0.12); border: 1px solid var(--ui-line); border-radius: 8px; padding: 6px 10px;
-}
-.nn-presets .np-find:focus { border-color: var(--accent); }
-.nn-presets .np-find::placeholder { color: var(--ui-muted); }
-.nn-presets .np-keys { flex: none; font-size: 12px; color: var(--ui-muted); white-space: nowrap; }
-.nn-presets .np-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 0 10px 8px; }
-.nn-presets .np-cols { columns: 250px; column-gap: 14px; }   /* 3 columns balance the sections best */
+.nn-presets .np-top { display: flex; align-items: center; gap: 16px; padding: 10px 12px; border-bottom: 1px solid var(--line-1); }
+.nn-presets .np-field { position: relative; flex: 1; min-width: 0; display: flex; color: var(--text-3); }
+.nn-presets .np-field .ui-icon { position: absolute; left: 10px; top: 8px; pointer-events: none; }
+.nn-presets .np-find { flex: 1; height: 32px; padding-left: 34px; font-size: var(--fs-md); }
+.nn-presets .np-keys { flex: none; display: flex; gap: 12px; font-size: var(--fs-sm); color: var(--text-3); white-space: nowrap; }
+.nn-presets .np-keys kbd + kbd { margin-left: 3px; }
+.nn-presets .np-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 0 8px 8px; }
+.nn-presets .np-cols { columns: 250px; column-gap: 12px; }   /* 3 columns balance the sections best */
 .nn-presets .np-sec { break-inside: avoid; padding-top: 2px; }
-.nn-presets .np-sec h4 {
-  margin: 10px 8px 3px; font-size: 11.5px; font-weight: 600; letter-spacing: 0.05em;
-  text-transform: uppercase; color: var(--ui-muted);
+.nn-presets .np-sec h4 { margin: 12px 10px 4px; }
+#nn-bar .nn-presets .np-item {
+  display: block; width: 100%; min-height: 30px; padding: 6px 10px; border: 0; border-radius: var(--r-md);
+  text-align: left; white-space: normal; line-height: 1.3; color: var(--text-1);
 }
-#nn-bar .nn-presets .np-item { padding: 4px 8px; border-radius: 7px; line-height: 1.3; }
-.nn-presets .np-aside { color: var(--ui-muted); }
-.nn-presets .np-none { margin: 16px 8px 8px; color: var(--ui-muted); }
+#nn-bar .nn-presets .np-item:hover { background: transparent; }
+#nn-bar .nn-presets .np-item.act { background: var(--raise); }
+.nn-presets .np-aside { color: var(--text-3); }
+.nn-presets .np-none { margin: 16px 10px 8px; color: var(--text-3); }
 .nn-presets .np-note {
-  margin: 0; padding: 9px 14px 11px; border-top: 1px solid var(--ui-line);
-  min-height: calc(2 * 1.45em + 20px); font-size: 12.5px; line-height: 1.45; color: var(--ui-muted);
+  margin: 0; padding: 10px 14px 12px; border-top: 1px solid var(--line-1);
+  min-height: calc(2 * 1.45em + 22px); font-size: 12.5px; line-height: 1.45; color: var(--text-3);
 }
-.nn-presets .np-note b { margin-right: 3px; font-weight: 600; color: var(--ui-fg); }
+.nn-presets .np-note b { margin-right: 4px; font-weight: var(--fw-strong); color: var(--text-1); }
 
-/* File: two short sections, each item's tooltip as its second line */
-.nn-filemenu { width: 340px; padding: 5px; }
-.nn-filemenu hr { margin: 4px 8px; border: 0; border-top: 1px solid var(--ui-line); }
-#nn-bar .nn-filemenu button { padding: 6px 10px; line-height: 1.3; }
-.nn-filemenu small { display: block; margin-top: 1px; font-size: 12px; color: var(--ui-muted); }
+/* File: two short groups, each row an icon and the item's tooltip as its second line */
+.nn-filemenu { width: 340px; }
+#nn-bar .nn-filemenu .ui-menu-item { align-items: flex-start; }
+#nn-bar .nn-filemenu .ui-menu-item .ui-icon { margin-top: 1px; }
+#nn-bar .nn-filemenu .ui-menu-item:hover { background: transparent; }
+#nn-bar .nn-filemenu .ui-menu-item.act { background: var(--raise); }
 
 /* ---------------------------------------------------------------- stage | splitter | matrix */
 #nn-main { grid-row: 2; display: flex; min-width: 0; min-height: 0; }   /* row 2 even when H / audience hide the bar */
 #nn-stage { position: relative; flex: 1 1 0; min-width: 0; min-height: 0; overflow: hidden; }
+/* The divider: a 1 px hairline, 2 px and stronger while hovered or dragged. With the matrix panel
+   hidden it has no line, and a small pill grip shows at the right edge on hover. */
 #nn-split {
   position: relative; z-index: 3; flex: none;
   width: 9px; margin: 0 -4px; cursor: col-resize; touch-action: none;
 }
 #nn-split::after {
   content: ''; position: absolute; top: 0; bottom: 0; left: 4px; width: 1px;
-  background: var(--ui-line); transition: background 0.12s;
+  background: var(--line-1); transition: background-color var(--dur-1) var(--ease);
 }
-#nn-split:hover::after, #nn.nn-resizing #nn-split::after { left: 3px; width: 3px; background: var(--accent); }
+#nn-split:hover::after, #nn.nn-resizing #nn-split::after { width: 2px; background: var(--line-3); }
 #nn-matrix {
   position: relative; flex: 0 0 calc(var(--nn-split, 0.4) * 100%);
   min-width: 220px; max-width: calc(100% - 280px); min-height: 0; overflow: auto;
   user-select: text; -webkit-user-select: text;
 }
 #nn-main.matrix-hidden #nn-matrix { display: none; }
-#nn-main.matrix-hidden #nn-split { margin: 0 0 0 -9px; } /* the grip stays at the right edge */
+#nn-main.matrix-hidden #nn-split { margin: 0 0 0 -9px; z-index: 5; } /* the grip stays at the right edge, above the 3D and Flow views (z-index 4) */
+#nn-main.matrix-hidden #nn-split::after { background: transparent; }
+#nn-main.matrix-hidden #nn-split::before {
+  content: ''; position: absolute; top: 50%; right: 3px; width: 4px; height: 36px; margin-top: -18px;
+  border-radius: var(--r-pill); background: var(--text-4);
+  opacity: 0; transition: opacity var(--dur-2) var(--ease);
+}
+#nn-main.matrix-hidden #nn-split:hover::before, #nn.nn-resizing #nn-main.matrix-hidden #nn-split::before { opacity: 1; }
 #nn.nn-resizing, #nn.nn-resizing * { cursor: col-resize !important; user-select: none !important; }
 #nn.nn-resizing #nn-stage, #nn.nn-resizing #nn-matrix { pointer-events: none; }
 
-.nn-fail { margin: 90px auto; max-width: 560px; color: var(--ui-muted); text-align: center; }
+.nn-fail { margin: 90px auto; max-width: 560px; color: var(--text-3); text-align: center; }
+
+/* ---------------------------------------------------------------- toast */
+/* In this tab nn.js centres the toast over the stage, not the window, and lifts it above the lens
+   bar and the 3D view's bar when they are under it (--nn-toast-*, set on body as it shows). Over the
+   net it would catch clicks meant for a neuron: it only shows text, so clicks go through. */
+body[data-view="nn"] #toast {
+  left: var(--nn-toast-x, 50%); bottom: var(--nn-toast-bottom, 36px);
+  max-width: min(560px, var(--nn-toast-max, calc(100vw - 40px)));
+  pointer-events: none;
+}
 
 /* ---------------------------------------------------------------- cheat sheet */
-#nn-help { top: 66px; right: 14px; width: 420px; max-height: calc(100% - 90px); overflow-y: auto; font-size: 13px; }
-#nn-help h3 { margin: 0 0 6px; font-size: 15px; }
-#nn-help h4 { margin: 12px 0 4px; font-size: 11.5px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--ui-muted); }
-#nn-help p { margin: 6px 0; color: var(--ui-muted); }
-#nn-help p b { color: var(--ui-fg); font-weight: 600; }
-#nn-help table { width: 100%; border-collapse: collapse; }
-#nn-help td { padding: 2px 4px; vertical-align: top; }
-#nn-help td:first-child { width: 42%; white-space: nowrap; }
-#nn-help td:last-child { color: var(--ui-muted); }
-#nn-help kbd {
-  font: 12px Consolas, "Cascadia Mono", monospace; padding: 0 4px;
-  border: 1px solid var(--ui-line); border-radius: 4px; background: rgba(127, 127, 127, 0.12);
+/* An opaque .panel under the tail cluster: a sticky head (title, close), then sections with overline
+   heads, each a two-column list: the keys as kbd chips (or a toolbar button's icon and name), and
+   what they do. */
+#nn-help {
+  z-index: 29; top: var(--nn-bar-h, 59px); right: 12px;
+  width: 560px; max-width: calc(100vw - 24px); max-height: calc(100vh - var(--nn-bar-h, 59px) - 12px);
+  overflow-y: auto; padding: 0 16px 14px;
+  font-size: var(--fs-md); line-height: var(--lh);
+  animation: nn-pop-in var(--dur-2) var(--ease-out);
 }
+#nn-help .nn-help-head {
+  position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 8px;
+  margin: 0 -16px; padding: 10px 8px 4px 16px; background: var(--float);
+}
+#nn-help h3 { flex: 1; margin: 0; font: var(--fw-strong) var(--fs-lg)/1.3 var(--font-ui); color: var(--text-1); }
+#nn-help .nn-help-x { color: var(--text-3); }
+#nn-help .nn-help-x:hover { color: var(--text-1); }
+#nn-help p { margin: 2px 0 6px; color: var(--text-2); }
+#nn-help .nn-help-lead .katex { font-size: 1.12em; color: var(--text-1); }
+#nn-help h4 { margin: 18px 0 6px; }
+#nn-help h4 + p { margin-top: -2px; font-size: var(--fs-sm); color: var(--text-3); }
+#nn-help table { width: 100%; border-collapse: collapse; }
+#nn-help td { padding: 3px 0; vertical-align: top; }
+#nn-help td:first-child { width: 180px; padding-right: 12px; white-space: nowrap; color: var(--text-1); }
+#nn-help td:last-child { color: var(--text-2); }
+#nn-help kbd + kbd { margin-left: 3px; }
+#nn-help .nn-help-tool { display: inline-flex; align-items: center; gap: 6px; font-weight: var(--fw-medium); }
+#nn-help .nn-help-tool svg { flex: none; width: 14px; height: 14px; color: var(--text-3); }
 
 /* ---------------------------------------------------------------- H (clean) and the audience mirror */
 /* H shows what the audience window shows: no toolbars, but inspector cards and the train panel's
-   readouts and plots stay (they are demo content) without their chrome. Cards keep working. */
+   readouts and plots stay (they are demo content) without their chrome. Cards keep working. New
+   chrome that hides under H is marked .ui-chrome (style.css) instead of adding rules here. */
 body.clean #nn-bar, body.clean #nn-help { display: none; }
 body.clean #nn .nn-insp-btn, body.clean #nn .nn-insp .nn-add { display: none; }
 body.clean #nn .nn-insp-head { cursor: default; }
-body.clean #nn .nn-insp.pinned { box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35); }
 body.clean #nn .nn-train:not([hidden]) { display: flex; }
 body.clean #nn .nn-train .nt-head { cursor: default; }
 body.clean #nn .nn-train .nt-ctl, body.clean #nn .nn-train .nt-warn button, body.clean #nn .nn-train .nt-go-mini,
 body.clean #nn .nn-train .nt-grid, body.clean #nn .nn-train .nt-hint { display: none; }
 body.clean #nn .nnv-handle, body.clean #nn .nnv-hint { display: none; }
 body.clean #nn-split, #nn.nn-audience #nn-split { pointer-events: none; }
-body.clean #nn-split::after, #nn.nn-audience #nn-split::after { left: 4px; width: 1px; background: var(--ui-line); }
+body.clean #nn-split::after, #nn.nn-audience #nn-split::after { width: 1px; background: var(--line-1); }
+body.clean #nn-split::before, #nn.nn-audience #nn-split::before { display: none; }
 #nn.nn-audience #nn-bar, #nn.nn-audience #nn-help { display: none !important; }

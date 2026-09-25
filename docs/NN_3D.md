@@ -23,12 +23,16 @@ views; the bar at the bottom right switches them too.
 - **Neurons** are spheres filled like the canvas: `colorFor(a, max)` over the node colour, on the
   shared activations scale (every entry of `fwd.a` and `fwd.z`). **Weight edges** are cylinders
   coloured by `colorFor(w, maxW)` (the alpha blended onto the background) and 0.013 + 0.05·|w|/maxW
-  thick; skip edges arc over the sheets they skip (the headers move up to clear them) and fixed
-  edges are dashed. **Attention edges** run V_j,f → Z_i,f in the canvas's violet, as thick and as
-  opaque as A_ij; causally masked pairs have none. Each attention sheet has an n × n tile of A per
-  head in front of it, as bars as tall as A_ij, masked cells flat.
-- **Labels** (CSS2D): a header per layer (name, and shape or activation · count; neighbours that would
-  touch on screen drop the second line, then every other one moves up), Q / K / V beside their
+  thick; skip edges arc over the sheets they skip (the headers move up to clear them). Fixed edges
+  (a residual, a pooling weight) are not parameters: thin, dashed and in the muted text colour
+  (--text-3) at 45%, as on the canvas, at full strength while hovered, selected or lit.
+  **Attention edges** run V_j,f → Z_i,f in the canvas's violet, as thick and as opaque as A_ij;
+  causally masked pairs have none. Each attention sheet has an n × n tile of A per head in front of
+  it, as bars as tall as A_ij, masked cells flat.
+- **Labels** (CSS2D): text with one halo, as on the canvas. A header per layer (name, and shape or
+  activation · count), plain text, with a pill and a HI ring while the layer is hovered or selected
+  and a neutral ring for the lens's focus (neighbours that would touch on screen drop the second
+  line, then every other one moves up); Q / K / V beside their
   groups, token names (or t₁…) under the first token layer, an A beside each tile. The 1.2 button
   puts values under the neurons (off by default in this view). The hovered, else the selected,
   neuron shows its label and value in a tip; the shown row of A gets its A_ij on the edges.
@@ -76,6 +80,10 @@ this layer. The **heads** chips set the attention layer's `heads` (any divisor o
   `sum` row i of A with V and z_i; backward all of them. On another layer, the neuron's cells.
 - **Lens**: E.node for cells that stand for a neuron, E.attn for bars, E.edge for W_O; a kept head
   fades the other heads' plates and lines.
+- **Numbers** (the 1.2 button, off by default here): on a lit or hovered cell or bar always; with
+  the button on, on every cell and bar the lens keeps, at full size once its face is at least 28 px
+  wide on screen (`NUM_PX`, measured as the camera moves) and below that without the leading 0 and
+  shrunk to fit the face (7.5 px at the least), so turning them on always shows them.
 
 ### Tensor: the reshape, as moving cubes
 
@@ -106,8 +114,12 @@ glance that a buggy "head" holds pieces of one or two tokens rather than a chunk
 - **Colour**: `values` (colorFor over the node colour, one scale for Q, K, V, Z and Z W_O; W_O on its
   own) or `tokens` (the token each number came from; numbers hidden). Shape labels under each
   block, head labels over each chunk or slab.
-- **Playback**: ◀ ▶ and the step chips, ← → while the view shows, ▶ plays one step every 2.6 s
-  (presenter only; the audience follows `step`).
+- **Numbers** (the 1.2 button, on by default here, `values` only): only on the step's matrices
+  (the cubes it shows, not those shrinking away): on every one of them, sized as in heads (full size
+  from a 28 px face, `NUM_PX`, and shrunk to the face below that). With the button off, only on a
+  lit cube. The cube under the mouse (either source) is framed and shows its number.
+- **Playback**: the previous / next arrows and the step chips, ← → while the view shows, play runs
+  one step every 2.6 s (presenter only; the audience follows `step`).
 - **Hover** (net source): hovering a cube hovers its neuron (Q, K, V, or Z from step 4); a hovered
   or selected neuron frames its cube.
 
@@ -124,7 +136,7 @@ v3d = null | {
   h: 1 | 2 | 3 | 6,        // tensor example: heads (divisors of EXAMPLE.d = 6), default 3
   bug: bool,               // tensor: the no-transpose bug
   color: 'value' | 'token',// tensor
-  nums: bool,              // numbers on neurons and cells (on by default except in stack)
+  nums: bool,              // numbers on neurons and cells (on by default in tensor only)
 }
 ```
 

@@ -1,224 +1,352 @@
-/* Net tab: matrix panel (#nn-matrix), owned by static/nn/matrix.js. */
+/* Net tab: matrix panel (#nn-matrix), owned by static/nn/matrix.js. docs/DESIGN.md, 7 B.
+   Quiet chrome on --dock; colour only on the cells (colorFor, eased to at most 0.72 alpha, so the
+   digits are always --text-1) and HI for what is lit. The step's row and what a hover relates to
+   are soft bands behind the cells (.nm-lit); a hovered entry gets a thin HI ring. */
 .nm {
-  --nm-hi: #ffd54a;
-  --nm-hi-soft: rgba(255, 213, 74, 0.14);
   --hdr: 0px;
   --cap: 1.55em;
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
-  color: var(--ui-fg);
-  font: 13px/1.35 system-ui, -apple-system, 'Segoe UI', sans-serif;
+  background: var(--dock);
+  color: var(--text-1);
+  font: var(--fs-md)/var(--lh) var(--font-ui);
 }
-[data-theme="light"] .nm { --nm-hi: #d99a00; --nm-hi-soft: rgba(217, 154, 0, 0.12); }
 .nm-eq:has(.nm-ch) { --hdr: 1.7em; }   /* room for column headers, only where some grid has them */
 
+/* ---------------------------------------------------------------- toolbar: one 40 px row */
 .nm-bar {
+  position: relative;
+  z-index: 3;
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 4px;
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--ui-line);
-  background: var(--ui-bg);
+  gap: var(--sp-6);
+  flex: none;
+  height: 40px;
+  padding: 0 var(--sp-8) 0 10px;   /* the first icon's glyph lines up with the content's 16 px edge */
+  background: var(--dock);
+  transition: box-shadow var(--dur-2) var(--ease);
 }
-.nm-bar button, .nm .nm-3d {
-  font: inherit;
-  font-size: 12px;
-  color: var(--ui-fg);
-  background: transparent;
-  border: 1px solid var(--ui-line);
-  border-radius: 5px;
-  padding: 2px 7px;
-  cursor: pointer;
+.nm-bar.nm-scrolled { box-shadow: 0 1px 0 var(--line-1); }
+.nm-bar-l, .nm-bar-r, .nm-tgs { display: flex; align-items: center; flex: none; gap: var(--sp-2); }
+.nm-bar-l { gap: var(--sp-4); }
+.nm-bar .nm-stepb { gap: 5px; padding: 0 10px 0 8px; }
+.nm-bar .nm-sq { color: var(--text-2); }
+.nm-bar .nm-sq:hover { color: var(--text-1); }
+.nm-info {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--hi-text);
 }
-.nm-bar button:hover, .nm .nm-3d:hover { border-color: var(--ui-muted); }
-.nm-bar button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
-.nm-bar button:disabled { opacity: 0.35; cursor: default; }
-.nm-bar button.nm-dim:not(.on) { opacity: 0.55; }
-.nm-bar .nm-sq { min-width: 26px; }
-.nm-info { color: var(--nm-hi); font-size: 12px; font-variant-numeric: tabular-nums; }
-.nm-gap { flex: 1; }
+.nm-info:empty { display: none; }
+/* no room beside the buttons: the readout is the step box's title instead (fitBar) */
+.nm.nm-infobox .nm-info { position: absolute; visibility: hidden; pointer-events: none; }
+.nm-gap { flex: 1 1 0; min-width: 0; }
+/* toggles: neutral, --text-3 while off; .on is the shared toggle fill */
+.nm-bar .nm-tg { padding: 0 7px; color: var(--text-3); }
+.nm-bar .nm-tg:hover, .nm-bar .nm-tg.on { color: var(--text-1); }
+.nm-bar .nm-tg.nm-dim:not(.on) { color: var(--text-4); }   /* Backward without targets */
+.nm-bar .nm-tg.nm-dim:not(.on):hover { color: var(--text-2); }
+.nm-bar .nm-send { color: var(--text-2); }
+.nm-bar .nm-send:hover { color: var(--text-1); }
+/* narrow: the toggles fold into the View menu */
+.nm-bar .nm-viewb { display: none; gap: 3px; padding: 0 6px 0 9px; color: var(--text-2); }
+.nm-bar .nm-viewb .ui-icon { width: 12px; height: 12px; opacity: 0.8; }
+.nm-bar.nm-compact .nm-viewb { display: inline-flex; }
+.nm-bar.nm-compact .nm-tgs { display: none; }
+.nm-menu { position: absolute; z-index: 6; top: 36px; right: var(--sp-8); min-width: 208px; }
+.nm-menu[hidden] { display: none; }
+.nm-menu-item { justify-content: space-between; cursor: pointer; }
+.nm-menu-item .ui-switch { margin-left: auto; }
 .nm-audience .nm-bar, .nm-audience .nm-3d, body.clean .nm-bar, body.clean .nm-3d { display: none; }
 
-.nm-body { flex: 1; min-height: 0; overflow: auto; padding: 6px 10px 48px; }
+.nm-body { flex: 1; min-height: 0; overflow: auto; padding: var(--sp-4) var(--sp-16) 48px; }
+.nm-audience .nm-body, body.clean .nm-body { padding-top: var(--sp-12); }
 
-.nm .katex { font-size: 1.04em; }
-.nm-formula { padding: 6px 0 10px; border-bottom: 1px solid var(--ui-line); overflow-x: auto; }
+/* ---------------------------------------------------------------- type */
+.nm .katex { font-size: 1.05em; }
+.nm-note {
+  margin: var(--sp-8) 0;
+  font-size: var(--fs-sm);
+  line-height: var(--lh);
+  color: var(--text-3);
+}
+.nm-note .katex { font-size: 1.08em; }
+
+/* the headline: the whole net as one formula, and a caption clamped to two lines */
+.nm-formula { padding: var(--sp-8) 0 var(--sp-16); overflow-x: auto; overflow-y: hidden; }
 .nm-fl { padding: 2px 0; white-space: nowrap; }
-.nm-formula [data-l] { border-radius: 4px; cursor: pointer; transition: background 0.12s; }
-.nm-formula [data-l].nm-hi, .nm-formula [data-l].nm-sel { background: var(--nm-hi-soft); box-shadow: 0 0 0 1px var(--nm-hi); }
+.nm-fl .katex { font-size: 15px; }
+.nm-formula [data-l] { border-radius: var(--r-xs); cursor: pointer; transition: background-color var(--dur-1) var(--ease); }
+.nm-formula [data-l].nm-hi, .nm-formula [data-l].nm-sel, .nm-formula [data-l].nm-foc { background: var(--hi-soft); }
+.nm-desc {
+  display: -webkit-box;
+  margin: var(--sp-6) 0 0;
+  overflow: hidden;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  cursor: pointer;
+}
+.nm-desc:hover { color: var(--text-2); }
+.nm-desc.open, .nm-audience .nm-desc { display: block; -webkit-line-clamp: unset; }
+.nm-audience .nm-desc { cursor: default; }
 
-.nm-collapse { padding: 8px 0 10px; border-bottom: 1px solid var(--ui-line); }
-.nm-note { color: var(--ui-muted); font-size: 12px; margin: 6px 0; }
-.nm-loss { margin: 8px 0 2px; font-size: 12.5px; }
-.nm-loss b { font-variant-numeric: tabular-nums; }
+.nm-collapse { padding: var(--sp-16) 0; border-top: 1px solid var(--line-1); }
+.nm-collapse .nm-3d { margin: var(--sp-4) 0 0 -6px; }
+.nm-loss { margin: var(--sp-4) 0 var(--sp-12); font-size: var(--fs-md); color: var(--text-2); }
+.nm-loss b { font-weight: var(--fw-strong); color: var(--text-1); font-variant-numeric: tabular-nums; }
 
-.nm-layer { padding: 8px 6px 8px 8px; margin: 0 -6px 0 -8px; border-bottom: 1px solid var(--ui-line); border-left: 3px solid transparent; }
-.nm-layer.nm-hi, .nm-layer.nm-sel { border-left-color: var(--nm-hi); background: var(--nm-hi-soft); }
-.nm-lhead { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; font-size: 12px; color: var(--ui-muted); cursor: pointer; }
-.nm-lhead b { color: var(--ui-fg); font-size: 13px; }
-.nm-shape { font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 11.5px; }
-.nm-lhead .nm-3d { margin-left: auto; }
-.nm-collapse .nm-3d { margin-top: 4px; }
+/* ---------------------------------------------------------------- layer blocks */
+/* 20 px apart with a hairline; a lit (hovered, selected, focused) block gets a 2 px HI rule
+   8 px left of the content, no wash */
+.nm-layer {
+  margin-left: calc(-1 * var(--sp-8));
+  padding: var(--sp-16) 0 20px var(--sp-8);
+  border-top: 1px solid var(--line-1);
+  transition: box-shadow var(--dur-2) var(--ease);
+}
+.nm-layer.nm-hi, .nm-layer.nm-sel, .nm-layer.nm-focus { box-shadow: inset 2px 0 0 var(--hi); }
+.nm-lhead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px var(--sp-8);
+  min-height: 22px;
+  font-size: var(--fs-md);
+  color: var(--text-3);
+  cursor: pointer;
+}
+.nm-lhead b { font-weight: var(--fw-strong); color: var(--text-1); }
+.nm-lhead:hover .nm-lwhat { color: var(--text-2); }
+.nm-shape {
+  font: var(--fs-xs)/1 var(--font-mono);
+  color: var(--text-4);
+  opacity: 0;
+  transition: opacity var(--dur-2) var(--ease);
+}
+.nm-layer:hover .nm-shape, .nm-labels .nm-shape { opacity: 1; }
+.nm-lhead .nm-3d { align-self: center; margin: -3px -6px -3px auto; color: var(--text-3); opacity: 0; }
+.nm-lhead .nm-3d:hover { color: var(--text-1); }
+.nm-layer:hover .nm-lhead .nm-3d, .nm-lhead .nm-3d:focus-visible { opacity: 1; }
 
-.nm-sym { color: var(--ui-muted); margin: 8px 0 0; overflow-x: auto; overflow-y: hidden; white-space: nowrap; }
-.nm-bwd { margin-top: 4px; padding-top: 2px; border-top: 1px dashed var(--ui-line); }
+/* symbolic lines above the numbers */
+.nm-sym { margin: var(--sp-8) 0 0; color: var(--text-2); overflow-x: auto; overflow-y: hidden; white-space: nowrap; }
+.nm-bwd { margin-top: var(--sp-16); }
+.nm-bwd-h { font-size: var(--fs-sm); font-weight: var(--fw-strong); color: var(--text-3); }
 
+/* ---------------------------------------------------------------- equations and grids */
 /* one equation: blocks (bracketed grids) and operators, centred on the grids */
-.nm-eq { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; margin: 6px 0; }
-.nm-grp { display: inline-flex; align-items: center; gap: 6px; }
-.nm-op { padding: var(--hdr) 0 var(--cap); white-space: nowrap; }
-.nm-blk { display: inline-grid; align-items: center; column-gap: 0; }
-.nm-lb, .nm-rb { align-self: stretch; border: 1.5px solid var(--ui-fg); opacity: 0.75; margin: 1px 0; }
-.nm-lb { border-right: none; margin-right: 2px; }
-.nm-rb { border-left: none; margin-left: 2px; }
-.nm-cap { text-align: center; font-size: 11px; color: var(--ui-muted); align-self: start; padding-top: 3px; white-space: nowrap; }
-.nm-cap .katex { font-size: 1.12em; }
-.nm-ch, .nm-rh { font-size: 10.5px; color: var(--ui-muted); white-space: nowrap; cursor: default; }
-.nm-ch { align-self: end; text-align: center; padding: 0 2px 2px; }
-.nm-rh { text-align: right; padding-right: 3px; }
-.nm-ch.nm-hi, .nm-rh.nm-hi { color: var(--nm-hi); }
+.nm-eq { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-6) var(--sp-8); margin: 10px 0; }
+.nm-grp { display: inline-flex; align-items: center; gap: var(--sp-6); }
+.nm-op { padding: var(--hdr) 0 var(--cap); white-space: nowrap; color: var(--text-2); }
+.nm-blk { display: inline-grid; align-items: center; column-gap: 0; isolation: isolate; }
+.nm-lb, .nm-rb { align-self: stretch; margin: 0; border: 1.25px solid var(--text-3); }
+.nm-lb { border-right: none; margin-right: 1px; border-radius: 1.5px 0 0 1.5px; }
+.nm-rb { border-left: none; margin-left: 1px; border-radius: 0 1.5px 1.5px 0; }
+.nm-cap { align-self: start; padding-top: 3px; text-align: center; font-size: var(--fs-xs); color: var(--text-3); white-space: nowrap; }
+.nm-cap .katex { font-size: 1.15em; }
+/* row and column headers: faint until their row or column is hovered */
+.nm-ch, .nm-rh {
+  font-size: var(--fs-xs);
+  color: var(--text-4);
+  white-space: nowrap;
+  cursor: default;
+  transition: color var(--dur-1) var(--ease);
+}
+.nm-ch .katex, .nm-rh .katex { font-size: 1.12em; }
+.nm-ch { align-self: end; padding: 0 2px 3px; text-align: center; }
+.nm-rh { padding-right: 5px; text-align: right; }
+.nm-ch.nm-hi, .nm-rh.nm-hi, .nm-ch.nm-hi2, .nm-rh.nm-hi2, .nm-ch.nm-sel, .nm-rh.nm-sel { color: var(--text-1); }
+.nm-rh.nm-an, .nm-ch.nm-an, .nm-rh.nm-tok-on, .nm-ch.nm-tok-on { color: var(--hi-text); }
 
+/* a cell: UI font, tabular, right-aligned so the decimal points line up */
 .nm-c {
-  font: 12px/1 ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  position: relative;
+  min-width: 3.2em;
+  height: 22px;
+  margin: 1px;
+  padding: 0 5px;
+  border-radius: var(--r-xs);
+  font: 12.5px/22px var(--font-ui);
   font-variant-numeric: tabular-nums;
   text-align: right;
-  min-width: 3.3em;
-  padding: 3px 4px;
-  margin: 1px;
-  border-radius: 3px;
+  color: var(--text-1);
   cursor: default;
 }
-.nm-c.nm-strong { color: #0d1114; }
-[data-theme="light"] .nm-c.nm-strong { color: #fff; }
-.nm-c.nm-mask { opacity: 0.3; background: none !important; }
+.nm-c.nm-z, .nm-c.nm-fix { color: var(--text-3); }   /* reads as zero, or a constant: no fill */
+.nm-c.nm-unit::after { content: '.00'; visibility: hidden; }   /* a constant 0 or 1 sits on the units digit */
+.nm-c.nm-one { min-width: 1.6em; text-align: center; }
+.nm-c.nm-heat { text-align: center; }
+/* masked (no edge, or causal): transparent with a hairline hatch */
+.nm-c.nm-mask, .nm-c.nm-ninf {
+  color: var(--text-4);
+  background: repeating-linear-gradient(135deg, var(--line-1) 0 1px, transparent 1px 5px) !important;
+  box-shadow: inset 0 0 0 1px var(--line-1);
+}
+.nm-c.nm-mask.nm-inf, .nm-c.nm-ninf { color: var(--text-3); }   /* −∞: what makes softmax give 0 */
+.nm-c.nm-inf, .nm-c.nm-zero { text-align: center; }             /* the causal mask M: 0 and −∞ */
 .nm-c.nm-faint { opacity: 0.4; }
-/* shared (tied) parameter: a dotted underline; fixed edge: italic with a dashed frame; masked −∞ */
-.nm-c.nm-tied { box-shadow: inset 0 -2px 0 -0.5px rgba(128, 128, 128, 0.55); }
-.nm-c.nm-fixedc { font-style: italic; outline: 1px dashed var(--ui-muted); outline-offset: -2px; }
-.nm-c.nm-inf { font-style: italic; }
-.nm-c.nm-mask.nm-inf { opacity: 0.6; }
-.nm-c.nm-zero { opacity: 0.45; }
-.nm-c.nm-heat { text-align: center; min-width: 3em; border-radius: 2px; }
-.nm-c.nm-one { min-width: 1.4em; text-align: center; color: var(--ui-muted); }
-.nm-c.nm-augc { box-shadow: -4px 0 0 -2.5px var(--ui-muted); margin-left: 6px; }
-.nm-c.nm-augr { box-shadow: 0 -4px 0 -2.5px var(--ui-muted); margin-top: 6px; }
-.nm-c.nm-hi2, .nm-c.nm-an2 { outline: 1px dashed var(--nm-hi); outline-offset: -1px; }
-.nm-c.nm-an { outline: 2px solid var(--nm-hi); outline-offset: -1px; font-weight: 700; }
-.nm-c.nm-hi, .nm-c.nm-sel { outline: 2px solid var(--nm-hi); outline-offset: 0; opacity: 1; }
-.nm-c.nm-sel { box-shadow: 0 0 0 4px var(--nm-hi-soft); }
+/* a shared (tied) parameter: a dotted underline; a fixed edge: neutral, italic, a dashed frame */
+.nm-c.nm-tied {
+  text-decoration: underline dotted;
+  text-decoration-color: color-mix(in srgb, currentColor 50%, transparent);
+  text-underline-offset: 3px;
+}
+.nm-c.nm-fixedc { color: var(--text-2); font-style: italic; outline: 1px dashed var(--line-3); outline-offset: -1px; }
+/* the bias trick's bar: before the b column, above the appended 1 */
+.nm-c.nm-augc { margin-left: 8px; }
+.nm-c.nm-augr { margin-top: 8px; }
+.nm-c.nm-augc::before, .nm-c.nm-augr::before { content: ''; position: absolute; background: var(--text-3); }
+.nm-c.nm-augc::before { left: -5px; top: -1px; bottom: -1px; width: 1.25px; }
+.nm-c.nm-augr::before { top: -5px; left: -1px; right: -1px; height: 1.25px; }
+/* hover: a thin HI ring; the selection keeps a ring (no glow) */
+.nm-c.nm-hi { box-shadow: inset 0 0 0 1.5px var(--hi); }
+.nm-c.nm-sel { box-shadow: inset 0 0 0 2px var(--hi); }
+.nm-c.nm-legible { font-weight: var(--fw-strong); }   /* the followed token's row of A */
 
+/* bands behind lit cells (drawBands): the step's row (an), its inputs (an2), a hover's relations (hi2) */
+.nm-lit {
+  z-index: -1;
+  align-self: stretch;
+  justify-self: stretch;
+  margin: -1px;
+  border-radius: 6px;
+  background: var(--hi-soft);
+  pointer-events: none;
+}
+.nm-lit-an { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--hi) 55%, transparent); }
+
+/* ---------------------------------------------------------------- the step box */
 .nm-step {
-  margin: 6px 0 4px;
-  padding: 6px 8px;
-  border-left: 3px solid var(--nm-hi);
-  background: var(--nm-hi-soft);
-  border-radius: 0 4px 4px 0;
+  margin: var(--sp-12) 0 var(--sp-4);
+  padding: var(--sp-8) var(--sp-12) var(--sp-8) 14px;
+  border-radius: var(--r-md);
+  background: linear-gradient(var(--hi), var(--hi)) left / 2px 100% no-repeat, var(--well);
   overflow-x: auto;
 }
 .nm-step > div { padding: 2px 0; }
-
-/* token layers and attention (docs/NN_ATTENTION.md) */
-.nm-sub { margin: 10px 0 -2px; font-size: 11px; color: var(--ui-muted); letter-spacing: 0.02em; }
-.nm-sub.nm-head { margin-top: 12px; font-size: 12px; font-weight: 600; color: var(--ui-fg); }
-.nm-notex { overflow-x: auto; overflow-y: hidden; white-space: nowrap; }
-.nm-expand { margin: 6px 0 2px; }
-.nm-expand.open { padding: 2px 0 4px 8px; border-left: 2px solid var(--ui-line); }
-.nm .nm-exp-btn {
-  font: inherit;
-  font-size: 12px;
-  color: var(--ui-muted);
-  background: transparent;
-  border: 1px dashed var(--ui-line);
-  border-radius: 5px;
-  padding: 2px 8px;
-  cursor: pointer;
+.nm-step > .nm-step-t {
+  display: none;
+  padding: 0 0 2px;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-strong);
+  font-variant-numeric: tabular-nums;
+  color: var(--hi-text);
 }
-.nm .nm-exp-btn:hover { color: var(--ui-fg); border-color: var(--ui-muted); }
-.nm-expand.open .nm-exp-btn { border-style: solid; }
+.nm-audience .nm-step > .nm-step-t, body.clean .nm-step > .nm-step-t, .nm.nm-infobox .nm-step > .nm-step-t { display: block; }
+
+/* ---------------------------------------------------------------- token layers and attention */
+.nm-sub { margin: 18px 0 0; font-size: var(--fs-sm); color: var(--text-3); }
+.nm-sub b { font-weight: var(--fw-strong); color: var(--text-2); }
+.nm-sub.nm-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 20px;
+  font-size: var(--fs-md);
+  font-weight: var(--fw-strong);
+  color: var(--text-1);
+}
+.nm-headbox:first-child > .nm-sub.nm-head { margin-top: var(--sp-12); }
+/* a head's swatch is a .ui-sw in its colour (--att, --head-2 ... --head-6): a head keeps its colour in every panel */
+.nm-notex { overflow-x: auto; overflow-y: hidden; white-space: nowrap; }
+/* the flattened z = W a view: a ghost button; open, indented behind a hairline */
+.nm-expand { margin: var(--sp-8) 0 2px; }
+.nm .nm-exp-btn { gap: 4px; margin-left: -6px; color: var(--text-3); }
+.nm .nm-exp-btn:hover { color: var(--text-1); }
+.nm-expand.open .nm-exp-btn { color: var(--text-2); }
+.nm-exp-body { margin: var(--sp-4) 0 0 1px; padding: 2px 0 2px var(--sp-12); border-left: 1px solid var(--line-1); }
 body.clean .nm-expand:not(.open), .nm-audience .nm-expand:not(.open) { display: none; }
 
-/* ---- the lens (docs/NN_LENS.md) */
+/* ---------------------------------------------------------------- the lens (docs/NN_LENS.md) */
 /* dimming: matrix.js sets --em per cell / header from focus.js's emphasis (unset = 1) */
-.nm-lens .nm-c, .nm-lens .nm-rh, .nm-lens .nm-ch { opacity: var(--em, 1); transition: opacity 0.18s; }
-.nm-lens .nm-c.nm-mask { opacity: calc(0.3 * var(--em, 1)); }
+.nm-lens .nm-c, .nm-lens .nm-rh, .nm-lens .nm-ch { opacity: var(--em, 1); transition: opacity var(--dur-2) var(--ease); }
 .nm-lens .nm-c.nm-faint { opacity: calc(0.4 * var(--em, 1)); }
-.nm-lens .nm-c.nm-zero { opacity: calc(0.45 * var(--em, 1)); }
-.nm-lens .nm-c.nm-mask.nm-inf { opacity: calc(0.6 * var(--em, 1)); }
 .nm-lens .nm-c.nm-hi, .nm-lens .nm-c.nm-sel, .nm-lens .nm-c.nm-an { opacity: 1; }
-.nm-c.nm-legible { font-weight: 700; }   /* the followed token's row of A */
 
-/* the followed token's row (or column, transposed) in every token matrix */
+/* the followed token's row (or column, transposed) in every token matrix: one HI ring */
 .nm-band {
   display: none;
-  pointer-events: none;
   z-index: 2;
   align-self: stretch;
   justify-self: stretch;
-  margin: -1px -2px;
-  border-radius: 4px;
-  box-shadow: 0 0 0 2px var(--nm-hi), 0 0 10px 1px var(--nm-hi-soft);
+  border-radius: 6px;
+  box-shadow: 0 0 0 1.5px var(--hi);
+  pointer-events: none;
 }
 .nm-band.on { display: block; }
-.nm-rh.nm-tok-on, .nm-ch.nm-tok-on { color: var(--nm-hi); font-weight: 700; }
 
 /* focus: the other layers fold to their header and one line */
-.nm-sum { display: none; margin: 3px 0 0; color: var(--ui-muted); overflow-x: auto; overflow-y: hidden; white-space: nowrap; cursor: pointer; }
-.nm-layer.nm-folded { padding-top: 5px; padding-bottom: 5px; }
+.nm-sum {
+  display: none;
+  margin: var(--sp-4) 0 0;
+  color: var(--text-3);
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--dur-1) var(--ease);
+}
+.nm-layer.nm-folded { padding-top: 10px; padding-bottom: 12px; }
 .nm-layer.nm-folded > :not(.nm-lhead):not(.nm-sum) { display: none; }
 .nm-layer.nm-folded > .nm-sum { display: block; }
-.nm-layer.nm-folded > .nm-sum:hover { color: var(--ui-fg); }
+.nm-layer.nm-folded > .nm-sum:hover { color: var(--text-1); }
 .nm-audience .nm-sum { cursor: default; }
-.nm-layer.nm-focus { border-left-color: var(--nm-hi); }
-.nm-formula [data-l].nm-foc { background: var(--nm-hi-soft); box-shadow: 0 0 0 1px var(--nm-hi); }
-/* focus.part: that stage (Q / K / V equation, scores, softmax, weighted sum) */
+.nm-audience .nm-layer.nm-folded > .nm-sum:hover { color: var(--text-3); }
+/* focus.part: that stage (Q / K / V equation, scores, softmax, weighted sum) carries the HI rule
+   in place of its layer's; the other stages fade */
 .nm-layer [data-part] {
-  margin-left: -6px;
-  margin-right: -6px;
-  padding-left: 6px;
-  padding-right: 6px;
-  border-radius: 4px;
-  transition: opacity 0.18s, background 0.18s;
+  margin-left: calc(-1 * var(--sp-8));
+  padding-left: var(--sp-8);
+  border-radius: 0 var(--r-md) var(--r-md) 0;
+  transition: opacity var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease);
 }
 .nm-stage { padding-top: 1px; padding-bottom: 2px; }
-.nm-layer [data-part].nm-part-on { background: var(--nm-hi-soft); box-shadow: inset 3px 0 0 var(--nm-hi); }
+.nm-layer [data-part].nm-part-on { box-shadow: inset 2px 0 0 var(--hi); }
+.nm-layer.nm-focus:has(.nm-part-on) { box-shadow: none; }
 .nm-layer [data-part].nm-part-off { opacity: 0.35; }
-@keyframes nm-flash { from { box-shadow: 0 0 0 3px var(--nm-hi); } to { box-shadow: 0 0 0 3px transparent; } }
-.nm-flash { animation: nm-flash 1.3s ease-out; }
+@keyframes nm-flash { from { background-color: var(--hi-soft); } to { background-color: transparent; } }
+.nm-flash { animation: nm-flash 1.3s var(--ease-out); }
 
-/* the token trace card (lens.token) */
+/* the token trace card (lens.token): a --well card with a 2 px HI rule */
 .nm-trace {
   --hdr: 0px;
   --cap: 0px;
-  margin: 8px 0;
-  padding: 5px 8px 7px;
-  border: 1px solid var(--nm-hi);
-  border-radius: 6px;
-  background: var(--nm-hi-soft);
+  margin: var(--sp-4) 0 var(--sp-16);
+  padding: 6px 6px 10px 14px;
+  border-radius: var(--r-md);
+  background: linear-gradient(var(--hi), var(--hi)) left / 2px 100% no-repeat, var(--well);
 }
 .nm-trace[hidden], .nm-tr-line[hidden] { display: none; }
-.nm-tr-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 3px; }
-.nm-tr-title { font-weight: 700; color: var(--nm-hi); }
-.nm-tr-hint { flex: 1; color: var(--ui-muted); font-size: 11.5px; }
-.nm .nm-tr-x {
-  font: inherit;
-  line-height: 1;
-  color: var(--ui-muted);
-  background: transparent;
-  border: 1px solid var(--ui-line);
-  border-radius: 4px;
-  padding: 1px 6px;
-  cursor: pointer;
-}
-.nm .nm-tr-x:hover { color: var(--ui-fg); border-color: var(--ui-muted); }
+.nm-tr-head { display: flex; align-items: center; gap: var(--sp-8); min-height: 22px; margin-bottom: var(--sp-4); }
+.nm-tr-title { flex: none; font-size: var(--fs-sm); font-weight: var(--fw-strong); color: var(--hi-text); }
+.nm-tr-hint { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-sm); color: var(--text-3); }
+.nm .nm-tr-x { color: var(--text-3); }
+.nm .nm-tr-x:hover { color: var(--text-1); }
 .nm-audience .nm-tr-x, body.clean .nm-tr-x { display: none; }
-.nm-tr-lines { display: flex; flex-direction: column; }
-.nm-tr-line { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; padding: 0 4px; border-radius: 4px; cursor: pointer; }
-.nm-tr-line:hover { background: rgba(128, 128, 128, 0.12); }
+.nm-tr-lines { display: flex; flex-direction: column; margin-right: var(--sp-6); }
+.nm-tr-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 var(--sp-6);
+  margin-left: -6px;
+  padding: 0 6px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: background-color var(--dur-1) var(--ease);
+}
+.nm-tr-line:hover { background: var(--hover); }
 .nm-audience .nm-tr-line { cursor: default; }
+.nm-audience .nm-tr-line:hover { background: none; }
 .nm-tr-sym { min-width: 5.2em; text-align: right; white-space: nowrap; }
 .nm-tr-sym.nm-tr-more { min-width: 0; margin-left: 10px; }
-.nm-tr-how { color: var(--ui-muted); font-size: 11.5px; white-space: nowrap; }
+.nm-tr-how { font-size: var(--fs-sm); color: var(--text-3); white-space: nowrap; }

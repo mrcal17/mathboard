@@ -261,6 +261,8 @@ export function carryItem(it, M) {
       return { ...it, o, p, foot, d: len3(sub3(p, foot)), along: null };
     }
   }
+  // graphs (plots.js) are sampled at draw time, so they carry the matrix itself
+  if (it.kind === 'graph' || it.kind === 'softmaxmap') return { ...it, o, M: it.M ? mulMM(M, it.M) : M };
   const custom = CARRIERS.get(it.kind);
   return custom ? custom(it, M, f) : it;
 }
@@ -783,7 +785,8 @@ function installRenderers(registerRenderer, nameTex) {
 const CSS = `
 .g-label.tf-sm { font-size: 17px; }
 `;
-const HELP = `<p><code>transform(A, t)</code> space moving under (1&minus;t)I + tA, t 0&ndash;1 &middot;
+const HELP = `<h4 class="ui-overline">Transformations</h4>
+<p><code>transform(A, t)</code> space moving under (1&minus;t)I + tA, t 0&ndash;1 &middot;
 <code>transform(A, B, t)</code> A then B, t 0&ndash;2 &middot; <code>fixed(u)</code> stays put while the rest moves</p>
 <p><code>eigen(A)</code> eigenlines with &lambda; &middot; <code>svdview(A)</code> sphere &rarr; ellipsoid &middot;
 <code>svdview(A, t)</code> rotate V&#7488;, stretch &Sigma;, rotate U (t 0&ndash;3)</p>`;

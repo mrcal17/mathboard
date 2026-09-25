@@ -28,6 +28,12 @@ const MODE_TITLE = {
   space: 'The data in each layer\'s activation space, morphing from the inputs to the outputs (Shift+P: next plot)',
   simplex: 'A 3-class softmax: the predicted probabilities on the triangle ŷ₁ + ŷ₂ + ŷ₃ = 1 (Shift+P: next plot)',
 };
+// How to use it: the help icon's title (the captions keep only what the plot shows).
+const HELP = 'Drag to orbit, right-drag (or Shift-drag) to pan, wheel to zoom; the house resets the view.\n'
+  + 'Surface: click a neuron on the canvas and the surface follows it (height: follow the selection).\n'
+  + 'Landscape: train to draw the path; Re-center puts the plane through the current weights.\n'
+  + 'Space: play the morph, or pick a stage under the slider.\n'
+  + 'Drag the header to move the panel, double-click it to put it back; the corner sets the size. P: open / close, Shift+P: next plot.';
 const UI_KEY = 'mathboard.nn.s3d';
 const W_DEFAULT = 460, H_DEFAULT = 340, W_MIN = 320, H_MIN = 180;
 const FOV = 32;
@@ -45,7 +51,6 @@ const EXTRA = ['#3ec27a', '#b07cff', '#ff6fa8', '#2ec4c4', '#c9a227'];   // clas
 const BOUNDED = { sigmoid: [0, 1], softmax: [0, 1], tanh: [-1, 1] };
 const FN = { relu: '\\mathrm{ReLU}', leaky: '\\mathrm{LReLU}', sigmoid: '\\sigma', tanh: '\\tanh', softmax: '\\mathrm{softmax}' };
 const RANGES = [0, 0.1, 0.25, 0.5, 1, 2, 5, 10];
-const VIRIDIS = [[68, 1, 84], [59, 82, 139], [33, 145, 140], [94, 201, 98], [253, 231, 37]];
 // default views: the orbit target t and the camera's offset d from it (z up)
 const CAM = {
   surface: { t: [0.05, 0, 0.36], d: [2.6, -3.85, 2.5] },
@@ -61,6 +66,7 @@ const isTie = t => typeof t === 'string' && t !== '';
 const TIE_RE = /^(.*):\s*(\d+)\s*,\s*(\d+)\s*$/;
 const round = (v, p = 10) => (Number.isFinite(v) ? +v.toPrecision(p) : 0);
 const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+const icon = (name, fallback = '') => (typeof window !== 'undefined' && window.mathboardIcons?.svg(name)) || fallback;
 
 // ---------------------------------------------------------------- pure helpers (exported for tests)
 
@@ -454,10 +460,6 @@ const lin = c => { const x = c / 255; return x <= 0.04045 ? x / 12.92 : ((x + 0.
 function mixInto(arr, o, base, rgb, a) {   // linear vertex colour of base + (rgb - base) a
   for (let k = 0; k < 3; k++) arr[o + k] = lin(base[k] + (rgb[k] - base[k]) * a);
 }
-function viridis(u) {
-  const x = clamp(u, 0, 1) * (VIRIDIS.length - 1), i = Math.min(VIRIDIS.length - 2, Math.floor(x)), f = x - i;
-  return VIRIDIS[i].map((c, k) => c + (VIRIDIS[i + 1][k] - c) * f);
-}
 
 // ---------------------------------------------------------------- the panel
 
@@ -493,24 +495,25 @@ export function install(ctx) {
 
   // ---- DOM
   const panel = document.createElement('div');
-  panel.className = 'nn-s3d' + (ro ? ' ro' : '');
+  panel.className = 'nn-s3d ui-float' + (ro ? ' ro' : '');
   panel.hidden = true;
   panel.innerHTML = `
-    <header class="s3-head">
-      <b class="s3-title" title="Drag to move; double-click to put it back">3D plots</b>
-      <div class="s3-modes">${MODES.map(m => `<button type="button" data-mode="${m}" title="${esc(MODE_TITLE[m])}">${MODE_LABEL[m]}</button>`).join('')}</div>
-      <span class="s3-flex"></span>
-      <button type="button" class="s3-home" data-act="home" title="Reset the view. Drag to orbit, right-drag to pan, wheel to zoom">&#8962;</button>
-      <button type="button" class="s3-close" data-act="close" title="Close (P)">&times;</button>
+    <header class="s3-head ui-float-head drag">
+      <b class="s3-title ui-float-title" title="Drag to move; double-click to put it back">3D plots</b>
+      <div class="s3-modes ui-seg sm">${MODES.map(m => `<button type="button" data-mode="${m}" title="${esc(MODE_TITLE[m])}">${MODE_LABEL[m]}</button>`).join('')}</div>
+      <span class="s3-flex ui-float-sp"></span>
+      <button type="button" class="s3-help ui-help ui-btn sm icon ui-chrome" tabindex="-1" aria-label="How to use it" title="${esc(HELP)}">${icon('help', '?')}</button>
+      <button type="button" class="s3-home ui-btn sm icon" data-act="home" title="Reset the view" aria-label="Reset the view">${icon('home', '&#8962;')}</button>
+      <button type="button" class="s3-close ui-btn sm icon" data-act="close" title="Close (P)" aria-label="Close">${icon('close', '&times;')}</button>
     </header>
     <div class="s3-ctl"></div>
     <div class="s3-view"><div class="s3-msg" hidden></div></div>
-    <div class="s3-cap"><div class="s3-tex"></div><div class="s3-note"></div></div>
-    <div class="s3-grip" title="Drag to resize"></div>`;
+    <div class="s3-cap"><div class="s3-tex"></div><div class="s3-note ui-caption" hidden><span class="s3-note-t"></span><button type="button" class="s3-more ui-link ui-chrome" hidden>more</button></div></div>
+    <div class="s3-grip ui-grip" title="Drag to resize"></div>`;
   stage.appendChild(panel);
   const $ = s => panel.querySelector(s);
   const head = $('.s3-head'), ctl = $('.s3-ctl'), viewEl = $('.s3-view'), msgEl = $('.s3-msg');
-  const capTex = $('.s3-tex'), capNote = $('.s3-note'), grip = $('.s3-grip');
+  const capTex = $('.s3-tex'), capNote = $('.s3-note'), noteText = $('.s3-note-t'), moreBtn = $('.s3-more'), grip = $('.s3-grip');
   for (const type of ['pointerdown', 'mousedown', 'click', 'dblclick', 'wheel', 'contextmenu', 'touchstart']) {
     panel.addEventListener(type, e => e.stopPropagation(), { passive: type === 'wheel' || type === 'touchstart' });
   }
@@ -527,17 +530,27 @@ export function install(ctx) {
     }
     return { x: 10, y: 10 };
   }
+  // At its default spot, no wider than the room left of an open Train panel on the right (at 1280
+  // with the matrix panel open, 460 px would run 12 px under it). W_MIN at the least.
+  const trainEl = stage.querySelector(':scope > .nn-train');
+  function roomLeftOfTrain(x, w) {
+    if (!trainEl || trainEl.hidden || !trainEl.offsetWidth) return w;
+    const left = trainEl.offsetLeft - 10;
+    return left > x + W_MIN && left < x + w ? left - x : w;
+  }
   // Width, spot and view height from ui, kept inside the stage.
   function placePanel() {
     const sw = stage.clientWidth, sh = stage.clientHeight;
-    const w = sw > 0 ? Math.min(ui.w, Math.max(W_MIN, sw - 20)) : ui.w;
-    panel.style.width = `${Math.round(w)}px`;
+    let w = sw > 0 ? Math.min(ui.w, Math.max(W_MIN, sw - 20)) : ui.w;
     let x, y;
-    if (ui.x == null || ui.y == null) ({ x, y } = defaultSpot(w));
-    else {
+    if (ui.x == null || ui.y == null) {
+      ({ x, y } = defaultSpot(w));
+      if (sw > 0) w = roomLeftOfTrain(x, w);
+    } else {
       x = sw > 0 ? clamp(ui.x, 0, Math.max(0, sw - w)) : ui.x;
       y = sh > 0 ? clamp(ui.y, 0, Math.max(0, sh - 120)) : ui.y;
     }
+    panel.style.width = `${Math.round(w)}px`;
     panel.style.left = `${Math.round(x)}px`;
     panel.style.top = `${Math.round(y)}px`;
     const chrome = panel.hidden ? 150 : Math.max(80, panel.offsetHeight - viewEl.offsetHeight);
@@ -545,7 +558,9 @@ export function install(ctx) {
     viewEl.style.height = `${Math.round(h)}px`;
   }
   placePanel();
-  new ResizeObserver(() => placePanel()).observe(stage);
+  const placeObs = new ResizeObserver(() => placePanel());
+  placeObs.observe(stage);
+  if (trainEl) placeObs.observe(trainEl);   // the Train panel opening or closing changes the room
 
   head.addEventListener('pointerdown', e => {
     if (e.button !== 0 || ro || e.target.closest('button, select')) return;
@@ -953,23 +968,31 @@ export function install(ctx) {
     kick();
   }
 
-  // ---- palette (both themes), rebuilt on a theme change
+  // ---- palette (both themes), rebuilt on a theme change. Data colours come from store.js and the
+  // tokens (--pos, --neg, --hi); the box, grid and wire are the page and text tokens mixed, so the
+  // plot sits in the theme like the 2D canvas.
   let PAL = null;
   function pal() {
     if (PAL) return PAL;
     const cs = getComputedStyle(document.documentElement), th = themeNow();
     const v = (name, d) => cs.getPropertyValue(name).trim() || d;
     const rgb = (c, d) => parseRGB(c) || d;
-    const pos = rgb(colorFor(1, 1, th), [74, 163, 255]), neg = rgb(colorFor(-1, 1, th), [255, 122, 89]);
     const light = th === 'light';
+    const pos = rgb(colorFor(1, 1, th), [74, 163, 255]), neg = rgb(colorFor(-1, 1, th), [255, 122, 89]);
+    const bg = rgb(v('--bg'), light ? [251, 251, 248] : [29, 35, 39]);
+    const t1 = rgb(v('--text-1'), light ? [29, 29, 31] : [236, 235, 228]);
+    const t2 = rgb(v('--text-2'), light ? [69, 73, 77] : [188, 195, 199]);
+    const t3 = rgb(v('--text-3'), light ? [107, 112, 117] : [147, 156, 162]);
+    const mix = (a, b, t) => a.map((x, k) => Math.round(x + (b[k] - x) * t));
+    const hex = c => '#' + c.map(x => clamp(x, 0, 255).toString(16).padStart(2, '0')).join('');
     PAL = {
-      theme: th, light, bg: v('--bg', light ? '#fbfbf8' : '#1d2327'), fg: v('--ui-fg', light ? '#222' : '#e6e6e0'),
-      muted: v('--ui-muted', light ? '#6b7075' : '#9aa3a8'), pos, neg,
+      theme: th, light, bg: hex(bg), fg: hex(t1), muted: hex(t3), pos, neg,
       cls: [neg, pos, ...EXTRA.map(c => parseRGB(c))],
-      neutral: light ? [206, 211, 215] : [86, 96, 104],
-      hi: light ? '#e8a800' : HI,
-      grid: light ? '#b9bfc4' : '#56626a', wall: light ? '#d9dde0' : '#3b454b', axis: light ? '#5b6166' : '#9aa3a8',
-      wire: light ? '#1d1d1f' : '#ffffff', path: light ? '#1d1d1f' : '#ffffff', gridLine: light ? '#3d4246' : '#c4cbd0',
+      neutral: mix(bg, t3, light ? 0.3 : 0.46),          // a surface's colour where the value is at its midpoint
+      hi: v('--hi', light ? '#e8a800' : HI),
+      grid: hex(mix(bg, t3, light ? 0.42 : 0.44)),        // the floor grid
+      wall: hex(mix(bg, t3, light ? 0.22 : 0.24)),        // the back walls
+      axis: hex(t3), wire: hex(t1), path: hex(t1), gridLine: hex(t2),
     };
     return PAL;
   }
@@ -1046,22 +1069,58 @@ export function install(ctx) {
       },
     };
   }
-  function marker(color, r = 0.045) {
-    const m = add(new THREE.Mesh(GL.sphere, own(new THREE.MeshBasicMaterial({ color: new THREE.Color(color), depthTest: false, transparent: true }))));
+  // The current point: an HI ball in a thin ring of the page colour, drawn over everything. xray (the
+  // landscape, where the ball can sit under the surface): the ball and its stem are depth-tested, and
+  // a faint copy of both shows through wherever the surface hides them, so "below" reads as below.
+  function marker(color, r = 0.045, { xray = false } = {}) {
+    const m = add(new THREE.Mesh(GL.sphere, own(new THREE.MeshBasicMaterial({ color: new THREE.Color(color), depthTest: xray, transparent: true }))));
     m.scale.setScalar(r);
     m.renderOrder = 10;
-    const ring = add(new THREE.Mesh(GL.sphere, own(new THREE.MeshBasicMaterial({ color: new THREE.Color(pal().bg), depthTest: false, transparent: true, side: THREE.BackSide }))));
+    const ring = add(new THREE.Mesh(GL.sphere, own(new THREE.MeshBasicMaterial({ color: new THREE.Color(pal().bg), depthTest: xray, transparent: true, side: THREE.BackSide }))));
     ring.scale.setScalar(r * 1.45);
     ring.renderOrder = 9;
-    const stem = segments(1, color, 0.8);
+    if (!xray) {
+      const stem = segments(1, color, 0.9);
+      return {
+        set(x, y, z, stemZ = null) {
+          const ok = [x, y, z].every(Number.isFinite);
+          m.visible = ring.visible = ok;
+          stem.set(ok && Number.isFinite(stemZ) ? [x, y, stemZ, x, y, z] : []);
+          if (!ok) return;
+          m.position.set(x, y, z);
+          ring.position.set(x, y, z);
+        },
+      };
+    }
+    const mat = (o = 1, see = false) => own(new THREE.MeshBasicMaterial({
+      color: new THREE.Color(color), transparent: true, opacity: o, ...(see ? { depthTest: false, depthWrite: false } : {}),
+    }));
+    const ghost = add(new THREE.Mesh(GL.sphere, mat(0.5, true)));
+    ghost.scale.setScalar(r);
+    ghost.renderOrder = 8;
+    // the stem: a thin rod (a 1 px line is lost on the surface's wire), solid where it is in view
+    const rod = own(new THREE.CylinderGeometry(1, 1, 1, 10, 1, true));
+    rod.rotateX(Math.PI / 2);   // along z
+    const stem = add(new THREE.Mesh(rod, mat(0.95)));
+    const stemX = add(new THREE.Mesh(rod, mat(0.45, true)));
+    stemX.renderOrder = 7;
+    // where the stem meets the surface: a small dot on it
+    const foot = add(new THREE.Mesh(GL.sphere, mat(1)));
+    foot.scale.setScalar(r * 0.42);
     return {
       set(x, y, z, stemZ = null) {
         const ok = [x, y, z].every(Number.isFinite);
-        m.visible = ring.visible = ok;
-        if (!ok) { stem.set([]); return; }
+        m.visible = ring.visible = ghost.visible = ok;
+        const st = ok && Number.isFinite(stemZ) && Math.abs(z - stemZ) > r * 0.5;
+        stem.visible = stemX.visible = foot.visible = st;
+        if (!ok) return;
         m.position.set(x, y, z);
         ring.position.set(x, y, z);
-        stem.set(stemZ == null ? [] : [x, y, stemZ, x, y, z]);
+        ghost.position.set(x, y, z);
+        if (st) {
+          for (const s of [stem, stemX]) { s.position.set(x, y, (z + stemZ) / 2); s.scale.set(r * 0.2, r * 0.2, Math.abs(z - stemZ)); }
+          foot.position.set(x, y, stemZ);
+        }
       },
     };
   }
@@ -1167,15 +1226,34 @@ export function install(ctx) {
   }
 
   // ---------------------------------------------------------------- captions and messages
-  let capKey = '';
+  // The formula (KaTeX) and a note, folded to one line with a "more" link when it runs longer (the
+  // audience and the clean view show it whole). A ● in the note is the ball's key: an HI dot.
+  let capKey = '', noteOpen = false;
   function setCaption(tex, note = '') {
     const key = tex + '\u0000' + note;
     if (key === capKey) return;
     capKey = key;
     capTex.innerHTML = mixed(tex);
-    capNote.textContent = note;
+    noteText.innerHTML = esc(note).replace(/●/g, '<i class="s3-sw ui-sw" aria-label="●"></i>');
     capNote.hidden = !note;
+    capTex.parentNode.classList.toggle('empty', !tex && !note);
+    fitNote();
   }
+  function fitNote() {
+    if (capNote.hidden || ro) { moreBtn.hidden = true; return; }
+    capNote.classList.toggle('open', noteOpen);
+    moreBtn.textContent = noteOpen ? 'less' : 'more';
+    // folded: "more" only when the line is cut; open: "less" only when it wraps
+    moreBtn.hidden = noteOpen ? noteText.offsetHeight <= parseFloat(getComputedStyle(noteText).lineHeight) * 1.5
+      : noteText.scrollWidth <= noteText.clientWidth + 1;
+  }
+  moreBtn.addEventListener('click', () => {
+    noteOpen = !noteOpen;
+    fitNote();
+    placePanel();
+  });
+  let noteW = 0;   // refit when the width changes (the panel resized), not when fitNote changes the height
+  new ResizeObserver(() => { const w = capNote.clientWidth; if (w !== noteW) { noteW = w; fitNote(); } }).observe(capNote);
   function showMsg(t) {
     msgEl.textContent = t;
     msgEl.hidden = false;
@@ -1252,12 +1330,12 @@ export function install(ctx) {
     const wg = own(new THREE.BufferGeometry());
     wg.setAttribute('position', geo.getAttribute('position'));
     wg.setIndex(wire);
-    b.wire = add(new THREE.LineSegments(wg, lineMat(p.wire, p.light ? 0.22 : 0.2, { depthWrite: false })));
+    b.wire = add(new THREE.LineSegments(wg, lineMat(p.wire, p.light ? 0.14 : 0.12, { depthWrite: false })));
     b.wire.frustumCulled = false;
     b.plane = add(new THREE.Mesh(own(new THREE.PlaneGeometry(2, 2)), own(new THREE.MeshBasicMaterial({
       color: new THREE.Color(p.muted), transparent: true, opacity: p.light ? 0.16 : 0.14, side: THREE.DoubleSide, depthWrite: false,
     }))));
-    b.planeEdge = segments(4, p.muted, 0.7);
+    b.planeEdge = segments(4, p.muted, 0.55);
     b.contour = segments(4 * G * G, p.hi, 1);
     floorParts();
     b.mark = marker(p.hi);
@@ -1393,10 +1471,10 @@ export function install(ctx) {
   }
   function surfaceCaption(net, M, tg, act, level, showLevel, dataOk, isOut) {
     const L = net.layers.length;
-    const follow = cur()?.neuron === 'sel' && !store.state.sel ? ' Click a neuron to see its surface.' : '';
+    // "click a neuron to see its surface" is behind the help icon; the note says what the dots are
     if (tg.argmax) {
       setCaption('Colour: the class the net picks, $\\arg\\max_k \\hat y_k$; height: how sure it is, $\\max_k \\hat y_k$, over the input plane.',
-        (dataOk ? 'Dots: the training points on the floor, in their class colour.' : '') + follow);
+        dataOk ? 'Dots: the training points on the floor, in their class colour.' : '');
       return;
     }
     const name = nodeTex(net, tg.id), f = FN[act];
@@ -1414,7 +1492,7 @@ export function install(ctx) {
       else tex = `$${name} = \\textstyle\\sum_j w_j a_j + b$ over the input plane: a sum of layer ${tg.l - 1}'s surfaces.`;
     }
     const pts = dataOk ? (isOut ? ' Dots: the training points at their targets.' : ' Dots: the training points at this neuron\'s value.') : '';
-    setCaption(tex + lvl, (pts + follow).trim());
+    setCaption(tex + lvl, pts.trim());
   }
 
   // ---------------------------------------------------------------- landscape
@@ -1442,30 +1520,51 @@ export function install(ctx) {
       else job = null;
     }
   }
-  function heightMap(vals, extra, log) {
+  // low: the lowest true loss drawn (the path's and the ● 's). Weights off the plane can sit below the
+  // whole slice; then the floor drops under the slice's minimum, in steps of a tenth of the height
+  // range, so the ● keeps its true depth and the mesh is rebuilt only when it crosses a step.
+  function heightMap(vals, extra, log, low = Infinity) {
     const f = Array.from(vals).filter(Number.isFinite).sort((a, b) => a - b);
     if (!f.length) return null;
-    const lo = f[0], mx = f[f.length - 1], q = f[Math.floor(0.85 * (f.length - 1))];
-    let hi = Math.min(mx, lo + (Math.max(q, extra) - lo) * 1.3);
-    if (!(hi > lo)) hi = lo + (Math.abs(lo) || 1) * 1e-3;
+    const fmin = f[0], mx = f[f.length - 1], q = f[Math.floor(0.85 * (f.length - 1))];
+    let hi = Math.min(mx, fmin + (Math.max(q, extra) - fmin) * 1.3);
+    if (!(hi > fmin)) hi = fmin + (Math.abs(fmin) || 1) * 1e-3;
     const g = log ? v => Math.log10(Math.max(v, 1e-12)) : v => v;
-    const glo = g(lo), ghi = g(hi) > glo ? g(hi) : glo + 1e-9;
+    let glo = g(fmin);
+    if (low < fmin) {
+      const st = (g(hi) - glo) / 10;
+      if (st > 0) glo -= Math.ceil((glo - g(low)) / st - 1e-9) * st;
+      if (!log && fmin >= 0) glo = Math.max(glo, 0);
+    }
+    const lo = log ? 10 ** glo : glo, ghi = g(hi) > glo ? g(hi) : glo + 1e-9;
     const u = v => clamp((g(v) - glo) / (ghi - glo), 0, 1);
     return { lo, hi, max: mx, log, clipped: mx > hi * (1 + 1e-6) + 1e-12, u, z: v => ZH * u(v), g, glo, ghi };
   }
   function buildLandscape() {
     const b = begin('landscape'), p = pal();
     b.meshG = 0;
-    b.contour = segments(24000, p.wire, p.light ? 0.35 : 0.3, { depthWrite: false });
+    b.contour = segments(24000, p.wire, p.light ? 0.3 : 0.26, { depthWrite: false });
     b.floorC = segments(24000, p.grid, 0.55, { depthWrite: false });
     b.shadow = polyline(TRAIL_MAX + 2, p.path, 0.4);
     b.cross = segments(2, p.axis, 0.9);
     b.cross.set([-0.06, 0, 0.003, 0.06, 0, 0.003, 0, -0.06, 0.003, 0, 0.06, 0.003]);
     floorParts();
-    b.mark = marker(p.hi, 0.042);
+    b.mark = marker(p.hi, 0.042, { xray: true });
     b.tube = null;
     b.tubeKey = '';
     b.meshKey = '';
+  }
+  // The drawn surface's height at world (x, y): the mesh is linear on each triangle of its grid (the
+  // quad (i, j) is split along its diagonal, as landMesh indexes it). NaN off the grid.
+  function meshZ(x, y) {
+    const b = built, G = b.meshG;
+    if (!b.mesh || !G || !(Math.abs(x) <= 1 && Math.abs(y) <= 1)) return NaN;
+    const z = b.mesh.geometry.attributes.position.array;
+    const gx = (x + 1) / 2 * (G - 1), gy = (y + 1) / 2 * (G - 1);
+    const i = Math.min(G - 2, Math.floor(gx)), j = Math.min(G - 2, Math.floor(gy)), fx = gx - i, fy = gy - j;
+    const at = (ii, jj) => z[3 * (jj * G + ii) + 2];
+    const a = at(i, j), c = at(i + 1, j + 1);
+    return fx >= fy ? a + fx * (at(i + 1, j) - a) + fy * (c - at(i + 1, j)) : a + fy * (at(i, j + 1) - a) + fx * (c - at(i, j + 1));
   }
   function landMesh(G) {
     const b = built;
@@ -1528,8 +1627,9 @@ export function install(ctx) {
     }
     const G0 = grid && grid.key === key ? grid : null;
     const trailMax = T.reduce((m, q) => (Number.isFinite(q[2]) ? Math.max(m, q[2]) : m), -Infinity);
-    const hm = G0 ? heightMap(G0.vals, Math.max(trailMax, loss), !!s.log) : null;
-    const mkey = G0 ? [G0.ver, s.log, hm && hm.hi].join('|') : '';
+    const trailMin = T.reduce((m, q) => (Number.isFinite(q[2]) ? Math.min(m, q[2]) : m), Infinity);
+    const hm = G0 ? heightMap(G0.vals, Math.max(trailMax, loss), !!s.log, Math.min(trailMin, Number.isFinite(loss) ? loss : Infinity)) : null;
+    const mkey = G0 ? [G0.ver, s.log, hm && hm.hi, hm && hm.lo].join('|') : '';
     if (G0 && hm && b.meshKey !== mkey) {
       b.meshKey = mkey;
       landMesh(G0.G);
@@ -1540,7 +1640,10 @@ export function install(ctx) {
         const u = Number.isFinite(v) ? hm.u(v) : 1;
         U[k] = u;
         pa.array[3 * k + 2] = ZH * u;
-        mixInto(ca.array, 3 * k, [0, 0, 0], viridis(u), 1);
+        // sequential, in the data palette: the loss as a magnitude, from the neutral surface (low)
+        // to positive blue (high), as colorFor shades a value >= 0 (capped like the matrix cells); HI stays
+        // free for the ball
+        mixInto(ca.array, 3 * k, p.neutral, p.pos, 0.06 + 0.66 * u);
       }
       pa.needsUpdate = ca.needsUpdate = true;
       b.mesh.geometry.computeVertexNormals();
@@ -1581,11 +1684,21 @@ export function install(ctx) {
         }
         b.shadow.set(pts.flatMap(q => [q[0], q[1], 0.003]));
       }
-      b.mark.set(W(pr.a), W(pr.b), H.z(loss), 0);
-    } else {
-      b.mark.set(NaN, 0, 0);
-      b.shadow.set([]);
+    } else b.shadow.set([]);
+    // The ● is the current weights at their TRUE loss. Off the plane that is not the surface's height
+    // there: a stem joins the surface at the ● 's (α, β) to the ●, which sits above it or (seen
+    // through the surface, faint) below it, with a short caption beside it.
+    const offPlane = pr.r > 1e-9 * (1 + Math.sqrt(dot(theta, theta)));
+    const bx = W(pr.a), by = W(pr.b), bz = H ? H.z(loss) : NaN, zs = H ? meshZ(bx, by) : NaN;
+    const gap = Number.isFinite(zs) ? bz - zs : 0;
+    const showStem = offPlane && Math.abs(gap) > 0.012;
+    b.mark.set(bx, by, bz, showStem ? zs : null);
+    let slice = NaN;
+    if (offPlane && H) {
+      const inPlane = Float64Array.from(t0, (v, k) => v + pr.a * B.d1[k] + pr.b * B.d2[k]);
+      slice = ev.evalAt(inPlane);
     }
+    const offLabel = offPlane && H && (showStem || pr.r > 0.05 * B.span);
     // axes
     const kind = B.kind, P = ev.params;
     const ia = kind === 'weights' ? P.findIndex(q => q.key === B.wa) : -1, ib = kind === 'weights' ? P.findIndex(q => q.key === B.wb) : -1;
@@ -1598,6 +1711,7 @@ export function install(ctx) {
       zt: s.log ? '\\log_{10} L' : 'L',
     });
     labels.push({ key: 'th0', p: [0, 0, -0.05], tex: '\\theta_0', cls: 'tick th' });
+    labels.push({ key: 'off', p: [bx, by, Number.isFinite(bz) ? bz : 0], text: 'off the plane', cls: 'off', anchor: [0, 0.5], hidden: !offLabel });
     setLabels(labels);
     // caption
     const lossName = net.meta?.loss === 'xent' ? 'cross-entropy' : 'MSE';
@@ -1606,17 +1720,21 @@ export function install(ctx) {
     if (kind === 'weights') tex = `$L$ (${lossName}${sub}) as $${paramTex(net, P[ia])}$ and $${paramTex(net, P[ib])}$ move, every other parameter held at $\\theta_0$.`;
     else if (kind === 'pca') tex = `$L(\\theta_0 + \\alpha\\,\\delta_1 + \\beta\\,\\delta_2)$ (${lossName}${sub}): $\\delta_1, \\delta_2$ are the path's top two principal directions${B.share != null ? ` (${Math.round(B.share * 100)}% of its variance)` : ''}.`;
     else tex = `$L(\\theta_0 + \\alpha\\,\\delta_1 + \\beta\\,\\delta_2)$ (${lossName}${sub}) on a random plane through the weights $\\theta_0$; each neuron's share of $\\delta_1, \\delta_2$ has the norm of its own weights (filter-normalised).`;
-    const off = pr.r > 1e-9 * (1 + Math.sqrt(dot(theta, theta))) ? `, ${fmt(pr.r)} off the plane` : ', on the plane';
+    // the note: the ● first (folded, this is the line that shows), then the path and the clipping
+    const where = !offPlane ? ', on the plane'
+      : `, ${fmt(pr.r)} off the plane${Number.isFinite(slice) && Math.abs(loss - slice) > 1e-12 ? `, so ${loss < slice ? 'below' : 'above'} the surface (L = ${lossText(slice)} there)` : ''}`;
     const notes = [];
     if (B.note) notes.push(B.note);
-    notes.push(`● now: L = ${lossText(loss)}${off}.`);
+    notes.push(`● now: L = ${lossText(loss)}${where}.`);
     if (T.length > 1) notes.push(`Path: ${T.length} points of training, at their true loss${!ro && kind !== 'pca' && T.length > 2 && pathOff(pr, B) ? ' (it leaves this plane: try PCA of the path)' : ''}.`);
-    else if (!ro) notes.push('Train to draw the path.');
     if (H?.clipped) notes.push(`Heights stop at L = ${lossText(H.hi)} (the top reaches ${lossText(H.max)}).`);
     if (G0?.preview || job) notes.push('Computing…');
     setCaption(tex, notes.join(' '));
     const c = grid && grid.key === key ? grid.vals[(grid.G * grid.G - 1) / 2] : NaN;
-    landView = { G: G0?.G ?? 0, span: B.span, kind, center: c, current: { a: pr.a, b: pr.b, r: pr.r, loss }, trail: T.length, done: !!G0 && !G0.preview && !job, lo: H?.lo, hi: H?.hi, n: ev.n, basis: B.id };
+    landView = {
+      G: G0?.G ?? 0, span: B.span, kind, center: c, current: { a: pr.a, b: pr.b, r: pr.r, loss, slice, stem: showStem ? [zs, bz] : null },
+      trail: T.length, done: !!G0 && !G0.preview && !job, lo: H?.lo, hi: H?.hi, n: ev.n, basis: B.id,
+    };
     probeData.landscape = landView;
   }
   // The path mostly leaves the plane: the current weights are further from it than they moved in it.
@@ -1933,26 +2051,26 @@ export function install(ctx) {
     if (s.mode === 'surface') {
       const opts = neuronOptions(net);
       sig = 'surface|' + JSON.stringify(opts);
-      html = `<label title="Which neuron's value is the height (click a neuron on the canvas to follow it)">height <select data-k="neuron">${opts.map(o => opt(o.v, o.t)).join('')}</select></label>
-        <div class="s3-seg" title="a: the neuron's activation f(z); z: its input sum W a + b, before the activation"><button type="button" data-k="pre" data-v="0">a = f(z)</button><button type="button" data-k="pre" data-v="1">z</button></div>`;
+      html = `<label title="Which neuron's value is the height (click a neuron on the canvas to follow it)">height <select class="ui-field sm" data-k="neuron">${opts.map(o => opt(o.v, o.t)).join('')}</select></label>
+        <div class="s3-seg ui-seg sm" title="a: the neuron's activation f(z); z: its input sum W a + b, before the activation"><button type="button" data-k="pre" data-v="0">a = f(z)</button><button type="button" data-k="pre" data-v="1">z</button></div>`;
     } else if (s.mode === 'landscape') {
       const ev = evaluator(), P = ev ? ev.params : [];
       const popts = P.map(q => opt(q.key, paramText(net, q))).join('');
       sig = 'landscape|' + (ev ? ev.psig : '') + '|' + P.map(q => paramText(net, q)).join(',');
-      html = `<label title="The plane through θ₀ the loss is drawn on">plane <select data-k="dirs">${opt('random', 'random')}${opt('pca', 'PCA of the path')}${opt('weights', 'two weights')}</select></label>
-        <button type="button" data-act="reroll" title="Two new random directions">&#8635;</button>
-        <label class="s3-w">x <select data-k="wa">${popts}</select></label>
-        <label class="s3-w">y <select data-k="wb">${popts}</select></label>
-        <label title="Half-width of the plane (auto: fits the path)">range <select data-k="range">${RANGES.map(v => opt(String(v), v ? '±' + v : 'auto')).join('')}</select></label>
-        <label class="s3-check" title="Height by log₁₀ of the loss"><input type="checkbox" data-k="log"> log</label>
-        <button type="button" data-act="recenter" title="Put the plane's centre θ₀ at the current weights">Re-center</button>
-        <button type="button" data-act="clear" title="Forget the training path so far">Clear path</button>`;
+      html = `<span class="s3-group"><label title="The plane through θ₀ the loss is drawn on">plane <select class="ui-field sm" data-k="dirs">${opt('random', 'random')}${opt('pca', 'PCA of the path')}${opt('weights', 'two weights')}</select></label>
+        <button type="button" class="ui-btn sm icon" data-act="reroll" title="Two new random directions" aria-label="Two new random directions">${icon('dice', '&#8635;')}</button></span>
+        <label class="s3-w">x <select class="ui-field sm" data-k="wa">${popts}</select></label>
+        <label class="s3-w">y <select class="ui-field sm" data-k="wb">${popts}</select></label>
+        <label title="Half-width of the plane (auto: fits the path)">range <select class="ui-field sm" data-k="range">${RANGES.map(v => opt(String(v), v ? '±' + v : 'auto')).join('')}</select></label>
+        <label class="s3-check ui-check-row" title="Height by log₁₀ of the loss"><input type="checkbox" class="ui-check" data-k="log">log</label>
+        <span class="s3-acts"><button type="button" class="ui-btn sm soft" data-act="recenter" title="Put the plane's centre θ₀ at the current weights">Re-center</button>
+        <button type="button" class="ui-btn sm soft" data-act="clear" title="Forget the training path so far">Clear path</button></span>`;
     } else if (s.mode === 'space') {
       const st = spaceData?.emb.map(E => E.S) || stagesFor(net, !model.matrices(net).some(m => m.kind === 'attention'));
       sig = 'space|' + JSON.stringify(st.map(S => [S.l, S.part])) + '|' + st.map(S => stageTex(net, S)).join(',');
-      html = `<button type="button" class="s3-play" data-act="play" title="Morph through every layer, from the inputs to the outputs">&#9654;</button>
-        <div class="s3-track"><input type="range" data-k="stage" min="0" max="${Math.max(0, st.length - 1)}" step="0.001">
-        <div class="s3-stops">${st.map((S, k) => `<button type="button" data-act="stop" data-v="${k}" title="Go to this stage">${texHtml(stageTex(net, S))}</button>`).join('')}</div></div>`;
+      html = `<button type="button" class="s3-play ui-btn sm icon" data-act="play" title="Morph through every layer, from the inputs to the outputs" aria-label="Play the morph">${icon('play', '&#9654;')}</button>
+        <div class="s3-track" style="--k:${st.length}"><input type="range" class="ui-range" data-k="stage" min="0" max="${Math.max(0, st.length - 1)}" step="0.001">
+        <div class="s3-stops ui-seg sm">${st.map((S, k) => `<button type="button" data-act="stop" data-v="${k}" title="Go to this stage">${texHtml(stageTex(net, S))}</button>`).join('')}</div></div>`;
     } else sig = 'simplex';
     if (sig !== ctlSig) {
       ctlSig = sig;
@@ -1996,7 +2114,11 @@ export function install(ctx) {
   }
   function paintPlay() {
     const b = ctl.querySelector('.s3-play');
-    if (b) { b.innerHTML = playing ? '&#10074;&#10074;' : '&#9654;'; b.classList.toggle('on', !!playing); }
+    if (!b) return;
+    const k = playing ? 'pause' : 'play';
+    if (b.dataset.glyph !== k) { b.dataset.glyph = k; b.innerHTML = icon(k, playing ? '&#10074;&#10074;' : '&#9654;'); }
+    b.classList.toggle('on', !!playing);
+    b.title = playing ? 'Pause the morph' : 'Morph through every layer, from the inputs to the outputs';
   }
   ctl.addEventListener('change', e => {
     const el = e.target, k = el.dataset.k, s = cur();
@@ -2062,6 +2184,8 @@ export function install(ctx) {
   }
   function refresh(s) {
     const why = paintHead(s);
+    // a plot that can't draw for this net has no settings to show, only its message
+    if (ctl.hidden !== !!why[s.mode]) { ctl.hidden = !!why[s.mode]; placePanel(); }
     if (why[s.mode]) {
       showMsg(why[s.mode]);
       for (const k of Object.keys(probeData)) delete probeData[k];
@@ -2182,7 +2306,7 @@ export function install(ctx) {
   if (!ro && ctx.addButton) {
     try {
       toolBtn = ctx.addButton({
-        label: '3D plots', icon: '&#8779;', group: 'surf3d',
+        label: '3D plots', icon: icon('surface', '&#8779;'), group: 'surf3d',
         title: '3D plots: a neuron as a surface over the inputs, the loss landscape with the training path, the data through the layers, the softmax simplex (P: open / close, Shift+P: next plot)',
         onClick: () => toggle(),
       });

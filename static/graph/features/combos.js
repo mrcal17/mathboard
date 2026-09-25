@@ -888,9 +888,9 @@ function installRenderers(registerRenderer, trails) {
 const STORE = 'mathboard.combos';
 const CSS = `
 .g-label.cb-sm { font-size: 17px; }
-#g-tools button.on { border-color: var(--accent); }
 `;
-const HELP = `<p><code>explain(A, v)</code> A v as a combination of columns &middot; <code>chain(u, v, w)</code> tip-to-tail
+const HELP = `<h4 class="ui-overline">Combinations and geometry</h4>
+<p><code>explain(A, v)</code> A v as a combination of columns &middot; <code>chain(u, v, w)</code> tip-to-tail
 &middot; <code>trail(a u + b v)</code> leaves a trail as sliders move &middot; <code>target(b, a u + b v)</code> find the combination</p>
 <p><code>arc(u,v)</code> <code>shadow(u,v)</code> <code>components(u)</code> <code>crossview(u,v)</code>
 <code>line(p,q)</code> <code>plane3(p,q,r)</code> <code>intersect(X,Y)</code> <code>distance(p,X)</code></p>`;
@@ -968,11 +968,14 @@ export async function install(api) {
   api.addToolbarButton({
     label: 'Clear trails',
     title: 'Erase the trails left by trail(...) rows',
+    group: 'more',
+    icon: 'eraser',
     onClick: () => { trails.clear(); api.scene?.rebuild(); },
   });
   const btn = api.addToolbarButton({
-    label: '&#8735; Right angles',
+    label: 'Right angles',
     title: 'Mark perpendicular vectors that start at the same point',
+    group: 'display',
     onClick: () => {
       rightAngles = !rightAngles;
       btn.classList.toggle('on', rightAngles);

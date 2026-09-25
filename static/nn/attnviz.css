@@ -1,140 +1,131 @@
-/* Attention panel (static/nn/attnviz.js): floats over #nn-stage like the Train panel. */
+/* Attention panel (static/nn/attnviz.js): a .ui-float over #nn-stage, like the Train and 3D plots
+   panels (docs/DESIGN.md C6 to C9). The head holds the modes; the drawing scrolls under the picks,
+   and the formula stays in view under it. */
 
 .nn-attnviz {
-  --na-h0: #b794ff;   /* head 1: the canvas's attention purple (view.css --nnv-att) */
-  --na-h1: #199e70;
-  --na-h2: #c98500;
-  --na-hi: #ffd54a;   /* HI: the followed query */
+  --na-h0: var(--att);      /* head 1: the canvas's attention purple */
+  --na-h1: var(--head-2);
+  --na-h2: var(--head-3);
+  --na-hi: var(--hi);       /* HI: the followed query */
   position: absolute; z-index: 6; top: 10px; left: 10px;
   width: 400px; max-width: calc(100% - 20px); max-height: calc(100% - 20px);
-  display: flex; flex-direction: column;
-  /* the UI tint over the page colour: opaque, so the canvas never shows through the drawings */
-  background: linear-gradient(var(--ui-bg), var(--ui-bg)), var(--bg); color: var(--ui-fg);
-  border: 1px solid var(--ui-line); border-radius: 12px;
-  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.25);
-  font-size: 12px; line-height: 1.3;
+  container: na / inline-size;
 }
-[data-theme="light"] .nn-attnviz { --na-h0: #7442d6; --na-h1: #1baf7a; --na-h2: #eda100; --na-hi: #e8a800; }
 .nn-attnviz[hidden] { display: none; }
 
-.na-head {
-  display: flex; align-items: center; gap: 6px;
-  padding: 4px 4px 4px 10px; cursor: move; touch-action: none;
-  border-bottom: 1px solid var(--ui-line);
-}
-.na-title { font-size: 13px; }
-.na-flex { flex: 1; }
-.na-modes { display: flex; border: 1px solid var(--ui-line); border-radius: 7px; overflow: hidden; }
-.na-modes button { border: 0; border-radius: 0; padding: 3px 9px; font-size: 12px; }
-.na-modes button + button { border-left: 1px solid var(--ui-line); }
-.na-modes button.on { background: var(--accent); color: #fff; }
-.na-head select, .na-ctl select {
-  font: inherit; color: var(--ui-fg); max-width: 120px;
-  background: rgba(127, 127, 127, 0.12); border: 1px solid var(--ui-line); border-radius: 6px; padding: 2px 4px;
-}
-.na-head select option, .na-ctl select option { background: var(--ui-bg); color: var(--ui-fg); }
+/* ---------------------------------------------------------------- head: title, modes, layer, help, close */
+.na-head { gap: var(--sp-8); }
+.na-head .na-modes { flex: none; }
+.na-head .na-layer { flex: 0 1 auto; min-width: 56px; max-width: 128px; }
 .na-head select[hidden] { display: none; }
-.na-close { padding: 1px 8px; font-size: 15px; line-height: 1; }
+@container na (max-width: 340px) { .na-help { display: none; } }
 
-/* query and head chips: pick (sets lens.token / lens.head); the followed token's chip renames */
-.na-picks { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 6px 10px 2px; }
+/* ---------------------------------------------------------------- picks: query and head chips (they set lens.token / lens.head) */
+.na-picks { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-4); padding: 0 var(--sp-12) var(--sp-8); }
 .na-picks:empty { display: none; }
-.na-lab { color: var(--ui-muted); margin-right: 2px; }
-.na-lab2 { margin-left: 8px; }
-.na-chip {
-  display: inline-flex; align-items: center; gap: 4px;
-  padding: 2px 8px; border-radius: 999px; font-size: 12px;
-  border: 1px solid var(--ui-line); background: rgba(127, 127, 127, 0.08); color: var(--ui-fg);
-}
-.na-chip.on { border-color: var(--na-hi); box-shadow: inset 0 0 0 1px var(--na-hi); font-weight: 600; }
-.na-chip.auto { border-style: dashed; border-color: var(--ui-muted); }
-.na-chip:disabled { opacity: 1; cursor: default; }
-.na-sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; }
-.na-name {
-  font: inherit; font-size: 12px; padding: 2px 8px; border-radius: 999px;
-  border: 1px solid var(--accent); background: var(--ui-bg); color: var(--ui-fg); outline: none;
-}
+.na-lab { font-size: var(--fs-sm); color: var(--text-3); margin-right: var(--sp-2); }
+.na-lab2 { margin-left: var(--sp-12); }
+/* shown because dots and mix need one query (none is followed): a dashed ring, not the HI one */
+.na-chip.auto { color: var(--text-1); outline: 1px dashed var(--text-4); outline-offset: -1px; }
+.na-name { width: 64px; border-radius: var(--r-pill); }
 
-.na-stage { position: relative; padding: 4px 10px 0; overflow-y: auto; overflow-x: hidden; min-height: 0; flex: 0 1 auto; scrollbar-gutter: stable; }
+/* ---------------------------------------------------------------- the drawing, the controls, the caption */
+.na-stage {
+  position: relative; flex: 0 1 auto; min-height: 0;
+  padding: 0 var(--sp-12); overflow-y: auto; overflow-x: hidden; scrollbar-gutter: stable;
+}
 .na-svg { display: block; width: 100%; overflow: hidden; }
-.na-msg { color: var(--ui-muted); font-style: italic; padding: 10px 2px 12px; }
+.na-msg { padding: var(--sp-8) 0 var(--sp-12); font-size: var(--fs-md); color: var(--text-3); }
 .na-msg[hidden] { display: none; }
 
-.na-ctl { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 4px 10px 0; }
+.na-ctl { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-8) var(--sp-12); padding: var(--sp-8) var(--sp-12) 0; }
 .na-ctl:empty { display: none; }
-.na-ctl label { display: flex; align-items: center; gap: 6px; color: var(--ui-muted); }
+.na-ctl label { display: flex; align-items: center; gap: var(--sp-8); font-size: var(--fs-sm); color: var(--text-3); }
+.na-dims select { width: 74px; }
 .na-scale { flex: 1 1 220px; }
-.na-scale input[type="range"] { flex: 1; min-width: 90px; accent-color: var(--na-h0); }
+.na-scale .ui-range { flex: 1; min-width: 90px; }
 /* a fixed readout width ("11.31 = 16.00 × 1/√2" at most), so the track keeps its length under the pointer */
-.na-scale output { flex: none; min-width: 20ch; color: var(--ui-fg); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.na-ctl button { padding: 2px 9px; border: 1px solid var(--ui-line); }
-.na-ctl button:disabled { opacity: 0.45; cursor: default; }
-.na-send { border-color: var(--accent) !important; }
-.na-info { flex: 1 1 100%; color: var(--ui-muted); font-style: italic; min-height: 15px; }
-.na-cap { padding: 4px 10px 9px; font-size: 14px; overflow-x: auto; overflow-y: hidden; }
-.na-cap .katex { font-size: 1.02em; }
-.na-note { color: var(--ui-muted); font-style: italic; font-size: 12px; }
-.na-grip {
-  position: absolute; right: 1px; bottom: 1px; width: 14px; height: 14px; cursor: nwse-resize; touch-action: none;
-  background: linear-gradient(135deg, transparent 50%, var(--ui-muted) 50%, var(--ui-muted) 58%, transparent 58%, transparent 70%, var(--ui-muted) 70%, var(--ui-muted) 78%, transparent 78%);
-  opacity: 0.55; border-bottom-right-radius: 11px;
-}
+.na-scale output { flex: none; min-width: 19ch; color: var(--text-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.na-send { margin-left: auto; }
 
-/* ---------------------------------------------------------------- the drawings */
-.na-svg text { font: 12px system-ui, "Segoe UI", sans-serif; fill: var(--ui-fg); }
+.na-cap { padding: var(--sp-8) var(--sp-12) var(--sp-12); }
+.na-tex { font-size: var(--fs-lg); line-height: 1.5; color: var(--text-1); overflow-x: auto; overflow-y: hidden; }
+.na-tex .katex { font-size: 1.02em; }
+.na-note { margin-top: var(--sp-2); }
+.na-note.reserve { min-height: 17px; }   /* arcs: the hover line comes and goes without moving the panel */
+.na-tip { max-width: 280px; white-space: normal; }
+.na-grip { z-index: 1; }
+
+/* ---------------------------------------------------------------- the drawings (SVG) */
+.na-svg text { font: var(--fs-sm) var(--font-ui); fill: var(--text-2); }
 .na-svg .na-tl {
-  font: italic 600 14px "KaTeX_Math", "Times New Roman", serif;
-  paint-order: stroke; stroke: var(--bg); stroke-width: 3px; stroke-linejoin: round;
+  font: italic 600 14px var(--font-math); fill: var(--text-1);
+  paint-order: stroke; stroke: var(--well); stroke-width: 3px; stroke-linejoin: round;
 }
-.na-svg .na-sub { font: 500 10.5px system-ui, "Segoe UI", sans-serif; }
-.na-svg .na-colhd { fill: var(--ui-muted); font-size: 10.5px; letter-spacing: 0.04em; }
-.na-svg .na-leg, .na-svg .na-lane, .na-svg .na-chd { fill: var(--ui-muted); font-size: 11px; }
-.na-svg .na-tick { fill: var(--ui-muted); font-size: 9.5px; }
-.na-svg .na-axlab { fill: var(--ui-muted); font-size: 10px; font-style: italic; }
-.na-plotbg { fill: rgba(127, 127, 127, 0.045); stroke: var(--ui-line); }
-.na-grid { stroke: var(--ui-line); stroke-width: 1; }
-.na-axis { stroke: var(--ui-muted); stroke-opacity: 0.6; stroke-width: 1.2; }
-.na-qline { stroke: var(--na-hi); stroke-opacity: 0.55; stroke-width: 1.5; stroke-dasharray: 2 5; }
-.na-perp { stroke: var(--ui-muted); stroke-opacity: 0.8; stroke-width: 1; stroke-dasharray: 3 3; }
+.na-svg .na-sub { font: 500 var(--fs-xs) var(--font-ui); }
+.na-svg .na-colhd, .na-svg .na-leg, .na-svg .na-lane, .na-svg .na-chd, .na-svg .na-axlab { fill: var(--text-3); font-size: var(--fs-xs); }
+.na-svg .na-tick { fill: var(--text-3); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
+.na-plotbg { fill: var(--well); }
+.na-grid { stroke: var(--line-1); stroke-width: 1; }
+.na-axis { stroke: var(--line-3); stroke-width: 1; }
+.na-qline { stroke: var(--na-hi); stroke-opacity: 0.5; stroke-width: 1.25; stroke-dasharray: 2 4; }
+.na-perp { stroke: var(--text-4); stroke-width: 1; stroke-dasharray: 2 3; }
 
+/* arcs: token boxes on the well, a ribbon per pair */
 .na-tok { cursor: pointer; }
-.na-tok rect { fill: rgba(127, 127, 127, 0.1); stroke: var(--ui-line); stroke-width: 1.2; }
-.na-tok text { font-weight: 600; font-size: 12.5px; }
-.na-tok.on rect { stroke: var(--na-hi); stroke-width: 2.4; }
-.na-tok.hot rect { stroke: var(--accent); stroke-width: 2; }
-.na-arc { stroke-linecap: round; }
+.na-tok rect { fill: var(--well); stroke: transparent; stroke-width: 1.25; transition: stroke var(--dur-1) var(--ease); }
+.na-svg .na-tok text { font-size: 12.5px; font-weight: var(--fw-medium); fill: var(--text-1); }
+.na-tok:hover rect, .na-tok.hot rect { stroke: var(--line-3); }
+.na-tok.on rect { stroke: var(--na-hi); stroke-width: 1.5; }
+.na-arc { fill: none; stroke-linecap: butt; }
 .na-svg .na-anum, .na-svg .na-wlab {
-  font-size: 11px; font-variant-numeric: tabular-nums;
-  paint-order: stroke; stroke: var(--bg); stroke-width: 3px; stroke-linejoin: round;
+  font-size: var(--fs-xs); font-weight: var(--fw-medium); font-variant-numeric: tabular-nums;
+  paint-order: stroke; stroke-width: 3px; stroke-linejoin: round;
 }
+.na-svg .na-anum { fill: var(--text-1); stroke: var(--float); }
+.na-svg .na-wlab { fill: var(--text-2); stroke: var(--well); }
 
+/* dots: the score table */
 .na-rowbg { fill: transparent; }
-.na-krow:hover .na-rowbg { fill: rgba(127, 127, 127, 0.1); }
-.na-svg .na-kname { font-weight: 600; font-size: 12.5px; }
-.na-svg .na-num { font-variant-numeric: tabular-nums; }
-.na-svg .na-strong { font-weight: 600; }
-.na-svg .na-muted { fill: var(--ui-muted); }
-.na-bartrack { fill: rgba(127, 127, 127, 0.14); }
+.na-krow:hover .na-rowbg { fill: var(--hover); }
+.na-svg .na-kname { font-weight: var(--fw-medium); font-size: 12.5px; fill: var(--text-1); }
+.na-svg .na-num { font-size: 12.5px; font-variant-numeric: tabular-nums; fill: var(--text-2); }
+.na-svg .na-strong { font-weight: var(--fw-strong); fill: var(--text-1); }
+.na-svg .na-muted { fill: var(--text-4); }
+.na-bartrack { fill: var(--well); }
 
-.na-hull { fill-opacity: 0.1; stroke-opacity: 0.6; stroke-width: 1.2; stroke-dasharray: 4 4; }
-.na-hull2 { stroke-opacity: 0.25; stroke-width: 9; stroke-linecap: round; }
-.na-vtip { fill: var(--ui-muted); }
+/* mix: the values' hull */
+.na-hull { fill-opacity: 0.08; stroke-opacity: 0.5; stroke-width: 1; stroke-dasharray: 3 3; }
+.na-hull2 { stroke-opacity: 0.2; stroke-width: 8; stroke-linecap: round; }
+.na-vtip { fill: var(--text-3); }
 
-.na-svg .na-mtitle { font-size: 12px; font-weight: 600; }
+/* heat: fills fade to the surface, numbers stay in text colours */
+.na-svg .na-mtitle { font-size: var(--fs-sm); font-weight: var(--fw-strong); fill: var(--text-1); }
+.na-svg .na-mtitle .na-leg { font-weight: 400; }
 .na-svg .na-rhd { cursor: pointer; }
-.na-svg .na-rhd.on { fill: var(--na-hi); font-weight: 700; }
-.na-cell text { font-variant-numeric: tabular-nums; }
-.na-cell.hot rect { stroke: var(--accent); stroke-width: 1.5; }
-.na-hatchline { stroke: var(--ui-muted); stroke-width: 1.3; stroke-opacity: 0.6; }
-.na-ring { fill: none; stroke: var(--na-hi); stroke-width: 2.5; }
+.na-svg .na-rhd:hover { fill: var(--text-1); }
+.na-svg .na-rhd.on { fill: var(--hi-text); font-weight: var(--fw-strong); }
+.na-cell { cursor: pointer; }
+.na-cell rect { stroke: transparent; stroke-width: 1.5; }
+.na-svg .na-cell text { fill: var(--text-1); font-weight: var(--fw-medium); font-variant-numeric: tabular-nums; }
+.na-svg .na-cell text.na-muted { fill: var(--text-4); }
+.na-cell.hot rect { stroke: var(--line-3); stroke-width: 1.25; }
+.na-cell:hover rect { stroke: var(--hi); stroke-width: 1.5; }
+.na-hatchline { stroke: var(--line-2); stroke-width: 1.2; }
+.na-ring { fill: none; stroke: var(--na-hi); stroke-width: 1.75; }
 
 /* ---------------------------------------------------------------- audience mirror and clean view (H)
-   Read-only: what the presenter shows, without the chrome. The scale slider stays, disabled, so
-   the audience sees it move. */
+   Read-only: what the presenter shows, without the chrome. The mode reads as a quiet tag; the scale
+   slider stays, disabled, so the audience sees it move. */
 .nn-attnviz.ro .na-head, body.clean #nn .nn-attnviz .na-head { cursor: default; }
 .nn-attnviz.ro .na-close, .nn-attnviz.ro .na-grip, .nn-attnviz.ro .na-send, .nn-attnviz.ro .na-reset,
 body.clean #nn .nn-attnviz .na-close, body.clean #nn .nn-attnviz .na-grip,
 body.clean #nn .nn-attnviz .na-send, body.clean #nn .nn-attnviz .na-reset { display: none; }
-.nn-attnviz.ro .na-modes button:not(.on) { display: none; }
-.nn-attnviz.ro .na-modes { border: 0; }
-.nn-attnviz.ro .na-modes button.on { border-radius: 6px; }
+.nn-attnviz.ro .na-modes button:not(.on), body.clean #nn .nn-attnviz .na-modes button:not(.on) { display: none; }
+.nn-attnviz.ro .na-modes, body.clean #nn .nn-attnviz .na-modes { padding: 0; background: none; }
+.nn-attnviz.ro .na-modes button.on, body.clean #nn .nn-attnviz .na-modes button.on {
+  height: 22px; padding: 0 9px; border-radius: var(--r-pill); background: var(--well); box-shadow: none; color: var(--text-3); cursor: default;
+}
+.nn-attnviz.ro .na-picks { pointer-events: none; }
+.nn-attnviz.ro .na-chip:disabled { opacity: 1; }
+.nn-attnviz.ro .ui-range:disabled, .nn-attnviz.ro .ui-field:disabled { opacity: 1; cursor: default; }

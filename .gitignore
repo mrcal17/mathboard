@@ -1,5 +1,9 @@
 # Recognition debug captures written by server.py: your own handwriting. Never commit.
 debug/
+# Labelled eval sets for tools/eval_board.py: your handwriting, your labels, the replies. Never commit.
+evalset/
+# Machine-specific launcher settings (llama-server and model paths), see docs/BOARD_BACKENDS.md.
+mathboard.local.bat
 
 # Python
 __pycache__/

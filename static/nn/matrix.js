@@ -4,7 +4,8 @@
 //   Hover and click link both ways through store.hover / store.sel.
 //   Step-through (S / Shift+S, buttons) owns state.anim: the forward pass row by row, then the
 //   backward pass (δ, ∂L/∂W, ∂L/∂b) when every output has a target.
-//   Toggles: Backward, bias trick [W | b] (B), batch Z = W X + b 1ᵀ, collapse, labels.
+//   Toggles: Backward, bias trick [W | b] (B), batch Z = W X + b 1ᵀ, collapse, labels (a View menu
+//   when the panel is too narrow for them). Look: docs/DESIGN.md 7 B.
 //   Layers whose W is at most 3×3 can be sent to the 3D tab (map / transform).
 //   Token layers (docs/NN_ATTENTION.md) read as tokens × d matrices: a tied tokenwise layer is
 //   Q = X W_Q (an expander shows the flattened I ⊗ W_Qᵀ form of z = W a), a fixed identity term is
@@ -21,8 +22,11 @@ import { copyLens, emphasis, tokenNames } from './focus.js';
 import { lensOf } from './lens.js';
 
 const BATCH = 4;         // samples shown as columns in the batch view
-const STRONG = 0.55;     // |v| / max above which a tinted cell switches to contrasting text
 const DIM = 0.16;        // opacity of a cell outside the lens's emphasis
+// Cell fills: colorFor's alpha, eased above KNEE so the strongest cells stop at CAP and their
+// digits stay --text-1 (docs/DESIGN.md B3). Below KNEE a cell matches the canvas exactly.
+const KNEE = 0.5, CAP = 0.72;
+const ATT_RGB = { dark: [183, 148, 255], light: [116, 66, 214] };   // --att, if the token can't be read
 const ACT_TEX = {
   identity: '', relu: '\\operatorname{ReLU}', leaky: '\\operatorname{LReLU}', sigmoid: '\\sigma',
   tanh: '\\tanh', softmax: '\\operatorname{softmax}',
@@ -100,33 +104,93 @@ export function install(ctx) {
   // ---------------------------------------------------------------- skeleton + toolbar
   const root = h('div', 'nm');
   if (ctx.audience) root.classList.add('nm-audience');
-  const bar = h('div', 'nm-bar');
+  const bar = h('div', 'nm-bar ui-chrome');
   const body = h('div', 'nm-body');
   root.append(bar, body);
   host.append(root);
 
-  const btn = (html, title, onClick, cls = '') => {
+  const icon = (name, fallback = '') => window.mathboardIcons?.svg(name, { size: 14 }) || fallback;
+  const btn = (parent, html, title, onClick, cls = '') => {
     const b = h('button', cls);
     b.type = 'button';
     b.innerHTML = html;
     b.title = title;
     b.onclick = onClick;
-    bar.append(b);
+    parent.append(b);
     return b;
   };
-  btn('&#9664;', 'Step back (Shift+S)', () => step(-1), 'nm-sq');
-  btn('Step &#9654;', 'Step through the forward pass row by row, then backprop (S)', () => step(1));
-  const bStop = btn('&#9632;', 'Stop stepping', () => store.set('anim', null), 'nm-sq');
+  // Left: step back, Step, stop, then the step readout (only while stepping). Right: the view
+  // toggles, which fold into a View menu when the panel is too narrow for one row, then → 3D.
+  const barL = h('div', 'nm-bar-l'), barR = h('div', 'nm-bar-r'), tgBox = h('div', 'nm-tgs');
+  btn(barL, icon('step-back', '&#9664;'), 'Step back (Shift+S)', () => step(-1), 'ui-btn sm icon nm-sq');
+  btn(barL, `${icon('step-forward')}<span>Step</span>`, 'Step through the forward pass row by row, then backprop (S)', () => step(1), 'ui-btn sm soft nm-stepb');
+  const bStop = btn(barL, icon('stop', '&#9632;'), 'Stop stepping', () => store.set('anim', null), 'ui-btn sm icon nm-sq');
   const info = h('span', 'nm-info');
-  bar.append(info, h('span', 'nm-gap'));
-  const tg = {
-    mode: btn('Backward', 'Backprop: δ, ∂L/∂W and ∂L/∂b (needs a target on every output node)', () => toggle('mode')),
-    bias: btn('[W&thinsp;|&thinsp;b]', 'Bias trick: b becomes the last column of W and a 1 is appended to the input (B)', () => toggle('bias')),
-    batch: btn('Batch', 'Z = W X + b 1ᵀ with a few samples as the columns of X', () => toggle('batch')),
-    collapse: btn('Collapse', 'Multiply the layers into one matrix (works only when every layer is identity)', () => toggle('collapse')),
-    labels: btn('Labels', 'Row and column headers with the node labels', () => toggle('labels')),
-  };
-  btn('&rarr; 3D', 'Send the selected layer\'s weight matrix (at most 3×3) to the 3D tab', () => send3d(pickLayer()));
+  bar.append(barL, info, h('span', 'nm-gap'), barR);
+  const TOGGLES = [
+    ['mode', 'Backward', 'Backward pass', 'Backprop: δ, ∂L/∂W and ∂L/∂b (needs a target on every output node)'],
+    ['bias', '[W&thinsp;|&thinsp;b]', 'Bias trick [W&thinsp;|&thinsp;b]', 'Bias trick: b becomes the last column of W and a 1 is appended to the input (B)'],
+    ['batch', 'Batch', 'Batch', 'Z = W X + b 1ᵀ with a few samples as the columns of X'],
+    ['collapse', 'Collapse', 'Collapse', 'Multiply the layers into one matrix (works only when every layer is identity)'],
+    ['labels', 'Labels', 'Labels', 'Row and column headers with the node labels'],
+  ];
+  const tg = {}, tgSw = {};
+  for (const [k, html, , title] of TOGGLES) tg[k] = btn(tgBox, html, title, () => toggle(k), 'ui-btn sm nm-tg');
+  const bView = btn(barR, `<span>View</span>${icon('chevron-down')}`, 'Backward, bias trick, Batch, Collapse and Labels', e => {
+    e.stopPropagation();
+    setMenu(menu.hidden);
+  }, 'ui-btn sm nm-viewb');
+  barR.prepend(tgBox);
+  btn(barR, '&rarr; 3D', 'Send the selected layer\'s weight matrix (at most 3×3) to the 3D tab', () => send3d(pickLayer()), 'ui-btn sm nm-send');
+
+  // the View menu: the same toggles as switches, for a panel too narrow for the row
+  const menu = h('div', 'ui-menu nm-menu ui-chrome');
+  menu.hidden = true;
+  for (const [k, , label, title] of TOGGLES) {
+    const row = h('label', 'ui-menu-item nm-menu-item');
+    row.title = title;
+    const txt = h('span');
+    txt.innerHTML = label;
+    const sw = h('input', 'ui-switch');
+    sw.type = 'checkbox';
+    sw.onchange = () => toggle(k);
+    row.append(txt, sw);
+    tgSw[k] = sw;
+    menu.append(row);
+  }
+  root.append(menu);
+  function setMenu(open) {
+    if (menu.hidden === !open) return;
+    menu.hidden = !open;
+    bView.classList.toggle('on', open);
+  }
+  document.addEventListener('pointerdown', e => {
+    if (!menu.hidden && !menu.contains(e.target) && !bView.contains(e.target)) setMenu(false);
+  }, true);
+
+  // One row: the left group and the right group with every toggle, or with the View menu when the
+  // panel is narrower than that (wideW, measured once while not compact). The step readout sits
+  // between them when it fits; otherwise it is the step box's title (.nm-infobox), so starting a
+  // step never reflows the toggles.
+  let wideW = 0;
+  function fitBar() {
+    const w = bar.clientWidth;
+    if (!w) return;
+    const cs = getComputedStyle(bar), gap = parseFloat(cs.columnGap) || 0;
+    const rowW = () => barL.offsetWidth + barR.offsetWidth + parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) + 2 * gap;
+    if (!wideW && !bar.classList.contains('nm-compact') && barR.offsetWidth) wideW = rowW();
+    if (!wideW) return;
+    const compact = w < wideW;
+    if (compact !== bar.classList.contains('nm-compact')) {
+      bar.classList.toggle('nm-compact', compact);
+      if (!compact) setMenu(false);
+    }
+    const need = info.textContent ? info.scrollWidth + gap : 0;
+    root.classList.toggle('nm-infobox', need > 0 && w - (compact ? rowW() : wideW) < need);
+  }
+  if (typeof ResizeObserver === 'function') new ResizeObserver(() => fitBar()).observe(bar);
+  // the bar gets its hairline only while the panel is scrolled under it
+  body.addEventListener('scroll', () => bar.classList.toggle('nm-scrolled', body.scrollTop > 0), { passive: true });
 
   // Backward mode chosen with the button (not switched on by stepping into backprop): only then
   // does a fresh step-through start at the backward pass.
@@ -404,7 +468,7 @@ export function install(ctx) {
   const scaleNum = S => (S.scaleDef ? `\\tfrac{1}{\\sqrt{${S.dh}}}` : f2(S.scale));
 
   // ---------------------------------------------------------------- DOM registry
-  let keyMap = new Map(), binds = [], stepBoxes = [], sig = '', eMap = new Map();
+  let keyMap = new Map(), binds = [], gradCols = [], stepBoxes = [], sig = '', eMap = new Map();
   let hoverOf = new WeakMap(), clickOf = new WeakMap();
   // Lens registry (rebuilt with the DOM). emEls: { el, em } where em says what the element stands
   // for, so emphasis() can weigh it: n (node ids, max), e (edge ids, max; w: minW / show apply),
@@ -463,17 +527,28 @@ export function install(ctx) {
     };
     if (ch) ch.forEach((s, j) => hdr(s, 'nm-ch', `1 / ${c0 + 1 + j}`));
     if (rh) rh.forEach((s, i) => hdr(s, 'nm-rh', `${i + 2} / 1`));
+    const g = { blk, n, m, c0 };   // where a cell sits, for the bands (drawBands)
     for (let i = 0; i < n; i++) {
       for (let j = 0; j < m; j++) {
         const c = h('span', 'nm-c'), sp = cell(i, j);
         c.style.gridArea = `${i + 2} / ${c0 + 1 + j}`;
+        c._g = g; c._i = i; c._j = j;
         if (o.aug != null && j === o.aug) c.classList.add('nm-augc');
         if (o.augRow != null && i === o.augRow) c.classList.add('nm-augr');
         if (sp.mask) c.classList.add('nm-mask');
         if (sp.faint) c.classList.add('nm-faint');
         if (sp.cls) c.classList.add(...sp.cls.split(' ').filter(Boolean));
-        if (sp.fixed != null) c.textContent = sp.fixed;
-        else binds.push({ el: c, f: sp.f, s: sp.mask ? null : sp.s });
+        const heat = !!sp.heat || / ?nm-heat\b/.test(sp.cls || '');
+        if (sp.fixed != null) { c.textContent = sp.fixed; c.classList.add('nm-fix'); }
+        else {
+          const b = { el: c, f: sp.f, s: sp.mask ? null : sp.s, heat };
+          if (GRAD.has(b.s)) {   // a gradient column: its decimal points are aligned in update()
+            g.cols ||= [];
+            if (!g.cols[j]) gradCols.push(g.cols[j] = { binds: [], w: 0 });
+            (b.col = g.cols[j]).binds.push(b);
+          }
+          binds.push(b);
+        }
         reg(c, sp.keys || []);
         if (sp.hover) hoverOf.set(c, sp.hover);
         if (sp.click) clickOf.set(c, sp.click);
@@ -504,7 +579,8 @@ export function install(ctx) {
     em: { n: [ids[i]] },
   }), { cap, ...extra });
 
-  const nodeHdr = (ids, extra) => ids.map((id, j) => ({ tex: label(id), em: { n: [id] }, ...extra(id, j) }));
+  // keys n:id: the header brightens while its node, or an entry of its row or column, is hovered
+  const nodeHdr = (ids, extra) => ids.map((id, j) => ({ tex: label(id), keys: [`n:${id}`], em: { n: [id] }, ...extra(id, j) }));
 
   // W (or its transpose) of term t in layer l; aug appends b as a last column.
   function wGrid(d, l, ti, { aug = false, T = false } = {}) {
@@ -519,13 +595,16 @@ export function install(ctx) {
       }
       const from = t.cols[j], eid = t.edge[i][j];
       const keys = [...extraKeys(i, j), `dst:${to}`, `src:${from}`];
-      if (eid == null) return { mask: true, fixed: '0', keys: [...keys, `p:${from}>${to}`], hover: { kind: 'pair', from, to }, em: { p: [from, to] } };
+      if (eid == null) return { mask: true, fixed: '0', cls: 'nm-unit', keys: [...keys, `p:${from}>${to}`], hover: { kind: 'pair', from, to }, em: { p: [from, to] } };
       const e = eMap.get(eid);
-      return { f: dd => dd.M[l].terms[ti].W[i][j], s: 'w', keys: [...keys, `e:${eid}`, hasTie(e) && `tie:${e.tie}`],
+      // a fixed edge is neutral (no value fill), as on the canvas
+      return { f: dd => dd.M[l].terms[ti].W[i][j], s: e?.fixed ? null : 'w', keys: [...keys, `e:${eid}`, hasTie(e) && `tie:${e.tie}`],
         cls: e?.fixed ? 'nm-fixedc' : hasTie(e) ? 'nm-tied' : '',
         hover: { kind: 'edge', id: eid }, click: { kind: 'edge', id: eid }, em: { e: [eid], w: true } };
     };
-    const rowHdr = nodeHdr(m.rows, (id, i) => ({ hover: { kind: 'row', layer: layerRef(l), i }, click: { kind: 'node', id } }));
+    // row headers also light with the step's row (row:l:i), not in the transpose
+    const rowHdr = nodeHdr(m.rows, (id, i) => ({ hover: { kind: 'row', layer: layerRef(l), i }, click: { kind: 'node', id },
+      keys: T ? [`n:${id}`] : [`n:${id}`, `row:${l}:${i}`] }));
     const colHdr = nodeHdr(t.cols, (id, j) => ({ hover: { kind: 'col', layer: layerRef(l), k: t.k, j }, click: { kind: 'node', id } }));
     if (T) {   // rows = source nodes (layer t.k), columns = this layer's nodes
       return grid(c, n, (i, j) => cell(j, i), {
@@ -543,7 +622,7 @@ export function install(ctx) {
   function inVec(d, l, ti, aug) {
     const t = d.M[l].terms[ti], c = t.cols.length;
     return grid(c + (aug ? 1 : 0), 1, i => (i === c
-      ? { fixed: '1', keys: [`in:${l}`] }
+      ? { fixed: '1', cls: 'nm-unit', keys: [`in:${l}`] }
       : { f: dd => dd.fwd.a[t.k][i], s: 'a', keys: [`n:${t.cols[i]}`, `col:${l}:${t.k}:${i}`, `in:${l}`],
         hover: { kind: 'node', id: t.cols[i] }, click: { kind: 'node', id: t.cols[i] }, em: { n: [t.cols[i]] } }), {
       augRow: aug ? c : null,
@@ -555,7 +634,7 @@ export function install(ctx) {
   function inMat(d, l, ti, aug) {
     const t = d.M[l].terms[ti], c = t.cols.length, B = d.batch.X.length;
     return grid(c + (aug ? 1 : 0), B, (i, s) => (i === c
-      ? { fixed: '1', keys: [`in:${l}`] }
+      ? { fixed: '1', cls: 'nm-unit', keys: [`in:${l}`] }
       : { f: dd => dd.batch.a[t.k][i][s], s: 'a', keys: [`n:${t.cols[i]}`, `col:${l}:${t.k}:${i}`, `in:${l}`],
         hover: { kind: 'node', id: t.cols[i] }, click: { kind: 'node', id: t.cols[i] }, em: { n: [t.cols[i]] } }), {
       augRow: aug ? c : null,
@@ -597,7 +676,7 @@ export function install(ctx) {
       groups.push([lead(), wGrid(d, l, ti, { aug }), d.batch ? inMat(d, l, ti, aug) : inVec(d, l, ti, aug)]);
     });
     if (!opt.bias || !m.terms[0]?.cols.length) {
-      groups.push([lead(), biasVec(d, l), d.batch && grid(1, B, () => ({ fixed: '1' }), { cap: '\\mathbf 1^{\\top}' })]);
+      groups.push([lead(), biasVec(d, l), d.batch && grid(1, B, () => ({ fixed: '1', cls: 'nm-one' }), { cap: '\\mathbf 1^{\\top}' })]);
     }
     return eqOf('fwd', ...groups, [op('='), outVec(d, l, 'z')], [op(arrow(d, l)), outVec(d, l, 'a')]);
   }
@@ -725,7 +804,7 @@ export function install(ctx) {
     for (const { t, ti } of terms) {
       const aug = augB && ti === 0, c = t.cols.length;
       const aRow = grid(1, c + (aug ? 1 : 0), (_, j) => (j === c
-        ? { fixed: '1', keys: [`bin:${l}`] }
+        ? { fixed: '1', cls: 'nm-one', keys: [`bin:${l}`] }
         : { f: dd => dd.fwd.a[t.k][j], s: 'a', keys: [`n:${t.cols[j]}`, `bin:${l}`],
           hover: { kind: 'node', id: t.cols[j] }, click: { kind: 'node', id: t.cols[j] }, em: { n: [t.cols[j]] } }), {
         aug: aug ? c : null, cap: aug ? `\\big[${aT(t.k)}\\ 1\\big]` : aT(t.k),
@@ -864,8 +943,11 @@ export function install(ctx) {
     const tn = tokNet(d);
     for (const s of tn ? tokComposed(d) : composed(d)) box.append(line(s, 'nm-fl'));
     if (tn) {
-      box.append(h('p', 'nm-note', 'Rows are tokens. Each W is one shared matrix applied to every token (weight tying); '
-        + 'softmax acts on each row. Every step is a matrix product: hover a symbol to find its layer.'));
+      // a caption clamped to two lines; a click shows all of it
+      const cap = h('p', 'nm-note ui-caption nm-desc', 'Rows are tokens. Each W is one shared matrix applied to every token (weight tying); '
+        + 'softmax acts on each row. Every step is a matrix product: hover a symbol to find its layer.');
+      cap.onclick = () => cap.classList.toggle('open');
+      box.append(cap);
     }
     for (const el of box.querySelectorAll('[data-l]')) {
       const l = +el.dataset.l, id = d.net.layers[l]?.id;
@@ -891,15 +973,15 @@ export function install(ctx) {
       return box;
     }
     if (c.ok) {
-      box.append(line('\\text{Every layer is identity, so the whole network is one affine map: }'
-        + '\\hat{\\mathbf y} = W_{\\text{eff}}\\,\\mathbf x + b_{\\text{eff}}'));
+      box.append(note('Every layer is identity, so the whole network is one affine map: ',
+        { t: '\\hat{\\mathbf y} = W_{\\text{eff}}\\,\\mathbf x + b_{\\text{eff}}' }));
       if (!c.skip) {
         const Ws = [];
         for (let l = L; l >= 1; l--) Ws.push([wGrid(d, l, 0)]);
         box.append(eqOf('chain', ...Ws, [op('='), Weff()]));
       } else {
         box.append(eqOf('chain', [op('W_{\\text{eff}} ='), Weff()]));
-        box.append(line('\\text{(skip edges add their own products to } W_{\\text{eff}}\\text{)}', 'nm-note'));
+        box.append(note('(skip edges add their own products to ', { t: 'W_{\\text{eff}}' }, ')'));
       }
       // without skips, b_eff = W^{(L)}⋯W^{(2)} b^{(1)} + ⋯ + W^{(L)} b^{(L-1)} + b^{(L)}
       const bSym = c.skip ? '' : Array.from({ length: L }, (_, q) => {
@@ -910,7 +992,8 @@ export function install(ctx) {
       box.append(eqOf('eff', [op(`b_{\\text{eff}} = ${bSym}`), beff()],
         [op('\\qquad W_{\\text{eff}}\\,\\mathbf x + b_{\\text{eff}} ='), yLin(''), op('= \\hat{\\mathbf y}')]));
       if (n0 <= 3 && nL <= 3 && n0 * nL > 1) {
-        const b = h('button', 'nm-3d', '→ 3D');
+        const b = h('button', 'ui-btn xs nm-3d ui-chrome', '→ 3D');
+        b.type = 'button';
         b.title = 'Send W_eff to the 3D tab';
         b.onclick = () => send3d('eff');
         box.append(b);
@@ -954,7 +1037,20 @@ export function install(ctx) {
     const S = d.T[k], ids = Array.from({ length: S.d }, (_, f) => S.ids[tidx(S, g, t, f)]);
     return { hover: tokSpec(k, t, S.groups ? g : null), keys: ids.map(id => `n:${id}`), em: { n: ids }, tok: { l: k, t } };
   };
-  const sub = (text, cls = 'nm-sub') => h('div', cls, text);
+  // A stage head: '1 · scores: every query against every key' reads "1 · Scores" plus its caption.
+  const sub = (text, cls = 'nm-sub') => {
+    const el = h('div', cls), k = text.indexOf(': ');
+    if (k < 0) { el.textContent = text; return el; }
+    el.append(h('b', null, text.slice(0, k).replace(/^(\d+ · )(\w)/, (_, a, c) => a + c.toUpperCase())), ' ', h('span', null, text.slice(k + 2)));
+    return el;
+  };
+  // A head's title with its swatch: the head's colour in the attention panel and the 3D view.
+  const headSub = hh => {
+    const el = h('div', 'nm-sub nm-head'), sw = h('i', 'ui-sw');
+    sw.style.background = `var(${['--att', '--head-2', '--head-3', '--head-4', '--head-5', '--head-6'][hh % 6]})`;
+    el.append(sw, `Head ${hh + 1}`);
+    return el;
+  };
   // A stage of a layer that lens.focus.part can pick ('scores', 'softmax', 'mix'; groups mark their eq)
   const stage = (part, ...els) => {
     const s = h('div', 'nm-stage');
@@ -1026,7 +1122,7 @@ export function install(ctx) {
     const S = d.T[l], src = d.T[b.k];
     const cell = (fs, fd) => {
       const c = b.cells[fs][fd];
-      if (!c) return { mask: true, fixed: '0' };
+      if (!c) return { mask: true, fixed: '0', cls: 'nm-unit' };
       const keys = [`tie:${c.tie}`, ...c.byTok.map(id => `e:${id}`), ...c.dst.map(id => `dst:${id}`), ...c.src.map(id => `src:${id}`),
         ...(T ? c.cols.map(j => `brow:${b.k}:${j}`) : c.rows.map(i => `row:${l}:${i}`))];
       return { f: dd => dd.M[l].terms[b.ti].W[c.i][c.j], s: 'w', keys, cls: 'nm-tied',
@@ -1103,12 +1199,18 @@ export function install(ctx) {
   function expander(d, l) {
     const id = d.net.layers[l].id, open = expanded().has(id);
     const box = h('div', open ? 'nm-expand open' : 'nm-expand');
-    const b = h('button', 'nm-exp-btn', `${open ? '▾' : '▸'} Flattened: z = W a`);
+    const b = h('button', 'ui-btn xs nm-exp-btn');
     b.type = 'button';
+    b.innerHTML = `${icon(open ? 'chevron-down' : 'chevron-right', open ? '▾' : '▸')}<span>Flattened: z = W a</span>`;
     b.title = 'The same layer as one matrix product z = W a + b on the flattened vectors (I ⊗ Wᵀ blocks)';
+    b.setAttribute('aria-expanded', String(open));
     b.onclick = () => toggleExpand(id);
     box.append(b);
-    if (open) box.append(...flatEls(d, l));
+    if (open) {
+      const inner = h('div', 'nm-exp-body');
+      inner.append(...flatEls(d, l));
+      box.append(inner);
+    }
     return box;
   }
 
@@ -1145,7 +1247,7 @@ export function install(ctx) {
       const src = [...Array.from({ length: S.dh }, (_, c) => [headNode(S, hh, 'q', i, c), headNode(S, hh, 'k', j, c)]).flat(),
         ...Array.from({ length: S.dvh }, (_, c) => headNode(S, hh, 'v', j, c))];
       const sp = { keys: [...z.map(id => `dst:${id}`), ...src.map(id => `src:${id}`), `ahr:${l}:${hh}:${i}`, `ahc:${l}:${hh}:${j}`, ...keys(i, j)],
-        hover: tokSpec(l, i, null, H), click: { kind: 'node', id: z[0] }, cls: heat ? 'nm-heat' : '',
+        hover: tokSpec(l, i, null, H), click: { kind: 'node', id: z[0] }, cls: heat ? 'nm-heat' : '', heat,
         em: { r: [l, i], ...(thr ? { a: [l, i, j, hh], lg: true } : {}) } };
       if (masked != null && S.causal && j > i) return { ...sp, mask: true, fixed: masked, cls: `${sp.cls} nm-inf`, em: { r: [l, i] } };
       return { ...sp, f: dd => f(dd, i, j), s };
@@ -1181,7 +1283,7 @@ export function install(ctx) {
     for (let hh = 0; hh < H; hh++) {
       const s = H > 1 ? `_{${hh + 1}}` : '', F = dd => dd.fwd.attn[l].heads[hh];
       const hb = headBox(l, hh);
-      if (H > 1) hb.append(sub(`Head ${hh + 1}`, 'nm-sub nm-head'));
+      if (H > 1) hb.append(headSub(hh));
       const A = () => sqMat(d, l, hh, (dd, i, j) => F(dd).A[i][j], 'one', `A${s}`, { keys: i => [`aa:${l}:${i}`], masked: '0', heat: true, thr: true });
       const gS = [[op(`S${s} = ${sc}`),
         headMat(d, l, hh, 'q', (dd, t, c) => F(dd).Q[t][c], 'a', `Q${s}`, { keys: t => [`aq:${l}:${t}`] }),
@@ -1348,7 +1450,7 @@ export function install(ctx) {
       const src = d.T[b.k];
       const cellOf = (fs, fd, f, s, keys, hov, em) => {
         const c = b.cells[fs][fd];
-        if (!c) return { mask: true, fixed: '0' };
+        if (!c) return { mask: true, fixed: '0', cls: 'nm-unit' };
         return { f: dd => f(dd, c), s, keys: [`tie:${c.tie}`, ...keys(c)], cls: 'nm-tied',
           hover: { kind: 'edge', id: hov(c) }, click: { kind: 'edge', id: hov(c) }, em: { e: em(c).filter(x => x != null) } };
       };
@@ -1389,7 +1491,7 @@ export function install(ctx) {
     for (let hh = 0; hh < H; hh++) {
       const s = H > 1 ? `_{${hh + 1}}` : '', F = dd => dd.fwd.attn[l].heads[hh], B = dd => dd.bwd.attn[l].heads[hh];
       const hb = headBox(l, hh);
-      if (H > 1) hb.append(sub(`Head ${hh + 1}`, 'nm-sub nm-head'));
+      if (H > 1) hb.append(headSub(hh));
       const bk = t => [`bat:${l}:${t}`];
       const hm = (which, f, sc2, cap, T = false) => headMat(d, l, hh, which, f, sc2, cap, { T, keys: bk });
       const sq = (f, sc2, cap, o = {}) => sqMat(d, l, hh, f, sc2, cap, { keys: bk, ...o });
@@ -1453,12 +1555,14 @@ export function install(ctx) {
     const what = mode === 'attn' || mode === 'attnbad'
       ? `attention${S.heads > 1 ? ` · ${S.heads} heads` : ''}${S.causal ? ' · causal' : ''} · ${S.tokens} tokens`
       : `${actLabel(lay.act)}${S?.tok && mode === 'tok' ? ` · ${S.tokens} tokens × ${S.d}${S.groups ? ` · ${S.groups.join(' / ')}` : ''}` : ''}`;
-    head.append(h('b', null, `Layer ${l}`), h('span', null, `${lay.name ? lay.name + ' · ' : ''}${what}`),
+    // "Layer 1  Hidden · tanh", then the shape chain (shown on hover, or always with Labels on)
+    head.append(h('b', null, `Layer ${l}`), h('span', 'nm-lwhat', `${lay.name ? lay.name + ' · ' : ''}${what}`),
       h('span', 'nm-shape', !m.rows.length ? '' : (mode === 'tok' || mode === 'attn') ? tokShapeNote(d, l) : mode === 'attnbad' ? '' : shapeNote(d, l)));
     hoverOf.set(head, { kind: 'layer', id: lay.id });
     clickOf.set(head, { kind: 'layer', id: lay.id });
     if (eligible(m)) {
-      const b = h('button', 'nm-3d', '→ 3D');
+      const b = h('button', 'ui-btn xs nm-3d ui-chrome', '→ 3D');
+      b.type = 'button';
       b.title = `Send W${l} to the 3D tab`;
       b.onclick = e => { e.stopPropagation(); send3d(l); };
       head.append(b);
@@ -1482,14 +1586,17 @@ export function install(ctx) {
     const box = kind => {
       const b = h('div', 'nm-step');
       b.hidden = true;
+      // the title repeats the toolbar's step readout where the toolbar is hidden (H, audience)
+      b.heading = h('div', 'nm-step-t');
       b.lines = [h('div'), h('div'), h('div'), h('div')];   // empty lines are hidden; more are added as needed
-      b.append(...b.lines);
+      b.append(b.heading, ...b.lines);
       return b;
     };
     stepBoxes[l] = { fwd: box(), bwd: null };
     sec.append(stepBoxes[l].fwd);
     if (d.bwd) {
       const bw = h('div', 'nm-bwd');
+      bw.append(h('div', 'nm-bwd-h', 'Backward'));
       if (mode === 'attn') bw.append(...tokDelta(d, l), ...attnBwd(d, l));
       else if (mode === 'tok') bw.append(...tokDelta(d, l), ...tieGradEls(d, l));
       else bw.append(...bwdEqs(d, l));
@@ -1503,10 +1610,12 @@ export function install(ctx) {
   function build(d) {
     keyMap = new Map();
     binds = [];
+    gradCols = [];
     stepBoxes = [];
     hoverOf = new WeakMap();
     clickOf = new WeakMap();
     painted = { hi: new Set(), hi2: new Set(), sel: new Set(), an: new Set(), an2: new Set() };
+    bandEls = { an: [], an2: [], hi2: [] };
     emEls = []; toks = []; secs = []; headBoxes = []; formulaEls = []; trace = null;
     emOn = true;   // the new DOM has no lens state yet: apply everything once
     // focus.js's tokenNames (a trimmed name or null per token), so the names match the canvas and cards
@@ -1543,6 +1652,23 @@ export function install(ctx) {
   }
 
   // ---------------------------------------------------------------- update in place
+  // A cell's fill: colorFor's colour, its alpha eased above KNEE to at most CAP.
+  const ease = a => (a > KNEE ? KNEE + (a - KNEE) * (CAP - KNEE) / (1 - KNEE) : a);
+  function fill(v, max, th) {
+    const c = colorFor(v, max, th), k = c.lastIndexOf(','), a = parseFloat(c.slice(k + 1));
+    return a > KNEE ? `${c.slice(0, k + 1)}${ease(a).toFixed(3)})` : c;
+  }
+  // An attention weight A_ij (in [0, 1]) wears --att, as on the canvas's heatmap (0.07 + 0.93·A).
+  const attRGB = {};
+  function attFill(v, th) {
+    if (!attRGB[th]) {
+      const m = /^#?([0-9a-f]{6})$/i.exec(getComputedStyle(document.documentElement).getPropertyValue('--att').trim());
+      attRGB[th] = m ? [0, 2, 4].map(k => parseInt(m[1].slice(k, k + 2), 16)) : ATT_RGB[th] || ATT_RGB.dark;
+    }
+    if (!Number.isFinite(v)) return 'rgba(128,128,128,0.4)';
+    return `rgba(${attRGB[th].join(',')},${ease(0.07 + 0.93 * Math.max(0, Math.min(1, v))).toFixed(3)})`;
+  }
+
   function update(d) {
     const th = theme();
     for (const b of binds) {
@@ -1555,11 +1681,31 @@ export function install(ctx) {
       try { v = b.f(d); } catch { v = NaN; }
       const s = v === -Infinity ? '−∞' : GRAD.has(b.s) ? numg(v) : num(v);   // −∞: a masked score in the trace
       if (b.el._t !== s) b.el.textContent = b.el._t = s;
+      if (b.col) {   // digits after the point (fmtg writes 2 or 4); -1 for e-notation, which isn't aligned
+        const k = s.indexOf('.');
+        b.fr = k < 0 || s.includes('e') ? -1 : s.length - k - 1;
+        if (b.fr > b.col.w) b.col.w = b.fr;
+      }
       if (!b.s) continue;
-      const max = d.max[b.s] || 1, strong = Number.isFinite(v) && Math.abs(v) / max > STRONG;
-      const c = v === -Infinity ? 'transparent' : colorFor(v, max, th);
+      // a value that reads as zero has no fill and muted digits; −∞ (a masked score) is hatched
+      const zero = Number.isFinite(v) && Math.abs(v) < (GRAD.has(b.s) ? 1e-9 : 0.005);
+      const c = v === -Infinity || zero ? '' : b.heat ? attFill(v, th) : fill(v, d.max[b.s] || 1, th);
       if (b.el._c !== c) { b.el._c = c; b.el.style.background = c; }
-      if (b.el._s !== strong) { b.el._s = strong; b.el.classList.toggle('nm-strong', strong); }
+      const k = v === -Infinity ? 'nm-ninf' : zero ? 'nm-z' : '';
+      if (b.el._k !== k) {
+        if (b.el._k) b.el.classList.remove(b.el._k);
+        if (k) b.el.classList.add(k);
+        b.el._k = k;
+      }
+    }
+    // a gradient column mixing 0.06 and 0.0034: pad the shorter fractions by whole (tabular)
+    // digits, so every decimal point in the column lines up
+    for (const col of gradCols) {
+      for (const b of col.binds) {
+        const pad = b.fr < 0 ? 0 : col.w - b.fr;
+        if (b._pad !== pad) { b._pad = pad; b.el.style.paddingRight = pad ? `calc(5px + ${pad}ch)` : ''; }
+      }
+      col.w = 0;
     }
   }
 
@@ -1883,6 +2029,8 @@ export function install(ctx) {
         }
         while (box.lines.length < lines.length) { const el = h('div'); box.lines.push(el); box.append(el); }
         box.lines.forEach((el, j) => { el.hidden = !lines[j]; if (lines[j]) tex(el, lines[j]); });
+        const t = stepInfo(d, a);
+        if (box.heading.textContent !== t) box.heading.textContent = t;
       }
     });
     const key = a ? `${a.dir}:${a.l}:${a.i}:${a.phase}` : '';
@@ -1890,7 +2038,12 @@ export function install(ctx) {
       lastAnim = key;
       if (a) stepBoxes[a.l]?.[a.dir]?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
     }
-    info.textContent = a ? stepInfo(d, a) : '';
+    const t = a ? stepInfo(d, a) : '';
+    if (info.textContent !== t) {
+      info.textContent = t;
+      info.title = t;
+      fitBar();   // the readout needs room: the toggles may fold into the View menu
+    }
     bStop.disabled = !a;
   }
 
@@ -1913,10 +2066,51 @@ export function install(ctx) {
 
   function paint(cls, keys) {
     const next = new Set();
+    let changed = false;
     for (const k of keys) for (const el of keyMap.get(k) || []) next.add(el);
-    for (const el of painted[cls]) if (!next.has(el)) el.classList.remove(`nm-${cls}`);
-    for (const el of next) if (!painted[cls].has(el)) el.classList.add(`nm-${cls}`);
+    for (const el of painted[cls]) if (!next.has(el)) { el.classList.remove(`nm-${cls}`); changed = true; }
+    for (const el of next) if (!painted[cls].has(el)) { el.classList.add(`nm-${cls}`); changed = true; }
     painted[cls] = next;
+    if (changed && bandEls[cls]) drawBands(cls);
+  }
+
+  // The step's row (an), its inputs (an2) and what a hover relates to (hi2) are drawn as one soft
+  // band behind each block of lit cells in a grid (a row, a column, a whole matrix, or one entry),
+  // not as a mark on every cell. Only when the lit set changes.
+  let bandEls = { an: [], an2: [], hi2: [] };
+  function drawBands(cls) {
+    for (const b of bandEls[cls]) b.remove();
+    bandEls[cls] = [];
+    const byGrid = new Map();
+    for (const el of painted[cls]) {
+      if (!el._g) continue;
+      let lit = byGrid.get(el._g);
+      if (!lit) byGrid.set(el._g, lit = new Set());
+      lit.add(el._i * el._g.m + el._j);
+    }
+    for (const [g, lit] of byGrid) {
+      // runs of lit cells per row; a run with the same columns as the one above extends it
+      let open = [];
+      for (let i = 0; i <= g.n; i++) {
+        const runs = [];
+        for (let j = 0; i < g.n && j < g.m; j++) {
+          if (!lit.has(i * g.m + j)) continue;
+          const r = runs.at(-1);
+          if (r && r.j1 === j - 1) r.j1 = j; else runs.push({ i0: i, j0: j, j1: j });
+        }
+        const next = runs.map(r => {
+          const k = open.findIndex(o => o.j0 === r.j0 && o.j1 === r.j1);
+          return k < 0 ? r : open.splice(k, 1)[0];
+        });
+        for (const o of open) {
+          const b = h('i', `nm-lit nm-lit-${cls}`);
+          b.style.gridArea = `${o.i0 + 2} / ${g.c0 + 1 + o.j0} / ${i + 2} / ${g.c0 + 2 + o.j1}`;
+          g.blk.append(b);
+          bandEls[cls].push(b);
+        }
+        open = next;
+      }
+    }
   }
 
   const layerIdx = ref => (typeof ref === 'number' ? ref : model.layerIndex(store.net, ref));
@@ -1998,7 +2192,8 @@ export function install(ctx) {
     el.hidden = true;
     head.append(title, h('span', 'nm-tr-hint', 'its row is outlined in every matrix below'));
     if (!ctx.audience) {
-      const x = h('button', 'nm-tr-x', '×');
+      const x = h('button', 'ui-btn xs icon nm-tr-x ui-chrome');
+      x.innerHTML = icon('close', '×');
       x.type = 'button';
       x.title = 'Stop following the token (0)';
       x.onclick = e => { e.stopPropagation(); setLens({ token: null }); };
@@ -2243,7 +2438,14 @@ export function install(ctx) {
     try { applyLens(d, lens); } catch (err) { console.error('[nn/matrix] lens:', err); }
     updateSteps(d);
     paintState();
-    for (const [k, b] of Object.entries(tg)) b.classList.toggle('on', k === 'mode' ? opt.mode === 'bwd' : opt[k]);
+    for (const [k, b] of Object.entries(tg)) {
+      const on = !!(k === 'mode' ? opt.mode === 'bwd' : opt[k]);
+      if (b._on === on) continue;
+      b._on = on;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-pressed', String(on));
+      tgSw[k].checked = on;
+    }
     tg.mode.classList.toggle('nm-dim', !store.state.bwd);
   }
 
@@ -2350,6 +2552,7 @@ export function install(ctx) {
       if (el) store.set('sel', clickOf.get(el));
     });
     window.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && !menu.hidden) setMenu(false);
       if (e.ctrlKey || e.metaKey || e.altKey || !ctx.active(e)) return;
       if (e.code === 'KeyS') { e.preventDefault(); step(e.shiftKey ? -1 : 1); }
       else if (e.code === 'KeyB' && !e.shiftKey) { e.preventDefault(); toggle('bias'); }

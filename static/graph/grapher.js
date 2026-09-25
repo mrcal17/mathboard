@@ -14,7 +14,7 @@ const { evaluate, formatValue, formatNumber } = lang;
 const $ = id => document.getElementById(id);
 const uid = () => Math.random().toString(36).slice(2, 10);
 const PALETTE = ['#e05a4f', '#4a90e2', '#43b05c', '#9b6ade', '#f5a623', '#26b5b5', '#e056a0', '#a1887f'];
-const FEATURES = ['transform', 'fields', 'combos', 'systems', 'dual', 'lecture', 'present', 'bridge', 'drag'];
+const FEATURES = ['plots', 'transform', 'fields', 'combos', 'systems', 'dual', 'lecture', 'present', 'bridge', 'drag'];
 const STORE = 'mathboard.graph';
 // Different speeds let two playing sliders sweep out an area instead of retracing one line.
 const SPEEDS = [1, 1.618, 2, 0.5, 0.25];
@@ -60,6 +60,8 @@ function normalizeRows(list) {
 
 // ================================================================ rows UI
 const rowsEl = $('g-rows');
+// static/icons.js is a classic script that runs before this module
+const icon = (name, size = 16) => window.mathboardIcons?.svg(name, { size }) || '';
 
 function makeRowEl(r) {
   const li = document.createElement('li');
@@ -70,14 +72,14 @@ function makeRowEl(r) {
       <input class="g-src" spellcheck="false" autocomplete="off">
       <div class="g-out"></div>
       <div class="g-slider" hidden>
-        <input class="g-min" type="number" title="Slider minimum">
-        <input class="g-range" type="range">
-        <input class="g-max" type="number" title="Slider maximum">
-        <button class="g-play" title="Animate">&#9654;</button>
-        <button class="g-speed" title="Animation speed (click to change)">1&times;</button>
+        <input class="g-min ui-field sm num" type="number" title="Slider minimum">
+        <input class="g-range ui-range" type="range">
+        <input class="g-max ui-field sm num" type="number" title="Slider maximum">
+        <button class="g-play ui-btn xs icon" title="Animate">${icon('play')}</button>
+        <button class="g-speed ui-btn xs" title="Animation speed (click to change)">1&times;</button>
       </div>
     </div>
-    <button class="g-del" title="Delete">&times;</button>`;
+    <button class="g-del ui-btn xs icon danger" title="Delete">${icon('close')}</button>`;
   const q = sel => li.querySelector(sel);
   r.el = { li, dot: q('.g-dot'), src: q('.g-src'), out: q('.g-out'), slider: q('.g-slider'), main: q('.g-main'),
     min: q('.g-min'), range: q('.g-range'), max: q('.g-max'), play: q('.g-play'), speed: q('.g-speed') };
@@ -217,8 +219,18 @@ function paintRows() {
       el.range.max = mx;
       el.range.step = (mx - mn) / 1000;
       el.range.value = res.slider;
-      el.play.innerHTML = r.playing ? '&#10074;&#10074;' : '&#9654;';
-      el.speed.innerHTML = `${SPEEDS_LABEL[r.speed ?? 1]}&times;`;
+      // only on change: this runs on every frame of a playing slider
+      const play = r.playing ? 'pause' : 'play', speed = String(r.speed ?? 1);
+      if (el.play.dataset.state !== play) {
+        el.play.dataset.state = play;
+        el.play.innerHTML = icon(play);
+        el.play.title = r.playing ? 'Pause' : 'Animate';
+        el.play.classList.toggle('on', r.playing);
+      }
+      if (el.speed.dataset.speed !== speed) {
+        el.speed.dataset.speed = speed;
+        el.speed.innerHTML = `${SPEEDS_LABEL[r.speed ?? 1]}&times;`;
+      }
     }
 
     if (res.error) el.out.textContent = res.error;
@@ -228,6 +240,10 @@ function paintRows() {
     } else if (res.value.type === 'mat') {
       const body = res.value.m.map(row => row.map(formatNumber).join(' & ')).join(' \\\\ ');
       el.out.innerHTML = katex.renderToString(`= \\begin{bmatrix}${body}\\end{bmatrix}`, { throwOnError: false });
+    } else if (lang.valueReadout?.(res.value)) { // shown as is: a function's formula, or nothing
+      const ro = lang.valueReadout(res.value);
+      if (ro.latex) el.out.innerHTML = katex.renderToString(ro.latex, { throwOnError: false });
+      else el.out.textContent = ro.text ?? '';
     } else if (lang.valueLatex?.(res.value)) {
       el.out.innerHTML = katex.renderToString(`= ${lang.valueLatex(res.value)}`, { throwOnError: false });
     } else {
@@ -297,14 +313,24 @@ function setView(next) {
 const setCollapsed = on => {
   $('graph').classList.toggle('collapsed', on);
   $('g-expand').hidden = !on;
+  if (on) placeExpand();
   save();
 };
+// The show-panel button sits beside the tab switcher, as tall as it (style.css has a fallback).
+function placeExpand() {
+  const t = $('tabs')?.getBoundingClientRect(), b = $('g-expand');
+  if (!t?.width) return; // tabs hidden: clean view or an audience window
+  Object.assign(b.style, { left: `${t.right + 8}px`, top: `${t.top}px`, width: `${t.height}px`, height: `${t.height}px` });
+}
 
 for (const b of document.querySelectorAll('#tabs button')) b.onclick = () => setView(b.dataset.view);
 $('g-add').onclick = () => addRow(null);
 $('g-fit').onclick = () => { scene?.fit(); save(); };
 $('g-reset').onclick = () => scene?.reset();
-$('g-help-btn').onclick = () => { $('g-help').hidden = !$('g-help').hidden; };
+$('g-help-btn').onclick = () => {
+  $('g-help').hidden = !$('g-help').hidden;
+  $('g-help-btn').classList.toggle('on', !$('g-help').hidden);
+};
 $('g-collapse').onclick = () => setCollapsed(true);
 $('g-expand').onclick = () => setCollapsed(false);
 
@@ -314,6 +340,96 @@ window.addEventListener('keydown', e => {
 });
 new MutationObserver(() => scene?.setTheme(theme()))
   .observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+
+// ================================================================ toolbar (#g-tools)
+// Feature buttons sit in groups by meaning: camera, display and output, in that order, then any
+// other group in order of first use. Output buttons show only their icon; 'more' buttons are the
+// rows of a menu at the end of the output group. See addToolbarButton in docs/FEATURE_GUIDE.md.
+const TOOL_GROUPS = ['camera', 'display', 'output'];
+const toolsEl = $('g-tools');
+let toolMenu = null;
+const plainText = html => { const s = document.createElement('span'); s.innerHTML = html; return s.textContent.trim(); };
+
+function toolGroup(name) {
+  const found = [...toolsEl.children].find(el => el.dataset.group === name);
+  if (found) return found;
+  const g = document.createElement('div');
+  g.className = 'g-tgroup';
+  g.dataset.group = name;
+  const rank = n => (TOOL_GROUPS.includes(n) ? TOOL_GROUPS.indexOf(n) : TOOL_GROUPS.length);
+  toolsEl.insertBefore(g, [...toolsEl.children].find(el => rank(el.dataset.group) > rank(name)) || null);
+  return g;
+}
+
+function moreMenu() {
+  if (toolMenu) return toolMenu;
+  const wrap = document.createElement('span');
+  wrap.className = 'g-more-wrap';
+  wrap.innerHTML = `<button class="g-more ui-btn sm icon" title="More" aria-haspopup="menu" aria-expanded="false">${icon('more')}</button>
+    <div class="g-menu ui-menu" role="menu" hidden></div>`;
+  const btn = wrap.firstElementChild, list = wrap.lastElementChild;
+  const items = () => [...list.children].filter(b => !b.hidden && !b.disabled);
+  const outside = e => { if (!wrap.contains(e.target)) open(false); };
+  const onKey = e => {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); open(false); btn.focus(); return; }
+    const all = items();
+    if ((e.key !== 'ArrowDown' && e.key !== 'ArrowUp') || !all.length) return;
+    e.preventDefault();
+    const i = all.indexOf(document.activeElement);
+    all[e.key === 'ArrowDown' ? (i + 1) % all.length : i <= 0 ? all.length - 1 : i - 1].focus();
+  };
+  function open(on) {
+    list.hidden = !on;
+    btn.classList.toggle('on', on);
+    btn.setAttribute('aria-expanded', String(on));
+    document[on ? 'addEventListener' : 'removeEventListener']('pointerdown', outside, true);
+    document[on ? 'addEventListener' : 'removeEventListener']('keydown', onKey, true);
+  }
+  btn.onclick = e => {
+    open(list.hidden);
+    if (!list.hidden && e.detail === 0) items()[0]?.focus(); // opened from the keyboard
+  };
+  list.addEventListener('click', e => { if (e.target.closest('.ui-menu-item')) open(false); });
+  toolGroup('output').appendChild(wrap);
+  toolMenu = { wrap, list, open };
+  return toolMenu;
+}
+
+function addToolbarButton({ label = '', title, onClick, group = 'other', icon: name, seg } = {}) {
+  const b = document.createElement('button');
+  if (group === 'more') {
+    b.className = 'ui-menu-item';
+    b.setAttribute('role', 'menuitem');
+    b.innerHTML = `${icon(name)}<span>${label}${title ? `<small>${title}</small>` : ''}</span>`;
+    moreMenu().list.appendChild(b);
+  } else {
+    const g = toolGroup(group);
+    let parent = g;
+    if (seg) { // one segmented track per seg name
+      parent = [...g.children].find(el => el.dataset.seg === seg);
+      if (!parent) {
+        parent = document.createElement('span');
+        parent.className = 'ui-seg';
+        parent.dataset.seg = seg;
+        parent.setAttribute('role', 'group');
+        g.insertBefore(parent, toolMenu?.wrap.parentElement === g ? toolMenu.wrap : null);
+      }
+      b.innerHTML = label;
+    } else if (group === 'output' && name) {
+      b.className = 'ui-btn sm icon';
+      b.innerHTML = icon(name);
+      b.setAttribute('aria-label', plainText(label));
+    } else {
+      b.className = 'ui-btn sm';
+      b.innerHTML = name ? `${icon(name)}<span>${label}</span>` : label;
+    }
+    if (title) b.title = title;
+    parent.insertBefore(b, parent === g && toolMenu?.wrap.parentElement === g ? toolMenu.wrap : null);
+  }
+  b.onclick = onClick;
+  toolsEl.hidden = false;
+  return b;
+}
 
 let toastTimer = 0;
 function toast(msg, ms = 2200) {
@@ -354,15 +470,8 @@ const api = {
   onSceneReady: fn => { if (scene) safe(fn, scene); else hooks.sceneReady.push(fn); },
   onViewChange: fn => hooks.view.push(fn),
   // chrome
-  addToolbarButton({ label, title, onClick }) {
-    const b = document.createElement('button');
-    b.innerHTML = label;
-    if (title) b.title = title;
-    b.onclick = onClick;
-    $('g-tools').appendChild(b);
-    $('g-tools').hidden = false;
-    return b;
-  },
+  addToolbarButton, // ({ label, title, onClick, group, icon, seg }) -> the button
+  icon,
   addOverlay(el) { $('g-view').appendChild(el); return el; },
   addStyles(css) { const s = document.createElement('style'); s.textContent = css; document.head.appendChild(s); return s; },
   setView, setCollapsed, toast,
@@ -380,6 +489,8 @@ for (const [i, m] of modules.entries()) {
   if (!m?.install) continue;
   try { await m.install(api); } catch (err) { console.error(`[graph] feature ${FEATURES[i]} install:`, err); }
 }
+// Features append their help sections; the mouse and keys section stays last.
+if ($('g-help-keys')) $('g-help').appendChild($('g-help-keys'));
 
 rows = normalizeRows(preset || (saved?.rows?.length ? saved.rows : EXAMPLE));
 if (saved?.nextColor != null) nextColor = saved.nextColor;

@@ -1,0 +1,1287 @@
+// Net tab: the Flow view (docs/NN_FLOW.md). While it is on, it covers #nn-stage as the 3D view does
+// and draws one whole forward pass left to right, as live matrix tiles with their shapes:
+//   words (one-hot) -> X = O W_E + P -> per head Q, K, V -> scores S -> softmax A -> A V -> concat
+//   -> Z W_O -> + residual -> FFN -> F W_2 -> + residual -> logits -> softmax bars, per position.
+// Any net gets a flow: attention layers as their stages, tokenwise tied layers as products and
+// sums, anything else as one tile per layer (with a note when the net has no attention).
+// Stepping (◀ ▶, ← →) lights one stage at a time and fades the ones not computed yet; ▶ plays.
+// Hovering a cell traces what it was computed from (its sources get a frame, the tip does the
+// sum with numbers), clicking a stage focuses its layer through the lens, clicking a cell selects
+// its neuron. Head chips knock a head out: its columns of the concat are 0 and everything after
+// is recomputed (the net itself is not changed).
+//
+// state.flow (owner: this module) is null (off) or a cleanFlow() object; the audience mirrors it.
+
+import { colorFor } from './store.js';
+import { cleanLens, copyLens, tokenLabel } from './focus.js';
+import * as M from './model.js';
+
+const isNum = v => typeof v === 'number' && Number.isFinite(v);
+const isObj = v => !!v && typeof v === 'object' && !Array.isArray(v);
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const grid = (r, c, f) => Array.from({ length: r }, (_, i) => Array.from({ length: c }, (_, j) => f(i, j)));
+const argmax = row => row.reduce((b, v, i) => (v > row[b] ? i : b), 0);
+const QKV = ['Q', 'K', 'V'];
+const isQKV = g => Array.isArray(g) && g.length === 3 && g.every((s, i) => s === QKV[i]);
+const f2 = v => (v === -Infinity ? '−∞' : M.fmt(v, 2).replace('-', '−'));
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+// ================================================================ pure helpers (tests: tests/nn_flow.test.mjs)
+
+// state.flow, completed and repaired (null stays null): stage null = the whole pass, else the lit
+// stage (0-based); play only with a stage; off = knocked-out heads (0-based, sorted); nums = numbers
+// in the cells; hover = the cell the presenter points at, { t: tile id, i, j }.
+export function cleanFlow(v) {
+  if (!isObj(v)) return null;
+  const stage = Number.isInteger(v.stage) && v.stage >= 0 ? v.stage : null;
+  const off = [...new Set((Array.isArray(v.off) ? v.off : []).filter(h => Number.isInteger(h) && h >= 0 && h < 64))].sort((a, b) => a - b);
+  const h = v.hover;
+  const hover = isObj(h) && typeof h.t === 'string' && Number.isInteger(h.i) && Number.isInteger(h.j) ? { t: h.t, i: h.i, j: h.j } : null;
+  return { stage, play: v.play === true && stage !== null, off, nums: v.nums !== false, hover };
+}
+
+// Every head of an attention layer (g = model.attnSpec) from its Q, K, V layer's activations x (the Q
+// block, then K, then V, each token-major), computed as model.js does. out is the heads' Z side by
+// side, token-major, with the columns of the heads in `off` left at 0 (knocked out).
+export function attendHeads(x, g, off = new Set()) {
+  const { tokens: n, d, heads: H, dh, scale, causal } = g, ko = n * d, vo = 2 * n * d;
+  const out = new Array(n * d).fill(0), heads = [];
+  for (let h = 0; h < H; h++) {
+    const c = h * dh;
+    const Q = grid(n, dh, (i, f) => x[i * d + c + f]);
+    const K = grid(n, dh, (i, f) => x[ko + i * d + c + f]);
+    const V = grid(n, dh, (i, f) => x[vo + i * d + c + f]);
+    const S = grid(n, n, (i, j) => {
+      if (causal && j > i) return -Infinity;
+      let s = 0;
+      for (let f = 0; f < dh; f++) s += Q[i][f] * K[j][f];
+      return s * scale;
+    });
+    const A = S.map(row => {
+      let m = -Infinity;
+      for (const s of row) if (s > m) m = s;
+      const e = row.map(s => Math.exp(s - m));
+      const t = e.reduce((a, b) => a + b, 0);
+      return e.map(v => v / t);
+    });
+    const Z = grid(n, dh, (i, f) => {
+      let s = 0;
+      for (let j = 0; j < n; j++) s += A[i][j] * V[j][f];
+      return s;
+    });
+    heads.push({ Q, K, V, S, A, Z });
+    if (!off.has(h)) for (let i = 0; i < n; i++) for (let f = 0; f < dh; f++) out[i * d + c + f] = Z[i][f];
+  }
+  return { heads, out };
+}
+
+// softmax (and any activation) runs per token on a token layer, as in model.js's plan().
+function segOf(net, l) {
+  const s = M.tokenShape(net, l);
+  return s.tokens > 1 || s.groups ? s.d : M.nodesIn(net, l).length;
+}
+
+// The forward pass again from layer `from` on, given every layer's activations a (layers before
+// `from` are kept): dense layers as b + Σ W a then the activation (model.matrices), attention layers
+// with attendHeads, the heads in `off` knocked out. Returns { a, z, attn } (per layer, as forward).
+export function propagate(net, a0, from = 1, { off = [] } = {}) {
+  const L = net.layers.length, offs = new Set(off);
+  const a = a0.map(r => Array.from(r)), z = a.map(() => null), attn = a.map(() => null);
+  const mats = M.matrices(net);
+  for (let l = Math.max(1, from); l < L; l++) {
+    const g = M.attnSpec(net, l);
+    if (g) {
+      const r = attendHeads(a[l - 1], g, offs);
+      a[l] = r.out;
+      z[l] = r.out.slice();
+      attn[l] = { heads: r.heads, tokens: g.tokens, dk: g.dh, scale: g.scale, causal: g.causal };
+      continue;
+    }
+    const m = mats[l - 1], zl = m.b.slice();
+    for (const t of m.terms) {
+      const src = a[t.k];
+      t.W.forEach((row, i) => {
+        let s = 0;
+        row.forEach((w, j) => { if (w) s += w * src[j]; });
+        zl[i] += s;
+      });
+    }
+    z[l] = zl;
+    a[l] = M.activate(m.act, zl, null, segOf(net, l));
+  }
+  return { a, z, attn };
+}
+
+// fwd with the heads in `off` knocked out of every attention layer that has them: from the first
+// such layer on everything is recomputed (propagate); before it fwd is kept as it is. from: that
+// layer (-1 when nothing changed, and then a, z and attn are fwd's own).
+export function ablate(net, fwd, off = []) {
+  const offs = [...new Set(off)].filter(h => Number.isInteger(h) && h >= 0);
+  let first = -1;
+  for (let l = 1; l < net.layers.length && first < 0; l++) {
+    const g = M.attnSpec(net, l);
+    if (g && offs.some(h => h < g.heads)) first = l;
+  }
+  if (first < 0) return { a: fwd.a, z: fwd.z, attn: fwd.attn, from: -1 };
+  const r = propagate(net, fwd.a, first, { off: offs });
+  for (let l = 0; l < first; l++) { r.z[l] = fwd.z[l]; r.attn[l] = fwd.attn[l]; }
+  return { ...r, from: first };
+}
+
+// A layer's symbol: the letter before '=' in its name ('H = X + Z W_O' -> H), else its neurons'
+// label letter (h_{1,2} -> H, \hat y_{1} -> Ŷ), else a^{(l)}.
+function symOf(net, l) {
+  const name = String(net.layers[l]?.name || '');
+  const m = /^\s*([A-Za-z])\s*=/.exec(name);
+  if (m) return m[1].toUpperCase();
+  const lab = String(M.nodesIn(net, l)[0]?.label || '');
+  const h = /^\s*\\hat\s*\{?\s*([a-zA-Z])\s*\}?\s*_/.exec(lab);
+  if (h) return `\\hat ${h[1].toUpperCase()}`;
+  const b = /^\s*([a-zA-Z])\s*_/.exec(lab);
+  return b ? b[1].toUpperCase() : `a^{(${l})}`;
+}
+const tieBase = tie => (typeof tie === 'string' ? tie.replace(/:[\d,]+$/, '') : null);
+
+// KaTeX-ish source to plain HTML for tips and captions: W_{out} -> W<sub>out</sub>, K^{\top} -> Kᵀ.
+export function texHtml(s) {
+  let t = String(s ?? '');
+  t = t.replace(/\\text\{([^}]*)\}/g, '$1').replace(/\\hat\s*\{?\s*([A-Za-z])\s*\}?/g, '$1̂')
+    .replace(/\\ell/g, 'ℓ').replace(/\^\{?\\top\}?/g, 'ᵀ').replace(/\\,|\\;|\\!/g, ' ')
+    .replace(/\\operatorname\{([^}]*)\}/g, '$1').replace(/\\(?:left|right|big|Big)/g, '');
+  t = esc(t.replace(/\\([A-Za-z]+)/g, '$1'));
+  t = t.replace(/_\{([^}]*)\}/g, '<sub>$1</sub>').replace(/_([A-Za-z0-9])/g, '<sub>$1</sub>')
+    .replace(/\^\{([^}]*)\}/g, '<sup>$1</sup>').replace(/\^([A-Za-z0-9])/g, '<sup>$1</sup>');
+  return t.replace(/[{}]/g, '');
+}
+
+const fwdFits = (net, fwd) => !!fwd && Array.isArray(fwd.a) && fwd.a.length === net.layers.length
+  && net.layers.every((_, l) => fwd.a[l]?.length === M.nodesIn(net, l).length);
+
+// The whole flow of net's forward pass (fwd: the store's, reused when it fits and no head is off).
+// {
+//   stages: [{ key, title, tex, text, layer (id), part, rows: [{ head, tiles: [tile id], ops }] }],
+//   tiles: { [id]: { id, l, tex, kind: 'mat' | 'bars', rows, cols, v, rowLab, colLab, head, off, mask,
+//            scale: 'act' | 'attn' | 'prob', onehot, target, node(i, j) -> id | null,
+//            src(i, j) -> [[tile, i, j]], tip(i, j) -> html } },
+//   nodeCell: { [nodeId]: [tile, i, j] },   // where each neuron is drawn
+//   words: (string | null)[] per position (a one-hot input over meta.vocab), labels: per position,
+//   next: null | { word, p, target, t },    // the last position's prediction
+//   attention: bool, why: null | 'empty' | 'no-attention', max: { act }, heads: the most heads,
+//   T: the most tokens of any layer,
+// }
+export function buildFlow(net, { fwd = null, off = [] } = {}) {
+  const L = net?.layers?.length || 0;
+  const F = { stages: [], tiles: {}, nodeCell: {}, words: [], labels: [], next: null, attention: false, why: null, max: { act: 1 }, heads: 1, T: 1 };
+  if (L < 2 || !net.nodes?.length) { F.why = 'empty'; return F; }
+  const base = fwdFits(net, fwd) ? fwd : M.forward(net);
+  const V = ablate(net, base, off);
+  const offs = new Set(off);
+  const ns = net.layers.map((_, l) => M.nodesIn(net, l));
+  const shp = net.layers.map((_, l) => M.tokenShape(net, l));
+  const att = net.layers.map((_, l) => M.attnSpec(net, l));
+  const T = Math.max(1, ...shp.map(s => s.tokens));
+  F.T = T;
+  F.attention = att.some(Boolean);
+  F.heads = Math.max(1, ...att.map(g => g?.heads || 1));
+  if (!F.attention) F.why = 'no-attention';
+  let mx = 0;
+  V.a.forEach(r => r?.forEach(v => { if (isNum(v)) mx = Math.max(mx, Math.abs(v)); }));
+  V.z.forEach(r => r?.forEach(v => { if (isNum(v)) mx = Math.max(mx, Math.abs(v)); }));
+  F.max.act = mx || 1;
+
+  // ---- positions: a one-hot input over meta.vocab names its words
+  const voc = Array.isArray(net.meta?.vocab) && net.meta.vocab.length ? net.meta.vocab.map(w => String(w)) : null;
+  const s0 = shp[0], a0 = V.a[0];
+  const oneHot = !!voc && s0.d === voc.length && !s0.groups && Array.from({ length: s0.tokens }, (_, t) => {
+    const row = a0.slice(t * s0.d, (t + 1) * s0.d);
+    return row.filter(v => Math.abs(v - 1) < 1e-6).length === 1 && row.every(v => Math.abs(v) < 1e-6 || Math.abs(v - 1) < 1e-6);
+  }).every(Boolean);
+  F.words = Array.from({ length: T }, (_, t) => (oneHot && t < s0.tokens ? voc[argmax(a0.slice(t * s0.d, (t + 1) * s0.d))] : null));
+  F.labels = F.words.map((w, t) => w ?? tokenLabel(net, t));
+  const posName = t => (F.words[t] ? `“${esc(F.words[t])}”` : `position ${t + 1}`);
+
+  // ---- tiles
+  const tile = (id, o) => (F.tiles[id] = {
+    id, kind: 'mat', head: null, off: false, mask: null, rowLab: null, colLab: null, scale: 'act', onehot: false, target: null,
+    node: () => null, src: () => [], tip: () => '', ...o,
+  });
+  const layerTileOf = [];   // layer -> its output tile id (per group: layerTileOf[l][g])
+  const cellOfNode = (id, cell) => { F.nodeCell[id] = cell; };
+  const inEdges = new Map();
+  for (const e of net.edges) {
+    if (!inEdges.has(e.to)) inEdges.set(e.to, []);
+    inEdges.get(e.to).push(e);
+  }
+  const nodeIdx = new Map();
+  ns.forEach((list, l) => list.forEach((n, k) => nodeIdx.set(n.id, [l, k])));
+  const val = (l, k) => V.a[l]?.[k];
+  const actOf = l => (att[l] ? 'identity' : Object.hasOwn(M.ACTS, net.layers[l].act) ? net.layers[l].act : 'identity');
+  // A neuron's incoming sum, told as its parts: each source layer's shared matrix (or plain
+  // weights), the fixed residual and the bias. Returns html.
+  function nodeSum(id) {
+    const [l, k] = nodeIdx.get(id) || [];
+    if (l === undefined || l === 0) return '';
+    const parts = new Map();
+    for (const e of inEdges.get(id) || []) {
+      const src = nodeIdx.get(e.from);
+      if (!src) continue;
+      const key = e.fixed ? `res:${src[0]}` : `${src[0]}:${tieBase(e.tie) || 'W'}`;
+      const p = parts.get(key) || { l: src[0], name: e.fixed ? null : tieBase(e.tie), s: 0 };
+      p.s += (e.w || 0) * (val(src[0], src[1]) || 0);
+      parts.set(key, p);
+    }
+    const n = ns[l][k], out = [];
+    for (const p of parts.values()) {
+      const who = texHtml(symOf(net, p.l));
+      out.push(p.name === null ? `${who} ${f2(p.s)}` : `${who}·${texHtml(p.name)} ${f2(p.s)}`);
+    }
+    const b = n.bias || 0;
+    if (b || n.tie) out.push(`${n.tie ? texHtml(tieBase(n.tie)) : 'b'} ${f2(b)}`);
+    return out.join(' + ');
+  }
+  const nodeTip = (id, title) => {
+    const [l, k] = nodeIdx.get(id) || [];
+    if (l === undefined) return '';
+    const act = actOf(l), z = V.z[l]?.[k], a = V.a[l]?.[k];
+    const sum = nodeSum(id);
+    if (!l) return `${title} = ${f2(a)}`;
+    const fn = act === 'identity' ? '' : act === 'softmax' ? 'softmax' : M.ACTS[act]?.label || act;
+    return `${title} = ${fn ? `${fn}(` : ''}${sum || f2(z)}${fn ? ')' : ''}<br>= ${fn && act !== 'softmax' ? `${fn}(${f2(z)}) = ` : ''}${f2(a)}`;
+  };
+  const nodeSrc = id => {
+    const out = [];
+    for (const e of inEdges.get(id) || []) { const c = F.nodeCell[e.from]; if (c) out.push(c); }
+    return out;
+  };
+  // a layer's activations (group g) as a tile; nodes map one to one
+  function layerTile(l, g, o = {}) {
+    const { tokens, d, groups } = shp[l], gi = g ?? 0, off0 = gi * tokens * d;
+    const id = o.id || (groups ? `L${l}.${groups[gi]}` : `L${l}`);
+    const vec = o.vec || V.a[l];
+    const t = tile(id, {
+      l, rows: tokens, cols: d, v: grid(tokens, d, (i, j) => vec[off0 + i * d + j]),
+      tex: o.tex || (groups ? groups[gi] : symOf(net, l)),
+      node: (i, j) => ns[l][off0 + i * d + j]?.id ?? null,
+      src: (i, j) => nodeSrc(ns[l][off0 + i * d + j]?.id),
+      tip: (i, j) => nodeTip(ns[l][off0 + i * d + j]?.id, `${texHtml(t.tex)}<sub>${i + 1},${j + 1}</sub>`),
+      ...o,
+    });
+    for (let i = 0; i < tokens; i++) for (let j = 0; j < d; j++) {
+      const nid = ns[l][off0 + i * d + j]?.id;
+      if (nid && !F.nodeCell[nid]) cellOfNode(nid, [id, i, j]);
+    }
+    (layerTileOf[l] ||= [])[gi] = id;
+    return id;
+  }
+  const rowSrc = (id, i) => (F.tiles[id] ? Array.from({ length: F.tiles[id].cols }, (_, j) => [id, i, j]) : []);
+  // Row t of layer k (of one group) wherever its neurons are drawn (a Q, K, V layer is split by heads).
+  const rowCells = (k, group, t) => {
+    const { tokens, d, groups } = shp[k], g = group && groups ? groups.indexOf(group) : 0;
+    return ns[k].slice(g * tokens * d + t * d, g * tokens * d + (t + 1) * d).map(n => F.nodeCell[n.id]).filter(Boolean);
+  };
+  const colSrc = (id, j) => (F.tiles[id] ? Array.from({ length: F.tiles[id].rows }, (_, i) => [id, i, j]) : []);
+  const stage = s => { F.stages.push({ part: null, text: '', ...s }); };
+  const lid = l => net.layers[l].id;
+
+  // ---- layer 0
+  {
+    const id = layerTile(0, null, {
+      id: 'in', tex: oneHot ? 'O' : symOf(net, 0), rowLab: s0.tokens > 1 ? F.labels.slice(0, s0.tokens) : null, colLab: oneHot ? voc : null, onehot: oneHot,
+      tip: (i, j) => (oneHot ? `${posName(i)}: ${esc(voc[j])} ${f2(a0[i * s0.d + j])}` : `${texHtml(symOf(net, 0))}<sub>${i + 1},${j + 1}</sub> = ${f2(a0[i * s0.d + j])}`),
+    });
+    stage({
+      key: 'in', title: oneHot ? 'Words' : 'Input', layer: lid(0), rows: [{ head: null, tiles: [id], ops: [] }],
+      tex: oneHot ? 'O_{t} = \\text{one-hot}(w_t)' : `${symOf(net, 0)}`,
+      text: oneHot ? 'The words, a row per position: a 1 in the column of its word.' : 'The input, a row per token.',
+    });
+  }
+
+  for (let l = 1; l < L; l++) {
+    if (att[l]) { attentionStages(l); continue; }
+    if (att[l + 1] && isQKV(shp[l].groups)) { qkvStage(l); continue; }
+    denseStages(l);
+  }
+
+  // ---- Q, K, V split into heads
+  function qkvStage(l) {
+    const g = att[l + 1], H = g.heads, dh = g.dh, d = g.d, n = g.tokens, heads = V.attn[l + 1]?.heads || [];
+    const tm = M.tiedMatrices(net, l), src = tm.length && tm[0].k !== null ? symOf(net, tm[0].k) : 'X';
+    const rows = [];
+    for (let h = 0; h < H; h++) {
+      const ids = QKV.map((G, gi) => {
+        const id = H > 1 ? `${G.toLowerCase()}${l}.${h}` : `L${l}.${G}`;
+        const at = (i, f) => gi * n * d + i * d + h * dh + f;
+        const texName = H > 1 ? `${G}_{${h + 1}}` : G;
+        tile(id, {
+          l, head: H > 1 ? h : null, rows: n, cols: dh, tex: texName,
+          v: grid(n, dh, (i, f) => (heads[h] ? heads[h][G][i][f] : V.a[l][at(i, f)])),
+          node: (i, f) => ns[l][at(i, f)]?.id ?? null,
+          src: (i, f) => nodeSrc(ns[l][at(i, f)]?.id),
+          tip: (i, f) => nodeTip(ns[l][at(i, f)]?.id, H > 1 ? `${G}<sub>${h + 1}</sub>[${i + 1},${f + 1}]` : `${G}<sub>${i + 1},${f + 1}</sub>`),
+        });
+        for (let i = 0; i < n; i++) for (let f = 0; f < dh; f++) { const nid = ns[l][at(i, f)]?.id; if (nid) cellOfNode(nid, [id, i, f]); }
+        return id;
+      });
+      rows.push({ head: H > 1 ? h : null, tiles: ids, ops: [] });
+    }
+    for (let gi = 0; gi < 3; gi++) (layerTileOf[l] ||= [])[gi] = rows[0].tiles[gi];
+    const W = G => tm.find(m => m.toGroup === G)?.name || `W_${G}`;
+    const b = G => tieBase(ns[l][QKV.indexOf(G) * n * d]?.tie) || `b_${G}`;
+    stage({
+      key: `qkv${l}`, title: H > 1 ? 'Q, K, V per head' : 'Q, K, V', layer: lid(l), rows,
+      tex: QKV.map(G => `${G} = ${src}\\,${W(G)} + ${b(G)}`).join(',\\;'),
+      text: `Three shared matrices turn every position's ${texHtml(src)} row into a query, a key and a value${H > 1 ? `, each then cut by columns into ${H} heads of ${dh}` : ''}.`,
+    });
+  }
+
+  // ---- attention: scores, softmax, weighted sum, concat
+  function attentionStages(l) {
+    const g = att[l], H = g.heads, dh = g.dh, n = g.tokens, d = g.d, A = V.attn[l] || base.attn[l];
+    const qkv = layerTileOf[l - 1] || [];
+    const hid = (p, h) => `${p}${l}.${h}`;
+    const tq = h => (H > 1 ? `q${l - 1}.${h}` : qkv[0]), tk = h => (H > 1 ? `k${l - 1}.${h}` : qkv[1]), tv = h => (H > 1 ? `v${l - 1}.${h}` : qkv[2]);
+    const sub = h => (H > 1 ? `_{${h + 1}}` : '');
+    const at = (sym, h, i, j) => (H > 1 ? `${sym}<sub>${h + 1}</sub>[${i + 1},${j + 1}]` : `${sym}<sub>${i + 1},${j + 1}</sub>`);
+    const lab = F.labels.slice(0, n), mask = grid(n, n, (i, j) => g.causal && j > i);
+    const rows = p => Array.from({ length: H }, (_, h) => ({ head: H > 1 ? h : null, tiles: [hid(p, h)], ops: [] }));
+    const hs = h => A?.heads?.[h];
+    for (let h = 0; h < H; h++) {
+      const off = offs.has(h) && H > 1;
+      tile(hid('s', h), {
+        l, head: H > 1 ? h : null, rows: n, cols: n, tex: `S${sub(h)}`, v: hs(h)?.S || grid(n, n, () => NaN), mask, rowLab: lab, colLab: lab, off,
+        src: (i, j) => (mask[i][j] ? [] : [...rowSrc(tq(h), i), ...rowSrc(tk(h), j)]),
+        tip: (i, j) => {
+          if (mask[i][j]) return `${at('S', h, i, j)} = −∞: ${posName(i)} can't see the later ${posName(j)}`;
+          const q = hs(h).Q[i], k = hs(h).K[j];
+          return `${at('S', h, i, j)} = q<sub>${i + 1}</sub>·k<sub>${j + 1}</sub> × ${f2(g.scale)}`
+            + `<br>= (${q.map((x, f) => `${f2(x)}·${f2(k[f])}`).join(' + ')}) × ${f2(g.scale)} = ${f2(hs(h).S[i][j])}`;
+        },
+      });
+      tile(hid('a', h), {
+        l, head: H > 1 ? h : null, rows: n, cols: n, tex: `A${sub(h)}`, v: hs(h)?.A || grid(n, n, () => NaN), mask, rowLab: lab, colLab: lab, scale: 'attn', off,
+        src: (i, j) => (mask[i][j] ? [] : rowSrc(hid('s', h), i).filter(([, , jj]) => !mask[i][jj])),
+        tip: (i, j) => (mask[i][j] ? `${at('A', h, i, j)} = 0 (masked)`
+          : `${at('A', h, i, j)} = e<sup>S<sub>${i + 1},${j + 1}</sub></sup> / Σ<sub>k</sub> e<sup>S<sub>${i + 1},k</sub></sup> = ${f2(hs(h).A[i][j])}`
+            + `<br>how much ${posName(i)} reads ${posName(j)}`),
+      });
+      const zt = hid('z', h), zAt = (i, f) => i * d + h * dh + f;
+      tile(zt, {
+        l, head: H > 1 ? h : null, rows: n, cols: dh, tex: `Z${sub(h)}`, v: hs(h)?.Z || grid(n, dh, () => NaN), off,
+        node: (i, f) => ns[l][zAt(i, f)]?.id ?? null,
+        src: (i, f) => [...rowSrc(hid('a', h), i).filter(([, , j]) => !mask[i][j]), ...colSrc(tv(h), f).filter(([, j]) => !mask[i][j])],
+        tip: (i, f) => `${at('Z', h, i, f)} = Σ<sub>j</sub> A<sub>${i + 1},j</sub> V<sub>j,${f + 1}</sub><br>= `
+          + hs(h).A[i].map((w, j) => (mask[i][j] ? null : `${f2(w)}·${f2(hs(h).V[j][f])}`)).filter(Boolean).join(' + ')
+          + ` = ${f2(hs(h).Z[i][f])}${off ? '<br>head off: its columns of the concat are 0' : ''}`,
+      });
+      if (H === 1) for (let i = 0; i < n; i++) for (let f = 0; f < dh; f++) { const nid = ns[l][zAt(i, f)]?.id; if (nid) cellOfNode(nid, [zt, i, f]); }
+    }
+    const sc = H > 1 ? '_h' : '', dk = H > 1 ? 'd_h' : 'd_k';
+    stage({
+      key: `scores${l}`, title: 'Scores', layer: lid(l), part: 'scores', rows: rows('s'),
+      tex: `S${sc} = Q${sc} K${sc}^{\\top} / \\sqrt{${dk}}${g.causal ? ' + M' : ''}`,
+      text: `Every query against every key, times 1/√${dh} = ${f2(g.scale)}.${g.causal ? ' Causal: a position sees itself and the positions before it, never after (−∞).' : ''}`,
+    });
+    const last = n - 1, peek = h => (hs(h) ? argmax(hs(h).A[last]) : 0);
+    stage({
+      key: `softmax${l}`, title: 'Attention A', layer: lid(l), part: 'softmax', rows: rows('a'),
+      tex: `A${sc} = \\operatorname{softmax}(S${sc})`,
+      text: `Each row sums to 1: where that position looks. ${posName(last)} reads `
+        + Array.from({ length: H }, (_, h) => `${posName(peek(h))} most${H > 1 ? ` in head ${h + 1}` : ''} (${f2(hs(h)?.A[last][peek(h)])})`).join(', ') + '.',
+    });
+    stage({
+      key: `mix${l}`, title: 'A V', layer: lid(l), part: 'mix', rows: rows('z'),
+      tex: `Z${sc} = A${sc} V${sc}`,
+      text: 'Each position\'s row of A times V: a weighted mix of the values it looked at.',
+    });
+    if (H > 1) {
+      const id = layerTile(l, null, {
+        id: `L${l}`, tex: 'Z', vec: V.a[l], colHeads: Array.from({ length: d }, (_, c) => Math.floor(c / dh)),
+        src: (i, c) => [[hid('z', Math.floor(c / dh)), i, c % dh]],
+        tip: (i, c) => {
+          const h = Math.floor(c / dh);
+          return `Z<sub>${i + 1},${c + 1}</sub> = Z<sub>${h + 1}</sub>[${i + 1},${(c % dh) + 1}] = ${f2(V.a[l][i * d + c])}${offs.has(h) ? ` (head ${h + 1} is off: 0)` : ''}`;
+        },
+      });
+      F.tiles[id].offCols = Array.from({ length: d }, (_, c) => offs.has(Math.floor(c / dh)));
+      const on = Array.from({ length: H }, (_, h) => h).filter(h => !offs.has(h));
+      stage({
+        key: `concat${l}`, title: 'Concat', layer: lid(l), part: null, rows: [{ head: null, tiles: [id], ops: [] }],
+        tex: `Z = [\\,${Array.from({ length: H }, (_, h) => `Z_{${h + 1}}`).join('\\;')}\\,]`,
+        text: on.length === H ? `The ${H} heads side by side, back to d = ${d} columns.`
+          : `Heads ${[...offs].filter(h => h < H).map(h => h + 1).join(', ')} knocked out: their columns are 0, and every later stage is recomputed without them.`,
+      });
+    } else {
+      (layerTileOf[l] ||= [])[0] = hid('z', 0);
+    }
+  }
+
+  // ---- dense layers: tokenwise products and sums, else one tile per layer
+  function denseStages(l) {
+    const { tokens: n, d, groups } = shp[l], nodes = ns[l], act = actOf(l);
+    const tm = M.tiedMatrices(net, l);
+    const fixed = [];
+    for (const nd of nodes) for (const e of inEdges.get(nd.id) || []) if (e.fixed) fixed.push(e);
+    // A fixed residual: every fixed edge copies slot (t, f) of one earlier layer with weight 1.
+    const resK = new Set();
+    let resOk = true;
+    const slot = id => { const [ll, k] = nodeIdx.get(id) || []; return ll === undefined ? null : { l: ll, t: Math.floor(k / shp[ll].d) % shp[ll].tokens, f: k % shp[ll].d }; };
+    for (const e of fixed) {
+      const a = slot(e.from), b = slot(e.to);
+      if (!a || !b || e.w !== 1 || a.t !== b.t || a.f !== b.f || shp[a.l].groups || shp[a.l].d !== d) { resOk = false; break; }
+      resK.add(a.l);
+    }
+    if (resOk) for (const k of resK) if (fixed.filter(e => slot(e.from).l === k).length !== n * d) resOk = false;
+    const tokenwise = !groups && tm.length > 0 && tm.every(m => m.tokenwise && m.k !== null && shp[m.k].tokens === n) && resOk;
+    const title = String(net.layers[l].name || `Layer ${l}`);
+    if (!tokenwise) {
+      const ids = (groups || [null]).map((_, g) => layerTile(l, groups ? g : null, { rowLab: n > 1 ? F.labels.slice(0, n) : null }));
+      const fn = act === 'identity' ? '' : act === 'softmax' ? '\\operatorname{softmax}' : `\\operatorname{${M.ACTS[act]?.label || act}}`;
+      stage({
+        key: `layer${l}`, title, layer: lid(l), rows: [{ head: null, tiles: ids, ops: [] }],
+        tex: `${symOf(net, l)} = ${fn}${fn ? '(' : ''}W a + b${fn ? ')' : ''}`,
+        text: `${nodes.length} neuron${nodes.length === 1 ? '' : 's'}: each sums its weighted inputs and its bias${fn ? ', then the activation' : ''}. Hover one to see its sum.`,
+      });
+      return;
+    }
+    const sym = symOf(net, l), bias = tieBase(nodes[0]?.tie);
+    const untied = n > 1 && nodes.every(nd => !nd.tie);   // a bias per position: P
+    // products: the source rows times each shared matrix
+    const prods = tm.map((m, mi) => {
+      const src = (M.reshape(net, m.k, V.a[m.k])[m.fromGroup || 'X']);
+      const rows = src.length, dout = m.W[0]?.length || 0;
+      const v = grid(rows, d, (t, j) => (j < dout ? src[t].reduce((s, x, i) => s + x * (m.W[i]?.[j] ?? 0), 0) : 0));
+      const ssym = m.fromGroup || symOf(net, m.k), id = `P${l}.${mi}`, onehotSrc = m.k === 0 && oneHot;
+      tile(id, {
+        l, rows, cols: d, v, tex: `${oneHot && m.k === 0 ? 'O' : ssym}\\,${m.name}`,
+        src: t => rowCells(m.k, m.fromGroup, t),
+        tip: (t, j) => (onehotSrc
+          ? `(O ${texHtml(m.name)})<sub>${t + 1},${j + 1}</sub> = ${texHtml(m.name)}[${esc(F.words[t])}, ${j + 1}] = ${f2(v[t][j])}<br>a one-hot row picks one row of ${texHtml(m.name)}`
+          : `(${texHtml(ssym)} ${texHtml(m.name)})<sub>${t + 1},${j + 1}</sub> = ${texHtml(ssym)}<sub>${t + 1}</sub> · ${texHtml(m.name)}[:,${j + 1}]<br>= `
+            + `${src[t].map((x, i) => `${f2(x)}·${f2(m.W[i]?.[j] ?? 0)}`).join(' + ')} = ${f2(v[t][j])}`),
+      });
+      return { id, m, ssym };
+    });
+    const res = [...resK].map(k => ({ k, id: layerTileOf[k]?.[0], sym: symOf(net, k) }));
+    const outTip = (t, j) => {
+      const parts = [];
+      for (const r of res) parts.push(`${texHtml(r.sym)} ${f2(V.a[r.k][t * d + j])}`);
+      for (const p of prods) parts.push(`${texHtml(p.m.k === 0 && oneHot ? 'O' : p.ssym)}·${texHtml(p.m.name)} ${f2(F.tiles[p.id].v[t][j])}`);
+      const b = nodes[t * d + j]?.bias || 0;
+      parts.push(`${untied ? 'P' : bias ? texHtml(bias) : 'b'} ${f2(b)}`);
+      const fn = act === 'identity' ? '' : act === 'softmax' ? 'softmax' : M.ACTS[act]?.label || act;
+      const z = V.z[l]?.[t * d + j], a = V.a[l]?.[t * d + j];
+      return `${texHtml(sym)}<sub>${t + 1},${j + 1}</sub> = ${fn ? `${fn}(` : ''}${parts.join(' + ')}${fn ? ')' : ''}`
+        + `<br>= ${fn && act !== 'softmax' ? `${fn}(${f2(z)}) = ` : ''}${f2(a)}`;
+    };
+    const outSrc = (t, j) => [
+      ...res.map(r => (r.id ? [r.id, t, j] : null)).filter(Boolean),
+      ...prods.map(p => [p.id, t, j]),
+      ...(untied ? [[`B${l}`, t, j]] : []),
+    ];
+    const fnTex = act === 'identity' ? '' : act === 'softmax' ? '\\operatorname{softmax}' : `\\operatorname{${M.ACTS[act]?.label || act}}`;
+    const sumTex = [...res.map(r => r.sym), ...prods.map(p => `${oneHot && p.m.k === 0 ? 'O' : p.ssym}\\,${p.m.name}`), untied ? 'P' : bias || 'b'].join(' + ');
+    if (res.length) {
+      stage({
+        key: `proj${l}`, title: prods.map(p => `· ${texHtml(p.m.name)}`).join(', '), layer: lid(l), part: null,
+        rows: [{ head: null, tiles: prods.map(p => p.id), ops: [] }],
+        tex: prods.map(p => `${p.ssym}\\,${p.m.name}`).join(',\\;'),
+        text: prods.map(p => `${texHtml(p.ssym)} times ${texHtml(p.m.name)}`).join(', ')
+          + (prods.some(p => p.ssym === 'Z') ? ': the heads\' outputs mixed back together.' : ': the branch the residual adds.'),
+      });
+      const id = layerTile(l, null, { src: outSrc, tip: outTip });
+      stage({
+        key: `sum${l}`, title: '+ residual', layer: lid(l), rows: [{ head: null, tiles: [id], ops: [] }],
+        tex: `${sym} = ${fnTex}${fnTex ? '(' : ''}${sumTex}${fnTex ? ')' : ''}`,
+        text: `The residual: ${res.map(r => texHtml(r.sym)).join(', ')} comes through unchanged and ${prods.map(p => `${texHtml(p.ssym)} ${texHtml(p.m.name)}`).join(', ')} is added${bias ? `, plus ${texHtml(bias)}` : ''}.`,
+      });
+      return;
+    }
+    if (untied) {
+      const bid = `B${l}`;
+      tile(bid, {
+        l, rows: n, cols: d, tex: 'P', v: grid(n, d, (t, j) => nodes[t * d + j]?.bias || 0),
+        tip: (t, j) => `P<sub>${t + 1},${j + 1}</sub> = ${f2(nodes[t * d + j]?.bias || 0)}: the learned vector of position ${t + 1} (the layer's own biases)`,
+      });
+      const id = layerTile(l, null, { src: outSrc, tip: outTip });
+      stage({
+        key: `embed${l}`, title: oneHot && prods.some(p => p.m.k === 0) ? 'Embed + position' : `${texHtml(sym)} + position`, layer: lid(l),
+        rows: [{ head: null, tiles: [...prods.map(p => p.id), bid, id], ops: [...prods.map((_, i) => (i ? '+' : '')).slice(1), '+', '='] }],
+        tex: `${sym} = ${fnTex}${fnTex ? '(' : ''}${sumTex}${fnTex ? ')' : ''}`,
+        text: oneHot ? 'Each one-hot row picks its word\'s row of the embedding; P adds a learned vector for each position.'
+          : `The shared product plus P, a learned vector for each position.`,
+      });
+      return;
+    }
+    // One product and nothing added: the layer's own tile is enough, traced to the rows it reads.
+    const single = prods.length === 1 ? prods[0] : null;
+    for (const p of prods) delete F.tiles[p.id];
+    const rowsIn = t => prods.flatMap(p => rowCells(p.m.k, p.m.fromGroup, t));
+    if (act === 'softmax') {
+      const lg = `G${l}`;
+      const vocOut = !!voc && d === voc.length;
+      tile(lg, {
+        l, rows: n, cols: d, tex: '\\ell', v: grid(n, d, (t, j) => V.z[l][t * d + j]), colLab: vocOut ? voc : null,
+        src: t => rowsIn(t),
+        tip: (t, j) => `ℓ<sub>${t + 1},${j + 1}</sub>${vocOut ? ` (${esc(voc[j])})` : ''} = ${nodeSum(nodes[t * d + j]?.id) || f2(V.z[l][t * d + j])} = ${f2(V.z[l][t * d + j])}`,
+      });
+      stage({
+        key: `logits${l}`, title: 'Logits', layer: lid(l), rows: [{ head: null, tiles: [lg], ops: [] }],
+        tex: `\\ell = ${prods.map(p => `${p.ssym}\\,${p.m.name}`).join(' + ')} + ${bias || 'b'}`,
+        text: vocOut ? 'One score per word, at each position.' : 'One score per output, before the softmax.',
+      });
+      const targets = nodes.map(nd => nd.target);
+      const hasT = targets.every(isNum);
+      const tgt = hasT ? Array.from({ length: n }, (_, t) => {
+        const row = targets.slice(t * d, (t + 1) * d), k = argmax(row);
+        return row[k] >= 0.5 ? k : null;
+      }) : null;
+      const id = layerTile(l, null, {
+        tex: 'p', kind: vocOut ? 'bars' : 'mat', scale: 'prob', colLab: vocOut ? voc : null, target: tgt,
+        rowLab: Array.from({ length: n }, (_, t) => (F.words.slice(0, t + 1).every(Boolean) ? F.words.slice(0, t + 1).join(' ') : tokenLabel(net, t))),
+        src: t => rowSrc(lg, t),
+        tip: (t, j) => `p(${vocOut ? esc(voc[j]) : `${j + 1}`} | ${F.words.slice(0, t + 1).every(Boolean) ? esc(F.words.slice(0, t + 1).join(' ')) : `position ${t + 1}`})`
+          + ` = e<sup>ℓ</sup> / Σ e<sup>ℓ</sup> = ${f2(V.a[l][t * d + j])}${tgt?.[t] === j ? '<br>the target' : ''}`,
+      });
+      if (vocOut && l === L - 1) {
+        const t = n - 1, row = V.a[l].slice(t * d, (t + 1) * d), k = argmax(row);
+        F.next = { word: voc[k], p: row[k], target: tgt?.[t] !== null && tgt?.[t] !== undefined ? voc[tgt[t]] : null, t };
+      }
+      stage({
+        key: `probs${l}`, title: vocOut ? 'Next word' : 'Softmax', layer: lid(l), rows: [{ head: null, tiles: [id], ops: [] }],
+        tex: 'p = \\operatorname{softmax}(\\ell)',
+        text: vocOut ? 'A probability for every word at each position, given the words up to it (causal). The ringed bar is the target.'
+          : 'Each row turned into probabilities that sum to 1.',
+      });
+      return;
+    }
+    const id = layerTile(l, null, { src: t => rowsIn(t), tip: (t, j) => nodeTip(nodes[t * d + j]?.id, `${texHtml(sym)}<sub>${t + 1},${j + 1}</sub>`) });
+    stage({
+      key: `layer${l}`, title: act === 'relu' && d > (single ? shp[single.m.k].d : d) ? 'FFN' : title, layer: lid(l),
+      rows: [{ head: null, tiles: [id], ops: [] }],
+      tex: `${sym} = ${fnTex}${fnTex ? '(' : ''}${sumTex}${fnTex ? ')' : ''}`,
+      text: act === 'relu'
+        ? `The feed-forward layer, at each position on its own: ${single ? `${texHtml(single.ssym)} ${texHtml(single.m.name)}` : 'the products'} + ${bias ? texHtml(bias) : 'b'}, then ReLU (${V.a[l].filter(v => v > 0).length} of ${n * d} units are on).`
+        : `${sumTex.includes('+') ? 'The products and the bias' : 'The product and the bias'}${act === 'identity' ? '' : ', then the activation'}, at each position.`,
+    });
+  }
+  return F;
+}
+
+// A structure key: the DOM is rebuilt only when it changes (not on new values).
+export function flowKey(F) {
+  return JSON.stringify([F.why, F.stages.map(s => [s.key, s.title, s.tex, s.rows.map(r => [r.head, r.tiles, r.ops])]),
+    Object.values(F.tiles).map(t => [t.id, t.kind, t.rows, t.cols, t.tex, t.rowLab, t.colLab, t.head, t.off, t.offCols, t.onehot])]);
+}
+
+// ================================================================ the view
+
+const PLAY_MS = 1600;
+const HEAD_VARS = ['--att', '--head-2', '--head-3', '--head-4', '--head-5', '--head-6'];   // a head keeps its colour in every panel
+const ALPHA_MAX = 0.72;   // docs/DESIGN.md (matrix cells): fills stay light enough for --text-1 digits
+const capped = c => c.replace(/^rgba\((\d+),(\d+),(\d+),([\d.]+)\)$/, (m, r, g, b, a) => `rgba(${r},${g},${b},${Math.min(ALPHA_MAX, +a).toFixed(3)})`);
+// Icons from static/icons.js (docs/DESIGN.md, Icons), with a glyph when the script is missing.
+const icon = (name, glyph) => window.mathboardIcons?.svg?.(name, { size: 14 }) || glyph;
+// Zooms tried, largest first, until the whole flow fits its box. Below the last one the text gets
+// too small to read, so the box scrolls instead (the lit stage scrolls into view).
+const SCALES = [1.4, 1.25, 1.12, 1, 0.9, 0.8, 0.72];
+
+export function install(ctx) {
+  const { store } = ctx;
+  const stage = ctx.el?.stage || document.getElementById('nn-stage');
+  const audience = !!ctx.audience;
+  const theme = () => ctx.theme?.() || (document.documentElement.dataset.theme === 'light' ? 'light' : 'dark');
+  if (!('flow' in store.state)) store.state.flow = null;
+
+  const btn = audience ? null : ctx.addButton?.({
+    label: 'Flow', icon: 'flow', group: 'view', onClick: () => toggle(),
+    title: 'Flow view (G): the whole forward pass as matrices, stage by stage, down to the next-word softmax. Shift+G: play',
+  }) || null;
+
+  const cur = () => cleanFlow(store.state.flow);
+  function put(patch) {
+    if (audience) return;
+    const v = cur();
+    if (v) store.set('flow', cleanFlow({ ...v, ...patch }));
+  }
+  function open(patch = {}) {
+    if (audience) return;
+    if (store.state.v3d) store.set('v3d', null);   // one view replaces the canvas at a time
+    store.set('flow', cleanFlow({ stage: null, nums: true, ...(cur() || {}), ...patch }));
+  }
+  function toggle(on = !store.state.flow) {
+    if (audience) return;
+    if (on) open();
+    else store.set('flow', null);
+  }
+
+  let V = null;   // the view while it is on
+  function sync() {
+    const v = cur();
+    btn?.classList.toggle('on', !!v);
+    // the flow draws the matrices itself: the matrix panel steps aside while it is on (nn.js
+    // brings back what the user had when it closes)
+    if (!v) { if (V) { const g = V; V = null; g.dispose(); ctx.matrixAway?.(false); } return; }
+    if (!V) { ctx.matrixAway?.(true); V = createView(); }
+    V.apply(v);
+  }
+  store.on('flow', sync);
+  store.on('v3d', v => { if (v && store.state.flow && !audience) store.set('flow', null); });
+  store.on('net', p => V?.onNet(p));
+  store.on('values', () => V?.invalidate());
+  for (const k of ['sel', 'hover', 'lens', 'anim']) store.on(k, () => V?.restate());
+  ctx.onTheme?.(() => V?.invalidate(true));
+  ctx.onShow?.(on => V?.shown(on));
+
+  // A net that asks for the Flow view (meta.flow, the tiny language model) opens in it when it loads.
+  let title = store.net.meta?.title;
+  store.on('net', p => {
+    const t = store.net.meta?.title;
+    if (!p?.structural || t === title) return;
+    title = t;
+    if (store.net.meta?.flow === true && !store.state.flow) open({ stage: null, off: [] });
+  });
+  if (!audience && store.net.meta?.flow === true) open();
+
+  if (!audience) {
+    window.addEventListener('keydown', e => {
+      if (e.ctrlKey || e.metaKey || e.altKey || !(ctx.active ? ctx.active(e) : true)) return;
+      const k = e.key;
+      if (k === 'g' || k === 'G') {
+        e.preventDefault();
+        if (e.repeat) return;
+        if (e.shiftKey) { if (!store.state.flow) open(); V?.play(); }
+        else toggle();
+      } else if ((k === 'ArrowRight' || k === 'ArrowLeft') && store.state.flow) {
+        e.preventDefault();
+        V?.step(k === 'ArrowRight' ? 1 : -1);
+      }
+    });
+  }
+
+  // Test / console handle (docs/NN_FLOW.md).
+  ctx.flow = {
+    get on() { return !!store.state.flow; },
+    toggle, open,
+    step: dir => V?.step(dir),
+    play: on => V?.play(on),
+    head: h => V?.head(h),
+    fit: () => V?.fit(),
+    info: () => V?.info() ?? null,
+  };
+
+  // ============================================================== the view
+  function createView() {
+    const mk = (tag, cls, parent, html) => {
+      const e = document.createElement(tag);
+      if (cls) e.className = cls;
+      if (html != null) e.innerHTML = html;
+      if (parent) parent.appendChild(e);
+      return e;
+    };
+    const root = mk('div', `nn-flow${audience ? ' ro' : ''}`);
+    const scroll = mk('div', 'nnf-scroll', root);
+    const sizer = mk('div', 'nnf-sizer', scroll);
+    const content = mk('div', 'nnf-content', sizer);
+    const head = mk('div', 'nnf-head', content);
+    const msg = mk('div', 'nnf-msg', content);
+    const strip = mk('div', 'nnf-strip', content);
+    const bar = mk('div', 'nnf-bar ui-float', root);
+    const ctl = mk('div', 'nnf-ctl ui-chrome', bar);
+    const cap = mk('div', 'nnf-cap', bar);
+    const tip = mk('div', 'nnf-tip ui-tip', root);
+    tip.hidden = true;
+    stage.appendChild(root);
+    const svg = ctx.view?.svg || null;
+    if (svg) svg.style.visibility = 'hidden';
+    // Its buttons never take focus, so Space stays with training (as the shell's toolbar).
+    root.addEventListener('mousedown', e => { if (e.target.closest('button')) e.preventDefault(); });
+
+    let F = null, key = '', cells = new Map(), stageEls = [], tileEls = new Map(), alive = true, visible = document.body.dataset.view === 'nn';
+    let raf = 0, needBuild = true, needPaint = true, needState = true, needFit = true, playTimer = 0, enterT = 0, lastStage = null;
+    let myHover = null, scale = 1;
+
+    // ---------------------------------------------------------------- compute
+    function compute() {
+      const v = cur();
+      try { F = buildFlow(store.net, { fwd: store.state.fwd, off: v?.off || [] }); }
+      catch (err) {
+        console.error('[nn/flow] build:', err);
+        F = { stages: [], tiles: {}, nodeCell: {}, words: [], labels: [], next: null, attention: false, why: 'error', max: { act: 1 }, heads: 1, T: 1 };
+      }
+      const k = flowKey(F);
+      if (k !== key) { key = k; needBuild = true; }
+      // another net with fewer stages: back to the whole pass
+      if (!audience && v && v.stage !== null && v.stage >= F.stages.length) queueMicrotask(() => put({ stage: null, play: false }));
+    }
+
+    // ---------------------------------------------------------------- build (structure)
+    const texOf = (s, fallback) => {
+      const k = window.katex;
+      try { return k ? k.renderToString(String(s), { throwOnError: false, strict: 'ignore' }) : texHtml(fallback ?? s); } catch { return texHtml(fallback ?? s); }
+    };
+    function cellW(t) {
+      if (t.kind === 'bars') return 32;
+      if (t.onehot || t.cols > 8) return t.cols > 10 ? 15 : 19;
+      if (t.colLab && t.cols > 5) return 19;
+      return 34;
+    }
+    function build() {
+      needBuild = false;
+      strip.textContent = '';
+      cells = new Map();
+      tileEls = new Map();
+      stageEls = [];
+      msg.hidden = !F.why;
+      msg.innerHTML = F.why === 'error' ? 'The forward pass failed on this net, so there is nothing to draw.'
+        : F.why === 'empty' ? 'This net has no neurons yet: nothing flows.'
+        : F.why === 'no-attention' ? `<b>No attention layer here.</b> The flow shows this net layer by layer: each tile is one layer's vector, and hovering a neuron traces its inputs.${audience ? '' : ' <button class="ui-btn sm soft ui-chrome nnf-lm">Open the tiny language model</button>'}` : '';
+      F.stages.forEach((s, si) => {
+        // a stage and the arrow after it wrap together, so a line ends with an arrow, never starts with one
+        const pair = mk('div', 'nnf-pair', strip);
+        const el = mk('div', 'nnf-st', pair);
+        if (si < F.stages.length - 1) mk('div', 'nnf-arrow', pair, '<svg viewBox="0 0 16 16"><path d="M2 8h11M9 4l4 4-4 4"/></svg>');
+        el.dataset.i = si;
+        const sh = mk('button', 'nnf-sh', el);
+        sh.innerHTML = `<span class="nnf-no">${si + 1}</span>${esc(s.title).replace(/&lt;(\/?)(sub|sup)&gt;/g, '<$1$2>')}`;
+        sh.title = `Focus ${net().layers.find(x => x.id === s.layer)?.name || 'this layer'}${s.part ? ` · ${s.part}` : ''} on the canvas and the matrix panel`;
+        const body = mk('div', 'nnf-rows', el);
+        for (const r of s.rows) {
+          const row = mk('div', 'nnf-row', body);
+          if (r.head !== null) {
+            row.dataset.h = r.head;
+            row.style.setProperty('--hc', `var(${HEAD_VARS[r.head % HEAD_VARS.length]})`);
+            mk('span', 'nnf-hl', row, `h${r.head + 1}`);
+          }
+          r.tiles.forEach((id, ti) => {
+            if (ti && r.ops[ti - 1]) mk('span', 'nnf-op', row, r.ops[ti - 1]);
+            row.appendChild(buildTile(F.tiles[id]));
+          });
+        }
+        stageEls.push(el);
+      });
+      needPaint = needState = needFit = true;
+    }
+    function buildTile(t) {
+      const el = mk('div', `nnf-tile${t.kind === 'bars' ? ' bars' : ''}`);
+      el.dataset.t = t.id;
+      if (t.head !== null) el.style.setProperty('--hc', `var(${HEAD_VARS[t.head % HEAD_VARS.length]})`);
+      const nm = mk('div', 'nnf-tn', el);
+      mk('span', 'nnf-name', nm, texOf(t.tex));
+      mk('span', 'nnf-shape', nm, `${t.rows}×${t.cols}`);
+      const cw = cellW(t), list = [];
+      if (t.kind === 'bars') {
+        const g = mk('div', 'nnf-bg', el);
+        g.style.gridTemplateColumns = `auto repeat(${t.cols}, ${cw}px)`;
+        mk('div', 'nnf-corner', g);
+        for (let j = 0; j < t.cols; j++) mk('div', 'nnf-ch vert', g).textContent = t.colLab?.[j] ?? String(j + 1);
+        for (let i = 0; i < t.rows; i++) {
+          const rh = mk('div', 'nnf-rh bar', g);
+          rh.innerHTML = `<small>after</small>${esc(t.rowLab?.[i] ?? `t${i + 1}`)}`;
+          for (let j = 0; j < t.cols; j++) {
+            const c = mk('div', 'nnf-b', g);
+            c.dataset.t = t.id; c.dataset.i = i; c.dataset.j = j;
+            c.style.setProperty('--k', i + j);
+            const bar = mk('i', '', c), val = mk('span', '', c);
+            list.push({ el: c, i, j, bar, val });
+          }
+        }
+      } else {
+        const g = mk('div', 'nnf-g', el);
+        g.style.gridTemplateColumns = `${t.rowLab ? 'auto ' : ''}repeat(${t.cols}, ${cw}px)`;
+        if (t.colLab || t.colHeads) {
+          if (t.rowLab) mk('div', 'nnf-corner', g);
+          for (let j = 0; j < t.cols; j++) {
+            const ch = mk('div', `nnf-ch${t.colLab && t.cols > 3 && t.colLab.some(s => String(s).length > 2) ? ' vert' : ''}`, g);
+            if (t.colLab) ch.textContent = t.colLab[j];
+            else { ch.classList.add('hc'); ch.style.setProperty('--hc', `var(${HEAD_VARS[t.colHeads[j] % HEAD_VARS.length]})`); }
+          }
+        }
+        for (let i = 0; i < t.rows; i++) {
+          if (t.rowLab) mk('div', 'nnf-rh', g).textContent = t.rowLab[i] ?? '';
+          for (let j = 0; j < t.cols; j++) {
+            const c = mk('div', 'nnf-c', g);
+            c.dataset.t = t.id; c.dataset.i = i; c.dataset.j = j;
+            c.style.setProperty('--k', i + j);
+            if (t.mask?.[i]?.[j]) c.classList.add('mask');
+            if (t.offCols?.[j]) c.classList.add('offc');
+            list.push({ el: c, i, j });
+          }
+        }
+      }
+      if (t.off) el.classList.add('off');
+      el.style.setProperty('--cw', `${cw}px`);
+      cells.set(t.id, list);
+      tileEls.set(t.id, el);
+      return el;
+    }
+
+    // ---------------------------------------------------------------- paint (values)
+    function paint() {
+      needPaint = false;
+      const th = theme(), v = cur(), nums = v?.nums !== false;
+      for (const t of Object.values(F.tiles)) {
+        const list = cells.get(t.id);
+        if (!list) continue;
+        const max = t.scale === 'act' ? F.max.act : 1, show = nums && cellW(t) >= 28;
+        for (const c of list) {
+          const x = t.v[c.i]?.[c.j];
+          if (t.kind === 'bars') {
+            const p = isNum(x) ? clamp(x, 0, 1) : 0;
+            const h = `${Math.round(p * 100)}%`;
+            if (c.bar._h !== h) { c.bar._h = h; c.bar.style.height = h; }
+            const row = t.v[c.i] || [], top = argmax(row) === c.j;
+            c.el.classList.toggle('top', top);
+            c.el.classList.toggle('tgt', t.target?.[c.i] === c.j);
+            const s = top || p >= 0.2 ? M.fmt(p, 2).replace(/^0(?=\.)/, '') : '';
+            if (c.val._t !== s) c.val.textContent = c.val._t = s;
+            continue;
+          }
+          const masked = !!t.mask?.[c.i]?.[c.j], zero = isNum(x) && Math.abs(x) < 0.005;
+          const col = masked || zero || t.offCols?.[c.j] ? '' : capped(colorFor(x, max, th));
+          if (c.el._c !== col) { c.el._c = col; c.el.style.background = col; }
+          if (c.el._z !== zero) { c.el._z = zero; c.el.classList.toggle('zero', zero); }
+          const s = masked ? (t.scale === 'attn' ? '' : '−∞') : t.onehot ? (x === 1 ? '1' : '') : show ? f2(x) : '';
+          if (c.el._t !== s) c.el.textContent = c.el._t = s;
+        }
+      }
+      paintHead();
+      paintCaption();
+      if (tip._cell) showTip(tip._cell);
+    }
+    function paintHead() {
+      const words = F.words, has = words.length && words.every(Boolean);
+      const toks = has ? words : F.labels;
+      let h = '';
+      if (has || F.T > 1) {   // a plain net has no tokens to name
+        h += `<span class="nnf-lab">${has ? 'Input' : 'Tokens'}</span>`;
+        h += toks.map((w, t) => `<span class="nnf-w" data-t="${t}">${esc(w)}</span>`).join('');
+      }
+      if (F.next) {
+        const ok = F.next.target ? (F.next.target === F.next.word ? ' ok' : ' bad') : '';
+        h += `<span class="nnf-to">&rarr;</span><span class="nnf-lab">next word</span><span class="nnf-next${ok}">${esc(F.next.word)}<small>${M.fmt(F.next.p * 100, 0)}%</small></span>`;
+        if (F.next.target) h += `<span class="nnf-tgt">${F.next.target === F.next.word ? '&#10003; ' : '&#10007; '}target ${esc(F.next.target)}</span>`;
+      }
+      const off = cur()?.off || [];
+      if (off.length && F.attention) h += `<span class="nnf-offn">head ${off.map(x => x + 1).join(', ')} off</span>`;
+      if (head._h !== h) { head._h = h; head.innerHTML = h; }
+    }
+    function paintCaption() {
+      const v = cur(), i = v?.stage;
+      const s = i !== null && i !== undefined ? F.stages[i] : null;
+      let h;
+      if (s) h = `<b>${i + 1} · ${esc(s.title).replace(/&lt;(\/?)(sub|sup)&gt;/g, '<$1$2>')}</b><span class="nnf-tex">${texOf(s.tex)}</span><span class="nnf-txt">${s.text}</span>`;
+      else {
+        const n = F.stages.length;
+        h = `<b>Forward pass</b><span class="nnf-txt">${n} stage${n === 1 ? '' : 's'}, left to right${F.attention ? ', one tile per matrix' : ''}. `
+          + `${audience ? '' : '◀ ▶ (← →) step through them, ▶ plays; hover a cell to trace it, click a stage to focus its layer.'}</span>`;
+      }
+      if (cap._h !== h) { cap._h = h; cap.innerHTML = h; }
+    }
+
+    // ---------------------------------------------------------------- controls
+    function renderCtl() {
+      const v = cur(), n = F?.stages.length || 0, i = v?.stage ?? null;
+      let h = '<span class="nnf-title">Flow</span>';
+      h += `<button class="ui-btn sm icon" data-a="whole" title="The whole pass: no stage lit"${i === null ? ' disabled' : ''}>${icon('stop', '&#9632;')}</button>`;
+      h += `<button class="ui-btn sm icon" data-a="prev" title="Previous stage (←)"${!n ? ' disabled' : ''}>${icon('step-back', '&#9664;')}</button>`;
+      h += `<button class="ui-btn sm icon${v?.play ? ' on' : ''}" data-a="play" title="${v?.play ? 'Pause' : 'Play the stages one by one'} (Shift+G)"${!n ? ' disabled' : ''}>${v?.play ? icon('pause', '&#10074;&#10074;') : icon('play', '&#9654;')}</button>`;
+      h += `<button class="ui-btn sm icon" data-a="next" title="Next stage (→)"${!n ? ' disabled' : ''}>${icon('step-forward', '&#9654;')}</button>`;
+      h += '<span class="ui-seg sm nnf-steps">' + (F?.stages || []).map((s, k) => `<button data-a="go" data-i="${k}" class="${k === i ? 'on' : ''}" title="${esc(s.title.replace(/<[^>]+>/g, ''))}">${k + 1}</button>`).join('') + '</span>';
+      if ((F?.heads || 1) > 1) {
+        h += '<span class="nnf-sep"></span><span class="nnf-lab2">heads</span>';
+        for (let k = 0; k < F.heads; k++) {
+          const off = v?.off?.includes(k);
+          h += `<button class="ui-chip${off ? '' : ' on'}" data-a="head" data-h="${k}" title="${off ? 'Turn head ' + (k + 1) + ' back on' : 'Knock head ' + (k + 1) + ' out: its columns of the concat become 0 and the rest is recomputed'}"><span class="ui-sw" style="background: var(${HEAD_VARS[k % HEAD_VARS.length]})"></span>head ${k + 1}${off ? ' off' : ''}</button>`;
+        }
+      }
+      h += `<span class="nnf-sep"></span><button class="ui-btn sm${v?.nums !== false ? ' on' : ''}" data-a="nums" title="Numbers in the cells">1.2</button>`;
+      if (ctx.train?.stepSample) {
+        h += `<span class="nnf-sep"></span><button class="ui-btn sm icon" data-a="sample" data-d="-1" title="Previous sample of the Train panel's dataset">${icon('chevron-left', '&#8249;')}</button>`
+          + '<span class="nnf-lab2">sample</span>'
+          + `<button class="ui-btn sm icon" data-a="sample" data-d="1" title="Next sample of the Train panel's dataset">${icon('chevron-right', '&#8250;')}</button>`;
+      }
+      if (ctl._h !== h) { ctl._h = h; ctl.innerHTML = h; }
+    }
+    ctl.addEventListener('click', e => {
+      const b = e.target.closest('button');
+      if (!b || audience) return;
+      const a = b.dataset.a;
+      if (a === 'whole') { setPlay(false); put({ stage: null }); }
+      else if (a === 'prev') step(-1);
+      else if (a === 'next') step(1);
+      else if (a === 'play') play();
+      else if (a === 'go') { setPlay(false); put({ stage: +b.dataset.i }); }
+      else if (a === 'head') headToggle(+b.dataset.h);
+      else if (a === 'nums') put({ nums: !(cur()?.nums !== false) });
+      else if (a === 'sample') { try { ctx.train.stepSample(+b.dataset.d); } catch (err) { console.error('[nn/flow] sample:', err); } }
+    });
+    msg.addEventListener('click', e => {
+      if (!e.target.closest('.nnf-lm') || audience) return;
+      const p = M.PRESETS.tiny_lm;
+      if (!p) return;
+      store.load(p.build(1));
+      ctx.toast?.(p.note, 5000);
+    });
+
+    function step(dir) {
+      if (!F && !audience) compute();
+      if (audience || !F?.stages.length) return;
+      setPlay(false);
+      const n = F.stages.length, i = cur()?.stage;
+      const next = i === null || i === undefined ? (dir > 0 ? 0 : n - 1) : i + dir;
+      put({ stage: next < 0 || next >= n ? null : next });
+    }
+    function setPlay(on) {
+      clearInterval(playTimer);
+      playTimer = 0;
+      if (!on) { if (cur()?.play) put({ play: false }); return; }
+      if (!F && !audience) compute();   // opened this frame (Shift+G on a closed view): not built yet
+      const n = F?.stages.length || 0;
+      if (!n || audience) return;
+      let i = cur()?.stage;
+      if (i === null || i === undefined || i >= n - 1) i = 0;
+      put({ stage: i, play: true });
+      playTimer = setInterval(() => {
+        const v = cur(), m = F?.stages.length || 0;
+        if (!v?.play || !alive || v.stage === null) { clearInterval(playTimer); playTimer = 0; return; }
+        if (v.stage >= m - 1) { setPlay(false); return; }
+        put({ stage: v.stage + 1 });
+      }, PLAY_MS);
+    }
+    function play(on) {
+      if (audience) return;
+      setPlay(on === undefined ? !cur()?.play : !!on);
+    }
+    function headToggle(h) {
+      if (audience) return;
+      const off = new Set(cur()?.off || []);
+      if (off.has(h)) off.delete(h); else off.add(h);
+      if (off.size >= (F?.heads || 1)) { ctx.toast?.('Keep at least one head on', 1600); return; }
+      put({ off: [...off] });
+    }
+
+    // ---------------------------------------------------------------- state: lit stage, trace, lens, hover
+    const net = () => store.net;
+    function cellEl(t, i, j) {
+      const list = cells.get(t);
+      return list ? list.find(c => c.i === i && c.j === j)?.el || null : null;
+    }
+    function paintState() {
+      needState = false;
+      const v = cur(), i = v?.stage ?? null;
+      stageEls.forEach((el, k) => {
+        el.classList.toggle('cur', k === i);
+        el.classList.toggle('later', i !== null && k > i);
+      });
+      if (i !== lastStage) {
+        lastStage = i;
+        if (i !== null && stageEls[i]) {
+          const el = stageEls[i];
+          for (const e of stageEls) e.classList.remove('enter');   // the last lit one too, if cut short
+          void el.offsetWidth;
+          el.classList.add('enter');
+          clearTimeout(enterT);
+          enterT = setTimeout(() => el.classList.remove('enter'), 900);
+          revealStage(el);
+        }
+      }
+      // lens: the focused layer's stages get a frame, a followed token its rows, a kept head the rest dimmed
+      const L = cleanLens(net(), store.state.lens);
+      stageEls.forEach((el, k) => {
+        const s = F.stages[k], f = L.focus;
+        // a Q, K or V part is not a stage of its own: it frames the Q, K, V stage
+        el.classList.toggle('foc', !!f && f.layer === s.layer && (!f.part || f.part === s.part || (!s.part && QKV.includes(f.part))));
+      });
+      for (const el of root.querySelectorAll('.nnf-row[data-h]')) el.classList.toggle('dimh', L.head !== null && +el.dataset.h !== L.head);
+      // hover: the presenter's cell (mirrored), else the shared hover (a neuron or a token)
+      for (const el of root.querySelectorAll('.nnf-c.hov, .nnf-c.src, .nnf-b.hov, .nnf-b.src, .nnf-c.tok, .nnf-b.tok, .nnf-c.sel, .nnf-b.sel')) el.classList.remove('hov', 'src', 'tok', 'sel');
+      root.classList.remove('tracing');
+      let cell = v?.hover && F.tiles[v.hover.t] ? v.hover : null;
+      const sh = store.state.hover;
+      if (!cell && sh?.kind === 'node' && F.nodeCell[sh.id]) { const [t, a, b] = F.nodeCell[sh.id]; cell = { t, i: a, j: b }; }
+      if (cell) {
+        const el = cellEl(cell.t, cell.i, cell.j);
+        if (el) {
+          el.classList.add('hov');
+          root.classList.add('tracing');
+          for (const [t, a, b] of F.tiles[cell.t].src(cell.i, cell.j) || []) cellEl(t, a, b)?.classList.add('src');
+        }
+      }
+      const tokT = L.token !== null ? L.token : sh?.kind === 'token' && !cell ? sh.t : null;
+      if (tokT !== null && tokT !== undefined) {
+        for (const [id, list] of cells) {
+          const t = F.tiles[id];
+          if (t.rows < 2) continue;
+          for (const c of list) if (c.i === tokT) c.el.classList.add('tok');
+        }
+      }
+      const sel = store.state.sel;
+      if (sel?.kind === 'node' && F.nodeCell[sel.id]) { const [t, a, b] = F.nodeCell[sel.id]; cellEl(t, a, b)?.classList.add('sel'); }
+      // the matrix panel's step-through (S): its neuron gets the HI frame here too
+      const an = store.state.anim, al = an ? (typeof an.l === 'number' ? an.l : net().layers.findIndex(x => x.id === an.l)) : -1;
+      const aid = al > 0 ? M.nodesIn(net(), al)[an.i]?.id : null;
+      if (aid && F.nodeCell[aid]) { const [t, a, b] = F.nodeCell[aid]; cellEl(t, a, b)?.classList.add('src'); }
+      for (const w of head.querySelectorAll('.nnf-w')) w.classList.toggle('tok', +w.dataset.t === tokT);
+      if (cell) showTip(cell); else hideTip();
+      paintCaption();
+      renderCtl();
+    }
+    // Scroll the lit stage into view when the flow is taller than its box.
+    function revealStage(el) {
+      if (scroll.scrollHeight <= scroll.clientHeight + 2) return;
+      const r = el.getBoundingClientRect(), b = scroll.getBoundingClientRect();
+      if (r.top < b.top || r.bottom > b.bottom) scroll.scrollTo({ top: scroll.scrollTop + r.top - b.top - 12, behavior: 'smooth' });
+    }
+
+    function showTip(cell) {
+      const t = F.tiles[cell.t], el = cellEl(cell.t, cell.i, cell.j);
+      if (!t || !el) { hideTip(); return; }
+      let html = '';
+      try { html = t.tip(cell.i, cell.j); } catch { html = ''; }
+      if (!html) { hideTip(); return; }
+      const who = t.rows > 1 ? `<small>${esc(F.labels[cell.i] && t.kind !== 'bars' && !t.colLab ? `position ${cell.i + 1} (${F.labels[cell.i]})` : `position ${cell.i + 1}`)}</small>` : '';
+      if (tip._h !== html + who) { tip._h = html + who; tip.innerHTML = who + html; }
+      tip._cell = cell;
+      tip.hidden = false;
+      tip.style.left = '0px';   // measure it unsqueezed by the right edge
+      tip.style.top = '0px';
+      // above the tile (so the tile stays readable), centred on the cell; below it when there is no room
+      const r = el.getBoundingClientRect(), s = root.getBoundingClientRect();
+      const box = (el.closest('.nnf-tile') || el).getBoundingClientRect();
+      const w = tip.offsetWidth, h = tip.offsetHeight;
+      let x = r.left - s.left + r.width / 2 - w / 2, y = box.top - s.top - h - 6;
+      if (y < 4) y = box.bottom - s.top + 6;
+      tip.style.left = `${Math.round(clamp(x, 4, s.width - w - 4))}px`;
+      tip.style.top = `${Math.round(clamp(y, 4, s.height - h - 4))}px`;
+    }
+    function hideTip() { tip.hidden = true; tip._cell = null; }
+
+    // ---------------------------------------------------------------- input
+    const cellAt = e => {
+      const c = e.target.closest?.('.nnf-c, .nnf-b');
+      return c && root.contains(c) ? { t: c.dataset.t, i: +c.dataset.i, j: +c.dataset.j } : null;
+    };
+    const sameCell = (a, b) => (a?.t ?? null) === (b?.t ?? null) && a?.i === b?.i && a?.j === b?.j;
+    function hoverCell(c) {
+      if (audience) return;
+      const v = cur();
+      if (!v || sameCell(v.hover, c)) return;
+      put({ hover: c });
+      // the shared hover: its neuron, or for a score or weight its query token
+      const t = c && F.tiles[c.t];
+      let h = null;
+      const nid = t ? t.node(c.i, c.j) : null;
+      if (nid) h = { kind: 'node', id: nid };
+      else if (t && /^[sa]\d/.test(t.id)) h = { kind: 'token', layer: t.l, t: c.i, ...(t.head !== null ? { h: t.head } : {}) };
+      else if (t && t.rows > 1) h = { kind: 'token', layer: t.l, t: c.i };
+      const was = store.state.hover;
+      if (JSON.stringify(h) !== JSON.stringify(was) && (h || (was && JSON.stringify(was) === JSON.stringify(myHover)))) {
+        myHover = h;
+        store.set('hover', h);
+      }
+    }
+    content.addEventListener('pointermove', e => { if (!audience) hoverCell(cellAt(e)); });
+    content.addEventListener('pointerleave', () => { if (!audience) hoverCell(null); });
+    content.addEventListener('click', e => {
+      if (audience) return;
+      const sh = e.target.closest('.nnf-sh');
+      if (sh) { focusStage(+sh.parentElement.dataset.i); return; }
+      const c = cellAt(e);
+      if (c) {
+        const t = F.tiles[c.t], nid = t?.node(c.i, c.j);
+        if (nid) store.set('sel', { kind: 'node', id: nid });
+        else if (t && /^[sa]\d/.test(t.id)) store.set('sel', { kind: 'layer', id: net().layers[t.l].id });
+        return;
+      }
+      const w = e.target.closest('.nnf-w');
+      if (w && F.T > 1) {
+        const L = cleanLens(net(), store.state.lens), tt = +w.dataset.t;
+        store.set('lens', copyLens(cleanLens(net(), { ...L, token: L.token === tt ? null : tt })));
+        return;
+      }
+      if (!e.target.closest('.nnf-tile, .nnf-head, button')) store.set('sel', null);
+    });
+    // the room round the flow (the scroll box's margins, the stage beside it) is empty space too
+    root.addEventListener('click', e => {
+      if (audience || content.contains(e.target) || e.target.closest('.nnf-bar, .nnf-tip')) return;
+      store.set('sel', null);
+    });
+    // A stage click: light it, focus its layer (and part) through the lens, reveal it in the matrix panel.
+    function focusStage(i) {
+      const s = F.stages[i];
+      if (!s) return;
+      setPlay(false);
+      put({ stage: i });
+      const L = cleanLens(net(), store.state.lens);
+      const focus = { layer: s.layer, ...(s.part ? { part: s.part } : {}) };
+      store.set('lens', copyLens(cleanLens(net(), { ...L, focus })));
+      try { ctx.matrix?.reveal?.(s.layer, s.part || null); } catch { /* optional */ }
+    }
+
+    // ---------------------------------------------------------------- framing
+    // The free part of the stage: clear of the floating panels (Train, Attention, 3D plots) and
+    // above this bar and the lens bar; the roomiest rectangle at least 320 × 200.
+    function freeRect() {
+      const s = stage.getBoundingClientRect();
+      let bottom = s.height;
+      const br = bar.getBoundingClientRect();
+      if (br.height) bottom = Math.min(bottom, br.top - s.top - 6);
+      const rects = [];
+      const skip = c => c === root || c.tagName?.toLowerCase() === 'svg' || c.classList.contains('nn-insp-layer') || c.classList.contains('nn-tour') || c.classList.contains('nn3d');
+      for (const c of stage.children) {
+        if (skip(c) || c.hidden) continue;
+        const r = c.getBoundingClientRect();
+        if (!r.width || !r.height || getComputedStyle(c).display === 'none' || getComputedStyle(c).visibility === 'hidden') continue;
+        if (c.classList.contains('nn-lens')) { if (r.bottom >= s.bottom - 40) bottom = Math.min(bottom, r.top - s.top - 6); continue; }
+        if (r.width * r.height > 0.8 * s.width * s.height) continue;
+        rects.push({ x0: r.left - s.left - 8, y0: r.top - s.top - 8, x1: r.right - s.left + 8, y1: r.bottom - s.top + 8 });
+      }
+      const W = s.width, H = Math.max(s.height * 0.45, bottom), all = { x: 0, y: 0, w: W, h: H };
+      const obs = rects.filter(r => r.x1 > 0 && r.x0 < W && r.y1 > 0 && r.y0 < H);
+      if (!obs.length) return all;
+      const cuts = (lo, hi, k0, k1) => [...new Set([lo, hi, ...obs.flatMap(r => [r[k0], r[k1]]).filter(x => x > lo && x < hi)])].sort((a, b) => a - b);
+      const xs = cuts(0, W, 'x0', 'x1'), ys = cuts(0, H, 'y0', 'y1');
+      let best = null;
+      for (let i = 0; i < xs.length; i++) for (let j = i + 1; j < xs.length; j++) {
+        if (xs[j] - xs[i] < 320) continue;
+        for (let p = 0; p < ys.length; p++) for (let q = p + 1; q < ys.length; q++) {
+          const A = { x: xs[i], y: ys[p], w: xs[j] - xs[i], h: ys[q] - ys[p] };
+          if (A.h < 200 || obs.some(r => r.x0 < A.x + A.w && r.x1 > A.x && r.y0 < A.y + A.h && r.y1 > A.y)) continue;
+          if (!best || A.w * A.h > best.w * best.h) best = A;
+        }
+      }
+      return best || all;
+    }
+    let area = null;
+    function fit() {
+      needFit = false;
+      const A = freeRect();
+      area = A;
+      Object.assign(scroll.style, { left: `${A.x}px`, top: `${A.y}px`, width: `${A.w}px`, height: `${A.h}px` });
+      const pad = 12, W = Math.max(200, A.w - 2 * pad), Hh = Math.max(120, A.h - 2 * pad);
+      const fits = s => {
+        content.style.width = `${Math.floor(W / s)}px`;
+        return content.offsetHeight * s <= Hh && content.scrollWidth * s <= W + 1;
+      };
+      let pick = SCALES[SCALES.length - 1], hPick = 0, over = 0;
+      for (let k = 0; k < SCALES.length; k++) {
+        if (fits(SCALES[k])) { pick = SCALES[k]; over = SCALES[k - 1] || 0; break; }
+      }
+      // then as large as fits between that step and the one above it (text is what reads)
+      for (let k = 0; over && k < 4; k++) {
+        const mid = (pick + over) / 2;
+        if (fits(mid)) pick = mid; else over = mid;
+      }
+      content.style.width = `${Math.floor(W / pick)}px`;
+      hPick = content.offsetHeight;
+      scale = pick;
+      content.style.transform = `scale(${pick})`;
+      sizer.style.width = `${Math.round(W)}px`;
+      sizer.style.height = `${Math.ceil(hPick * pick)}px`;
+      sizer.style.marginTop = `${Math.max(0, Math.round((Hh - hPick * pick) / 2))}px`;
+      nudgeCards();
+    }
+    let nudgeT = 0;
+    function nudgeCards() {   // the inspector re-places its cards on wheel input (as view3d.js does)
+      const t = performance.now();
+      if (t - nudgeT < 300) return;
+      nudgeT = t;
+      requestAnimationFrame(() => root.dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: 0 })));
+    }
+    // The bar runs along the bottom, between the floating panels that reach down there (a Train
+    // panel on the right ends it early), and above the lens bar when that one is under it.
+    function placeBar() {
+      bar.style.bottom = bar.style.left = bar.style.right = '';
+      const s = stage.getBoundingClientRect(), band = s.bottom - bar.offsetHeight - 70;
+      let L = 10, R = 10;
+      for (const c of stage.children) {
+        if (c === root || c.hidden || c.tagName?.toLowerCase() === 'svg' || ['nn-insp-layer', 'nn-tour', 'nn-lens', 'nn3d'].some(k => c.classList.contains(k))) continue;
+        const r = c.getBoundingClientRect();
+        if (!r.width || !r.height || r.bottom < band || r.width > 0.8 * s.width || getComputedStyle(c).display === 'none') continue;
+        if ((r.left + r.right) / 2 > s.left + s.width / 2) R = Math.max(R, Math.round(s.right - r.left + 8));
+        else L = Math.max(L, Math.round(r.right - s.left + 8));
+      }
+      if (s.width - L - R >= 280) { bar.style.left = `${L}px`; bar.style.right = `${R}px`; }
+      const lens = stage.querySelector(':scope > .nn-lens');
+      if (!lens || lens.hidden || !lens.offsetWidth || getComputedStyle(lens).display === 'none') return;
+      const a = bar.getBoundingClientRect(), b = lens.getBoundingClientRect();
+      if (a.left < b.right + 8 && b.left < a.right && a.top < b.bottom && b.top < a.bottom) {
+        bar.style.bottom = `${Math.round(root.getBoundingClientRect().bottom - b.top + 8)}px`;
+      }
+    }
+
+    // ---------------------------------------------------------------- ctx.view while on
+    const orig = ctx.view ? { nodeRect: ctx.view.nodeRect, contentRect: ctx.view.contentRect, fit: ctx.view.fit } : null;
+    if (ctx.view) {
+      ctx.view.nodeRect = id => {
+        const c = F?.nodeCell[id], el = c && cellEl(c[0], c[1], c[2]);
+        if (!el) return null;
+        const r = el.getBoundingClientRect(), s = stage.getBoundingClientRect();
+        return { x: r.left - s.left, y: r.top - s.top, w: r.width, h: r.height };
+      };
+      ctx.view.contentRect = () => {
+        const r = content.getBoundingClientRect(), s = stage.getBoundingClientRect();
+        return { x: r.left - s.left, y: r.top - s.top, w: r.width, h: r.height };
+      };
+      ctx.view.fit = ms => { try { orig.fit?.(ms); } catch { /* the 2D view */ } needFit = true; kick(); };
+    }
+
+    // ---------------------------------------------------------------- loop
+    function frame() {
+      raf = 0;
+      if (!alive || !visible) return;
+      if (!F || needPaint) compute();
+      if (needBuild) build();
+      if (needFit) { placeBar(); fit(); }
+      if (needPaint) paint();
+      if (needState) paintState();
+    }
+    const kick = () => { if (!raf && alive && visible) raf = requestAnimationFrame(frame); };
+    const areaObs = new ResizeObserver(() => { needFit = true; kick(); });
+    const watch = () => { areaObs.observe(stage); areaObs.observe(bar); for (const c of stage.children) if (c !== root) areaObs.observe(c); };
+    const mo = new MutationObserver(watch);
+    mo.observe(stage, { childList: true });
+    watch();
+    const onUp = () => requestAnimationFrame(() => {
+      const A = freeRect();
+      if (!area || ['x', 'y', 'w', 'h'].some(k => Math.abs(A[k] - area[k]) > 1)) { needFit = true; kick(); }
+    });
+    stage.addEventListener('pointerup', onUp, true);
+    kick();
+
+    function dispose() {
+      alive = false;
+      clearInterval(playTimer);
+      clearTimeout(enterT);
+      cancelAnimationFrame(raf);
+      areaObs.disconnect();
+      mo.disconnect();
+      stage.removeEventListener('pointerup', onUp, true);
+      if (myHover && JSON.stringify(store.state.hover) === JSON.stringify(myHover)) store.set('hover', null);
+      root.remove();
+      if (svg) svg.style.visibility = '';
+      if (ctx.view && orig) Object.assign(ctx.view, orig);
+      requestAnimationFrame(() => stage.dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: 0 })));
+    }
+
+    return {
+      apply(v) {
+        if (!v.play && playTimer) { clearInterval(playTimer); playTimer = 0; }
+        const offKey = JSON.stringify(v.off);
+        if (offKey !== this._off) { this._off = offKey; needPaint = true; }
+        if (v.nums !== this._nums) { this._nums = v.nums; needPaint = true; }
+        needState = true;
+        kick();
+      },
+      onNet(p) { if (p?.structural) { needFit = true; } needPaint = true; needState = true; kick(); },
+      invalidate(all) { if (all) for (const list of cells.values()) for (const c of list) { c.el._c = undefined; } needPaint = true; needState = true; kick(); },
+      restate() { needState = true; kick(); },
+      shown(on) { visible = on; if (on) { needFit = needPaint = needState = true; kick(); } },
+      step, play, head: headToggle, fit: () => { needFit = true; kick(); }, dispose,
+      info: () => ({
+        stages: F?.stages.map(s => s.key) || [], stage: cur()?.stage ?? null, scale, area,
+        tiles: F ? Object.keys(F.tiles).length : 0, why: F?.why ?? null, next: F?.next ?? null,
+      }),
+    };
+  }
+}

@@ -33,13 +33,23 @@ const MODE_TITLE = {
   mix: 'What comes out: z_i = Σ_j A_ij v_j, a weighted average of the values (M: next mode)',
   heat: 'The numbers: S and A as heatmaps, per head (M: next mode)',
 };
+// How to read each picture: the help icon's title (the drawing keeps only notes about the state).
+const MODE_HELP = {
+  arcs: 'Arcs: who reads whom. A line from query i to key j, as thick as A_ij, one colour per head. Hover a token to see its lines alone with their weights; click it to follow it.',
+  dots: 'Dots: why. Each score s_j is the dot product q · k_j times the scale, and softmax turns the scores into the row of A. A key\'s score is |q| times the length of its shadow on q\'s line (with one dimension, q times k). The scale sharpens A (larger) or flattens it (smaller).',
+  mix: 'Mix: what comes out. z_i = Σ_j A_ij v_j, the values scaled by A and laid tip to tail. A\'s row sums to 1, so z lies in the shaded hull of the values. Send to 3D rebuilds it in the 3D tab, with a slider per weight.',
+  heat: 'Heat: the numbers. S and A for each head. Rows are queries, columns are keys. Hover a cell for what it means; click a row to follow that query.',
+};
+const HELP_COMMON = 'The chips pick the query (and the head); double-click a query chip to rename its token. Drag the header to move the panel, double-click it to put it back. A: open / close, M: next mode.';
 const UI_KEY = 'mathboard.nn.attnviz';
 const W_DEFAULT = 400, W_MIN = 300;
 const SCALE_SPAN = 4;             // the scale slider covers default × 2^±SCALE_SPAN
 const NAME_MAX = 16;
 // Heads 1 to 3: the canvas's attention purple, then aqua and amber (checked for colour-blind
-// separation against both backgrounds). More heads than that are shown one at a time.
-const HEAD_COLORS = { dark: ['#b794ff', '#199e70', '#c98500'], light: ['#7442d6', '#1baf7a', '#eda100'] };
+// separation against both backgrounds). More heads than that are shown one at a time, each in its
+// own colour (--head-4 to --head-6), as in the matrix panel and the 3D view.
+const HEAD_VARS = ['--att', '--head-2', '--head-3', '--head-4', '--head-5', '--head-6'];
+const HEAD_COLORS = { dark: ['#b794ff', '#199e70', '#c98500'], light: ['#7442d6', '#1baf7a', '#eda100'] };   // if the tokens can't be read
 const SUBS = '₀₁₂₃₄₅₆₇₈₉';
 
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
@@ -52,6 +62,10 @@ const texEsc = s => String(s).replace(/[\\{}$&#^_%~]/g, c => ({
   '\\': '\\textbackslash{}', '^': '\\textasciicircum{}', '~': '\\textasciitilde{}',
 }[c] || `\\${c}`));
 const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+const icon = (name, fallback = '') => window.mathboardIcons?.svg(name) || fallback;
+// A heatmap cell's fill: colorFor with its alpha capped (as the matrix panel's cells), so the number
+// on it can always be text-1.
+const cellFill = (v, max, th) => colorFor(v, max, th).replace(/,\s*([\d.]+)\)$/, (m, a) => `,${Math.min(0.72, +a).toFixed(3)})`);
 
 // A token's stored name, read by focus.js as the canvas and the matrix panel read it (a slot holding
 // its own default, 't2' for token 2, counts as unnamed); null when it has none.
@@ -87,7 +101,7 @@ function hull(pts) {
 let measureCtx = null;
 function textW(s, px = 12, weight = '') {
   if (!measureCtx) measureCtx = document.createElement('canvas').getContext('2d');
-  measureCtx.font = `${weight} ${px}px system-ui, "Segoe UI", sans-serif`;
+  measureCtx.font = `${weight} ${px}px "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif`;   // --font-ui
   return measureCtx.measureText(String(s)).width;
 }
 function fitText(s, px, maxW, weight = '') {
@@ -109,7 +123,7 @@ function arrow(x1, y1, x2, y2, { color, w = 2, op = 1, dash = false, head = 8, a
     + `<polygon points="${f1(x2)},${f1(y2)} ${f1(bx - uy * hw)},${f1(by + ux * hw)} ${f1(bx + uy * hw)},${f1(by - ux * hw)}" style="fill:${color};opacity:${op.toFixed(3)}"/></g>`;
 }
 // A label next to a tip, pushed outward along the direction it points.
-function tipLabel(x, y, dx, dy, main, subText, color = 'var(--ui-fg)', extra = '') {
+function tipLabel(x, y, dx, dy, main, subText, color = 'var(--text-1)', extra = '') {
   const L = Math.hypot(dx, dy) || 1, ox = dx / L, oy = dy / L;
   const lx = x + ox * 13, ly = y + oy * 13;
   const anchor = ox > 0.35 ? 'start' : ox < -0.35 ? 'end' : 'middle';
@@ -143,11 +157,13 @@ function placer(bx0, by0, bw, bh) {
     },
   };
 }
-// A vector's label (italic symbol, upright subscript) at a free spot next to its tip.
-function vecLabel(P, x, y, dx, dy, main, subText, color = 'var(--ui-fg)', extra = '') {
+// A vector's label (italic symbol, upright subscript) at a free spot next to its tip. strict: ''
+// when no spot is free (the caller then tries a shorter label).
+function vecLabel(P, x, y, dx, dy, main, subText, color = 'var(--text-1)', extra = '', strict = false) {
   if (!Math.hypot(dx, dy)) { dx = 1; dy = -1; }
-  const w = textW(main, 14, 'italic 600') + (subText ? textW(subText, 10.5, '500') + 1 : 0) + 2, h = 19;
-  const b = P.spot(x, y, w, h, dx, dy, { r: 7 });
+  const w = textW(main, 14, 'italic 600') + (subText ? textW(subText, 11, '500') + 1 : 0) + 4, h = 19;
+  const b = P.spot(x, y, w, h, dx, dy, { r: 7, strict });
+  if (!b) return '';
   return `<text class="na-tl" x="${f1(b.x + 1)}" y="${f1(b.y + 13)}" style="fill:${color}" ${extra}>${esc(main)}`
     + `${subText ? `<tspan class="na-sub" dy="4">${esc(subText)}</tspan>` : ''}</text>`;
 }
@@ -172,16 +188,16 @@ function axes(F, labels = ['', ''], P = null) {
   const [x0, y0, w, h] = F.box, [xa, xb, ya, yb] = F.range;
   const raw = Math.max(xb - xa, yb - ya) / 6, mag = 10 ** Math.floor(Math.log10(raw));
   const step = [1, 2, 5, 10].map(k => k * mag).find(s => s >= raw) || raw;
-  let s = `<rect x="${f1(x0)}" y="${f1(y0)}" width="${f1(w)}" height="${f1(h)}" class="na-plotbg"/>`;
+  let s = `<rect x="${f1(x0)}" y="${f1(y0)}" width="${f1(w)}" height="${f1(h)}" rx="8" class="na-plotbg"/>`;
   const X0 = Math.max(x0, Math.min(x0 + w, F.X(0))), Y0 = Math.max(y0, Math.min(y0 + h, F.Y(0)));
   for (let v = Math.ceil(xa / step) * step; v <= xb; v += step) {
     const px = F.X(v);
     if (px < x0 || px > x0 + w) continue;
     s += `<line x1="${f1(px)}" y1="${f1(y0)}" x2="${f1(px)}" y2="${f1(y0 + h)}" class="na-grid"/>`;
     if (Math.abs(v) > step / 2) {
-      const t = r3(v).replace('-', '−'), ty = Math.min(y0 + h - 3, Y0 + 12), tw = textW(t, 9.5);
+      const t = r3(v).replace('-', '−'), ty = Math.min(y0 + h - 4, Y0 + 14), tw = textW(t, 11);
       s += `<text class="na-tick" x="${f1(px)}" y="${f1(ty)}" text-anchor="middle">${esc(t)}</text>`;
-      P?.block(px - tw / 2 - 1, ty - 9, tw + 2, 11);
+      P?.block(px - tw / 2 - 1, ty - 10, tw + 2, 13);
     }
   }
   for (let v = Math.ceil(ya / step) * step; v <= yb; v += step) {
@@ -189,21 +205,21 @@ function axes(F, labels = ['', ''], P = null) {
     if (py < y0 || py > y0 + h) continue;
     s += `<line x1="${f1(x0)}" y1="${f1(py)}" x2="${f1(x0 + w)}" y2="${f1(py)}" class="na-grid"/>`;
     if (Math.abs(v) > step / 2) {
-      const t = r3(v).replace('-', '−'), tx = Math.max(x0 + 3, X0 - 4), tw = textW(t, 9.5);
-      s += `<text class="na-tick" x="${f1(tx)}" y="${f1(py + 3.5)}" text-anchor="end">${esc(t)}</text>`;
-      P?.block(tx - tw - 1, py - 6, tw + 2, 11);
+      const t = r3(v).replace('-', '−'), tw = textW(t, 11), tx = Math.max(x0 + 5 + tw, X0 - 5);
+      s += `<text class="na-tick" x="${f1(tx)}" y="${f1(py + 4)}" text-anchor="end">${esc(t)}</text>`;
+      P?.block(tx - tw - 1, py - 7, tw + 2, 13);
     }
   }
   s += `<line x1="${f1(x0)}" y1="${f1(Y0)}" x2="${f1(x0 + w)}" y2="${f1(Y0)}" class="na-axis"/>`
     + `<line x1="${f1(X0)}" y1="${f1(y0)}" x2="${f1(X0)}" y2="${f1(y0 + h)}" class="na-axis"/>`;
   if (labels[0]) {
-    s += `<text class="na-axlab" x="${f1(x0 + w - 4)}" y="${f1(Y0 - 5)}" text-anchor="end">${esc(labels[0])}</text>`;
-    const tw = textW(labels[0], 10);
-    P?.block(x0 + w - 5 - tw, Y0 - 15, tw + 2, 12);
+    const tw = textW(labels[0], 11);
+    s += `<text class="na-axlab" x="${f1(x0 + w - 6)}" y="${f1(Y0 - 6)}" text-anchor="end">${esc(labels[0])}</text>`;
+    P?.block(x0 + w - 7 - tw, Y0 - 17, tw + 2, 13);
   }
   if (labels[1]) {
-    s += `<text class="na-axlab" x="${f1(X0 + 5)}" y="${f1(y0 + 12)}">${esc(labels[1])}</text>`;
-    P?.block(X0 + 4, y0 + 2, textW(labels[1], 10) + 2, 12);
+    s += `<text class="na-axlab" x="${f1(X0 + 6)}" y="${f1(y0 + 15)}">${esc(labels[1])}</text>`;
+    P?.block(X0 + 5, y0 + 4, textW(labels[1], 11) + 2, 13);
   }
   return s;
 }
@@ -241,25 +257,28 @@ export function install(ctx) {
 
   // ---- DOM
   const panel = document.createElement('div');
-  panel.className = 'nn-attnviz' + (ro ? ' ro' : '');
+  panel.className = 'nn-attnviz ui-float' + (ro ? ' ro' : '');
   panel.hidden = true;
   panel.innerHTML = `
-    <header class="na-head">
-      <b class="na-title" title="Drag to move; double-click to put it back">Attention</b>
-      <div class="na-modes">${MODES.map(m => `<button type="button" data-mode="${m}" title="${esc(MODE_TITLE[m])}">${MODE_LABEL[m]}</button>`).join('')}</div>
-      <select class="na-layer" title="Which attention layer" hidden></select>
-      <span class="na-flex"></span>
-      <button type="button" class="na-close" data-act="close" title="Close (A)">&times;</button>
+    <header class="na-head ui-float-head drag">
+      <b class="na-title ui-float-title" title="Drag to move; double-click to put it back">Attention</b>
+      <div class="na-modes ui-seg sm">${MODES.map(m => `<button type="button" data-mode="${m}" title="${esc(MODE_TITLE[m])}">${MODE_LABEL[m]}</button>`).join('')}</div>
+      <select class="na-layer ui-field sm" title="Which attention layer" hidden></select>
+      <span class="na-flex ui-float-sp"></span>
+      <button type="button" class="na-help ui-help ui-btn sm icon ui-chrome" tabindex="-1" aria-label="How to read it">${icon('help', '?')}</button>
+      <button type="button" class="na-close ui-btn sm icon" data-act="close" title="Close (A)" aria-label="Close">${icon('close', '&times;')}</button>
     </header>
     <div class="na-picks"></div>
     <div class="na-stage"><svg class="na-svg" xmlns="http://www.w3.org/2000/svg"></svg><div class="na-msg" hidden></div></div>
     <div class="na-ctl"></div>
     <div class="na-cap"></div>
-    <div class="na-grip" title="Drag to resize"></div>`;
+    <div class="na-tip ui-tip" hidden></div>
+    <div class="na-grip ui-grip" title="Drag to resize"></div>`;
   stage.appendChild(panel);
   const $ = s => panel.querySelector(s);
   const head = $('.na-head'), picks = $('.na-picks'), svgWrap = $('.na-stage'), svg = $('.na-svg');
   const msg = $('.na-msg'), ctl = $('.na-ctl'), cap = $('.na-cap'), layerSel = $('.na-layer'), grip = $('.na-grip');
+  const helpBtn = $('.na-help'), tip = $('.na-tip');
   for (const type of ['pointerdown', 'mousedown', 'click', 'dblclick', 'wheel', 'contextmenu', 'touchstart']) {
     panel.addEventListener(type, e => e.stopPropagation(), { passive: type === 'wheel' || type === 'touchstart' });
   }
@@ -311,7 +330,7 @@ export function install(ctx) {
   // Colours for SVG styles: CSS variables where the stylesheet can resolve them, computed values
   // where the colour depends on a number (heatmap cells).
   const theme = () => (ctx.theme ? ctx.theme() : document.documentElement.dataset.theme === 'light' ? 'light' : 'dark');
-  const headColor = h => (h < 3 ? `var(--na-h${h})` : 'var(--na-h0)');
+  const headColor = h => `var(${HEAD_VARS[h % HEAD_VARS.length]})`;
   const HIc = 'var(--na-hi)';
 
   // ---- hover: the panel's own pointer, else a token hover from the canvas / matrix panel
@@ -340,25 +359,26 @@ export function install(ctx) {
     // what the lens hides (masked pairs, A below minA, attention edges off) and dims, as on the canvas
     const E = emphasis(net, D.fwd, D.lens);
     const heads = D.h != null ? [D.h] : H <= 3 ? [...Array(H).keys()] : [0];
-    const pad = 8, top = 30;
-    const bw = clamp(W * 0.24, 62, 124), bh = 26;
-    const rh = clamp(Math.floor(300 / n), 34, 52);
-    const Hpx = top + n * rh + 6;
+    const pad = 1, top = 24;
+    const bw = clamp(W * 0.22, 62, 120), bh = 28;
+    const rh = clamp(Math.floor(300 / n), 36, 52);
+    const Hpx = top + n * rh + 4;
     const rowY = t => top + t * rh + rh / 2;
     const xL = pad + bw, xR = W - pad - bw;
     const iso = D.iso && (D.iso.side === 'q' || D.iso.side === 'k' || D.iso.side === 'v') ? { side: D.iso.side === 'q' ? 'q' : 'k', t: D.iso.t } : null;
     const focusRow = iso ? null : D.q;
-    let s = `<text class="na-colhd" x="${f1(pad + bw / 2)}" y="16" text-anchor="middle">query i</text>`
-      + `<text class="na-colhd" x="${f1(W - pad - bw / 2)}" y="16" text-anchor="middle">key j</text>`;
+    let s = `<text class="na-colhd" x="${f1(pad + bw / 2)}" y="12" text-anchor="middle">query i</text>`
+      + `<text class="na-colhd" x="${f1(W - pad - bw / 2)}" y="12" text-anchor="middle">key j</text>`;
     if (heads.length > 1) {
       heads.forEach((hh, k) => {
-        const x = W / 2 + (k - (heads.length - 1) / 2) * 62;
-        s += `<line x1="${f1(x - 26)}" y1="12" x2="${f1(x - 12)}" y2="12" style="stroke:${headColor(hh)};stroke-width:4;stroke-linecap:round"/>`
-          + `<text class="na-leg" x="${f1(x - 8)}" y="16">head ${hh + 1}</text>`;
+        const x = W / 2 + (k - (heads.length - 1) / 2) * 60;
+        s += `<line x1="${f1(x - 25)}" y1="8" x2="${f1(x - 13)}" y2="8" style="stroke:${headColor(hh)};stroke-width:3;stroke-linecap:round"/>`
+          + `<text class="na-leg" x="${f1(x - 8)}" y="12">head ${hh + 1}</text>`;
       });
     }
-    const geomLines = [];
-    let lines = '', nums = '';
+    // a ribbon per pair: it leaves the query box and reaches the key box level, so it reads as a flow
+    const geomLines = [], arcs = [];
+    const x1 = xL + 2, x2 = xR - 2, bend = (x2 - x1) * 0.42;
     heads.forEach((hh, k) => {
       const A = at.heads[hh].A, S = at.heads[hh].S, off = (k - (heads.length - 1) / 2) * 3.2;
       for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
@@ -369,10 +389,13 @@ export function install(ctx) {
         if (!iso && E.any && E.attn(l, i, j, hh) < 1) op *= 0.13;
         const w = 0.7 + 7.5 * a;
         const y1 = rowY(i) + off, y2 = rowY(j) + off;
-        lines += `<line class="na-arc" x1="${f1(xL)}" y1="${f1(y1)}" x2="${f1(xR)}" y2="${f1(y2)}" data-i="${i}" data-j="${j}" data-h="${hh}" style="stroke:${headColor(hh)};stroke-width:${f1(w)};opacity:${op.toFixed(3)}"/>`;
+        arcs.push({ a, svg: `<path class="na-arc" d="M${f1(x1)} ${f1(y1)}C${f1(x1 + bend)} ${f1(y1)} ${f1(x2 - bend)} ${f1(y2)} ${f1(x2)} ${f1(y2)}" data-i="${i}" data-j="${j}" data-h="${hh}" style="stroke:${headColor(hh)};stroke-width:${f1(w)};opacity:${op.toFixed(3)}"/>` });
         geomLines.push({ i, j, h: hh, a, w, op });
       }
     });
+    // the strongest pairs on top
+    const lines = arcs.sort((p, q) => p.a - q.a).map(p => p.svg).join('');
+    let nums = '';
     // numbers at the far end of the isolated (or followed) row, or of the isolated column
     const lab = iso || (focusRow != null ? { side: 'q', t: focusRow } : null);
     if (lab) {
@@ -382,8 +405,8 @@ export function install(ctx) {
           const [i, j] = lab.side === 'q' ? [lab.t, o] : [o, lab.t];
           if (!Number.isFinite(S[i]?.[j])) continue;
           const y = rowY(o) + dy + 4;
-          const x = lab.side === 'q' ? xR - 6 : xL + 6, anchor = lab.side === 'q' ? 'end' : 'start';
-          const dot = heads.length > 1 ? `<circle cx="${f1(lab.side === 'q' ? x - textW(fmt(A[i][j]), 11) - 7 : x + 3)}" cy="${f1(y - 4)}" r="3" style="fill:${headColor(hh)}"/>` : '';
+          const x = lab.side === 'q' ? xR - 8 : xL + 8, anchor = lab.side === 'q' ? 'end' : 'start';
+          const dot = heads.length > 1 ? `<circle cx="${f1(lab.side === 'q' ? x - textW(fmt(A[i][j]), 11, '500') - 7 : x + 3)}" cy="${f1(y - 4)}" r="3" style="fill:${headColor(hh)};stroke:var(--float);stroke-width:2;paint-order:stroke"/>` : '';
           const tx = heads.length > 1 && lab.side === 'k' ? x + 10 : x;
           nums += `${dot}<text class="na-anum" x="${f1(tx)}" y="${f1(y)}" text-anchor="${anchor}">${esc(fmt(A[i][j]))}</text>`;
         }
@@ -394,9 +417,9 @@ export function install(ctx) {
       for (let t = 0; t < n; t++) {
         const cx = side === 'q' ? pad + bw / 2 : W - pad - bw / 2, y = rowY(t);
         const on = side === 'q' && t === D.q, hot = iso && iso.side === side && iso.t === t;
-        const name = fitText(plainName(net, t), 12.5, bw - 12);
+        const name = fitText(plainName(net, t), 12.5, bw - 14, '500');
         boxes += `<g class="na-tok${on ? ' on' : ''}${hot ? ' hot' : ''}" data-side="${side}" data-t="${t}">`
-          + `<rect x="${f1(cx - bw / 2)}" y="${f1(y - bh / 2)}" width="${f1(bw)}" height="${bh}" rx="7"/>`
+          + `<rect x="${f1(cx - bw / 2)}" y="${f1(y - bh / 2)}" width="${f1(bw)}" height="${bh}" rx="8"/>`
           + `<text x="${f1(cx)}" y="${f1(y + 4.5)}" text-anchor="middle">${esc(name)}</text></g>`;
       }
     }
@@ -409,11 +432,11 @@ export function install(ctx) {
       capTex += `,\\quad A_{${texName(net, row)},\\,\\cdot} = (${A[row].map(v => fmt(v).replace('−', '-')).join(',\\ ')})`;
     }
     const lz = E.lens;
-    const info = !lz.show.attention ? 'attention edges are hidden by the lens (Edges: attention)'
-      : ro ? (lz.minA > 0 ? `lines with A below ${fmt(lz.minA)} are hidden` : '')
-        : iso ? (iso.side === 'q' ? `${plainName(net, iso.t)} as a query: where it looks` : `${plainName(net, iso.t)} as a key: who looks at it`)
-          : `hover a token to see its lines alone; click it to follow it${lz.minA > 0 ? ` (A below ${fmt(lz.minA)} hidden)` : ''}`;
-    return { svg: s, h: Hpx, cap: capTex, info, geom: { mode: 'arcs', lines: geomLines, heads, rowY: [...Array(n).keys()].map(rowY), xL, xR } };
+    // how to read it is behind the help icon; the note says what the lens hides, or what a hover shows
+    const info = !lz.show.attention ? 'Attention edges are hidden by the lens (Edges: attention).'
+      : iso && !ro ? (iso.side === 'q' ? `${plainName(net, iso.t)} as a query: where it looks.` : `${plainName(net, iso.t)} as a key: who looks at it.`)
+        : lz.minA > 0 ? `Lines with A below ${fmt(lz.minA)} are hidden.` : '';
+    return { svg: s, h: Hpx, cap: capTex, info, reserve: !ro, geom: { mode: 'arcs', lines: geomLines, heads, rowY: [...Array(n).keys()].map(rowY), xL, xR } };
   }
 
   // The plane (or number line) a head's d_h dimensions are shown in.
@@ -454,19 +477,19 @@ export function install(ctx) {
       const vals = [0, Q[i][0], ...K.map(k => k[0])];
       const lo = Math.min(...vals), hi = Math.max(...vals), padv = (hi - lo || 1) * 0.12;
       const x0 = 46, x1 = PW - 14, X = v => x0 + (v - (lo - padv)) / ((hi + padv) - (lo - padv)) * (x1 - x0);
-      s += `<rect x="${f1(x0)}" y="${f1(y0 - 12)}" width="${f1(x1 - x0)}" height="${f1((n + 1) * LH + 6)}" class="na-plotbg"/>`;
+      s += `<rect x="${f1(x0)}" y="${f1(y0 - 12)}" width="${f1(x1 - x0)}" height="${f1((n + 1) * LH + 6)}" rx="8" class="na-plotbg"/>`;
       s += `<line x1="${f1(X(0))}" y1="${f1(y0 - 12)}" x2="${f1(X(0))}" y2="${f1(y0 + (n + 1) * LH - 6)}" class="na-axis"/>`;
-      s += `<text class="na-tick" x="${f1(X(0))}" y="${f1(y0 + (n + 1) * LH + 8)}" text-anchor="middle">0</text>`;
+      s += `<text class="na-tick" x="${f1(X(0))}" y="${f1(y0 + (n + 1) * LH + 9)}" text-anchor="middle">0</text>`;
       const lane = k => y0 + k * LH + 4;
       s += `<text class="na-lane" x="4" y="${f1(lane(0) + 4)}">q</text>`;
       s += arrow(X(0), lane(0), X(Q[i][0]), lane(0), { color: HIc, w: 3.2 });
-      s += tipLabel(X(Q[i][0]), lane(0), Q[i][0] >= 0 ? 1 : -1, 0, 'q', plainName(net, i), 'var(--ui-fg)');
+      s += tipLabel(X(Q[i][0]), lane(0), Q[i][0] >= 0 ? 1 : -1, 0, 'q', plainName(net, i), 'var(--text-1)');
       geom.q = [Q[i][0]];
       for (let j = 0; j < n; j++) {
         const y = lane(j + 1), m = masked(j), a = m ? 0 : A[i][j], v = K[j][0];
         s += `<text class="na-lane" x="4" y="${f1(y + 4)}">${esc(fitText(plainName(net, j), 11, 40))}</text>`;
-        s += arrow(X(0), y, X(v), y, { color: m ? 'var(--ui-muted)' : col, w: 1.6 + 3 * a, op: m ? 0.45 : 0.35 + 0.65 * a, dash: m, attrs: `data-kj="${j}"` });
-        s += tipLabel(X(v), y, v >= 0 ? 1 : -1, 0, 'k', plainName(net, j), m ? 'var(--ui-muted)' : 'var(--ui-fg)');
+        s += arrow(X(0), y, X(v), y, { color: m ? 'var(--text-4)' : col, w: 1.6 + 3 * a, op: m ? 0.8 : 0.35 + 0.65 * a, dash: m, attrs: `data-kj="${j}"` });
+        s += tipLabel(X(v), y, v >= 0 ? 1 : -1, 0, 'k', plainName(net, j), m ? 'var(--text-3)' : 'var(--text-1)');
         geom.keys.push({ j, k: [v], px: [X(v), y], masked: m, s: S[i][j], a: A[i][j], dot: dot(j) });
       }
       geom.x0 = X(0); geom.unit = X(1) - X(0);
@@ -476,8 +499,8 @@ export function install(ctx) {
       const P = v => [v[d0], v[d1]];
       const q = P(Q[i]), ks = K.map(P);
       plotH = Math.round(clamp(wide ? W * 0.5 : W * 0.72, 190, 380));
-      const F = frame([q, ...ks], 4, 4, PW - 8, plotH - 8);
-      const LP = placer(4, 4, PW - 8, plotH - 8);
+      const F = frame([q, ...ks], 0, 0, PW, plotH - 4);
+      const LP = placer(0, 0, PW, plotH - 4);
       s += axes(F, [dimName(dh, d0), dimName(dh, d1)], LP);
       const qq = Math.hypot(q[0], q[1]);
       // the line through q: each key's score is |q| times the length of its shadow on this line
@@ -487,55 +510,68 @@ export function install(ctx) {
         ks.forEach((k, j) => {
           const t = k[0] * ux + k[1] * uy, fx = t * ux, fy = t * uy;
           s += `<line class="na-perp" x1="${f1(F.X(k[0]))}" y1="${f1(F.Y(k[1]))}" x2="${f1(F.X(fx))}" y2="${f1(F.Y(fy))}"/>`
-            + `<circle cx="${f1(F.X(fx))}" cy="${f1(F.Y(fy))}" r="3.2" style="fill:${masked(j) ? 'var(--ui-muted)' : col}"/>`;
+            + `<circle cx="${f1(F.X(fx))}" cy="${f1(F.Y(fy))}" r="3" style="fill:${masked(j) ? 'var(--text-4)' : col}"/>`;
         });
       }
       s = `<g clip-path="url(#na-clip)">${s}</g>`;
       // q first, under the keys, so a key along q's direction stays visible on top of it
       const Ox = F.X(0), Oy = F.Y(0), qx = F.X(q[0]), qy = F.Y(q[1]);
       s += arrow(Ox, Oy, qx, qy, { color: HIc, w: 3.6 });
-      let labs = qq > 1e-9 ? vecLabel(LP, qx, qy, qx - Ox, qy - Oy, 'q', plainName(net, i), 'var(--ui-fg)')
-        : `<text class="na-tl" x="${f1(Ox + 8)}" y="${f1(Oy - 8)}" style="fill:var(--ui-fg)">q = 0</text>`;
+      // labels keep off q's whole arrow and every arrowhead; the masked keys' come last and drop
+      // "(masked)" when it doesn't fit (the table says it too)
+      const keepOff = (x1, y1, x2, y2, from = 0) => {
+        const L = Math.hypot(x2 - x1, y2 - y1), n = Math.max(1, Math.ceil(L / 8));
+        for (let t = 0; t <= n; t++) if (L * t / n >= from) LP.block(x1 + (x2 - x1) * t / n - 4, y1 + (y2 - y1) * t / n - 4, 8, 8);
+      };
+      if (qq > 1e-9) keepOff(Ox, Oy, qx, qy);
+      const kp = ks.map(k => [F.X(k[0]), F.Y(k[1])]);
+      kp.forEach(([x2, y2]) => keepOff(Ox, Oy, x2, y2, Math.max(0, Math.hypot(x2 - Ox, y2 - Oy) - 14)));
+      let labs = qq > 1e-9 ? vecLabel(LP, qx, qy, qx - Ox, qy - Oy, 'q', plainName(net, i), 'var(--text-1)')
+        : `<text class="na-tl" x="${f1(Ox + 8)}" y="${f1(Oy - 8)}" style="fill:var(--text-1)">q = 0</text>`;
       ks.forEach((k, j) => {
         const m = masked(j), a = m ? 0 : A[i][j];
-        const x2 = F.X(k[0]), y2 = F.Y(k[1]);
-        s += arrow(Ox, Oy, x2, y2, { color: m ? 'var(--ui-muted)' : col, w: 1.6 + 3 * a, op: m ? 0.5 : 0.35 + 0.65 * a, dash: m, attrs: `data-kj="${j}"` });
-        labs += vecLabel(LP, x2, y2, x2 - Ox, y2 - Oy, 'k', plainName(net, j) + (m ? ' (masked)' : ''), m ? 'var(--ui-muted)' : 'var(--ui-fg)');
+        const [x2, y2] = kp[j];
+        s += arrow(Ox, Oy, x2, y2, { color: m ? 'var(--text-4)' : col, w: 1.6 + 3 * a, op: m ? 0.8 : 0.35 + 0.65 * a, dash: m, attrs: `data-kj="${j}"` });
+        if (!m) labs += vecLabel(LP, x2, y2, x2 - Ox, y2 - Oy, 'k', plainName(net, j), 'var(--text-1)');
         geom.keys.push({ j, k, px: [x2, y2], masked: m, s: S[i][j], a: A[i][j], dot: dot(j) });
       });
+      ks.forEach((k, j) => {
+        if (!masked(j)) return;
+        const [x2, y2] = kp[j], lab = (sub, strict) => vecLabel(LP, x2, y2, x2 - Ox, y2 - Oy, 'k', sub, 'var(--text-3)', '', strict);
+        labs += lab(`${plainName(net, j)} (masked)`, true) || lab(plainName(net, j), false);
+      });
       s += labs;
-      s = `<defs><clipPath id="na-clip"><rect x="4" y="4" width="${f1(PW - 8)}" height="${f1(plotH - 8)}"/></clipPath></defs>${s}`;
+      s = `<defs><clipPath id="na-clip"><rect x="0" y="0" width="${f1(PW)}" height="${f1(plotH - 4)}" rx="8"/></clipPath></defs>${s}`;
       geom.q = q; geom.o = [F.ox, F.oy]; geom.sc = F.sc;
     }
     // the scores and the softmax, one row per key
-    const ty0 = wide ? 8 : plotH + 8, rowH = 30;
-    const cName = tableX + 4, cDot = tableX + tableW * 0.3, cS = tableX + tableW * 0.52, cBar = tableX + tableW * 0.58, barW = tableW * 0.42 - 34;
-    s += `<text class="na-colhd" x="${f1(cName)}" y="${f1(ty0 + 10)}">key</text>`
-      + `<text class="na-colhd" x="${f1(cDot)}" y="${f1(ty0 + 10)}" text-anchor="end">q·k</text>`
-      + `<text class="na-colhd" x="${f1(cS)}" y="${f1(ty0 + 10)}" text-anchor="end">s</text>`
-      + `<text class="na-colhd" x="${f1(cBar)}" y="${f1(ty0 + 10)}">A = softmax(s)</text>`;
+    const ty0 = wide ? 4 : plotH + 10, rowH = 30;
+    const cName = tableX + 8, cDot = tableX + tableW * 0.3, cS = tableX + tableW * 0.5, cBar = tableX + tableW * 0.57, barW = tableW * 0.43 - 44;
+    s += `<text class="na-colhd" x="${f1(cName)}" y="${f1(ty0 + 11)}">key</text>`
+      + `<text class="na-colhd" x="${f1(cDot)}" y="${f1(ty0 + 11)}" text-anchor="end">q·k</text>`
+      + `<text class="na-colhd" x="${f1(cS)}" y="${f1(ty0 + 11)}" text-anchor="end">s</text>`
+      + `<text class="na-colhd" x="${f1(cBar)}" y="${f1(ty0 + 11)}">A = softmax(s)</text>`;
     for (let j = 0; j < n; j++) {
-      const y = ty0 + 22 + j * rowH, m = masked(j), a = m ? 0 : A[i][j];
+      const y = ty0 + 20 + j * rowH, m = masked(j), a = m ? 0 : A[i][j];
       s += `<g class="na-krow" data-side="k" data-t="${j}">`
-        + `<rect x="${f1(tableX)}" y="${f1(y - 3)}" width="${f1(tableW)}" height="${rowH - 4}" class="na-rowbg"/>`
-        + `<text class="na-kname" x="${f1(cName)}" y="${f1(y + 15)}">${esc(fitText(plainName(net, j), 12.5, cDot - cName - 44))}</text>`
-        + `<text class="na-num" x="${f1(cDot)}" y="${f1(y + 15)}" text-anchor="end">${m ? '' : esc(fmt(dot(j)))}</text>`
-        + `<text class="na-num na-strong" x="${f1(cS)}" y="${f1(y + 15)}" text-anchor="end">${m ? '−∞' : esc(fmt(S[i][j]))}</text>`
-        + `<rect x="${f1(cBar)}" y="${f1(y + 3)}" width="${f1(Math.max(0, barW))}" height="16" rx="3" class="na-bartrack"/>`
-        + (m ? `<text class="na-num na-muted" x="${f1(cBar + 6)}" y="${f1(y + 15)}">masked</text>`
-          : `<rect x="${f1(cBar)}" y="${f1(y + 3)}" width="${f1(Math.max(0, barW) * a)}" height="16" rx="3" style="fill:${col};opacity:0.85"/>`
-          + `<text class="na-num" x="${f1(cBar + Math.max(0, barW) + 4)}" y="${f1(y + 15)}">${esc(fmt(a))}</text>`)
+        + `<rect x="${f1(tableX)}" y="${f1(y)}" width="${f1(tableW)}" height="${rowH - 2}" rx="6" class="na-rowbg"/>`
+        + `<text class="na-kname" x="${f1(cName)}" y="${f1(y + 18.5)}">${esc(fitText(plainName(net, j), 12.5, cDot - cName - 44, '500'))}</text>`
+        + `<text class="na-num" x="${f1(cDot)}" y="${f1(y + 18.5)}" text-anchor="end">${m ? '' : esc(fmt(dot(j)))}</text>`
+        + `<text class="na-num na-strong" x="${f1(cS)}" y="${f1(y + 18.5)}" text-anchor="end">${m ? '−∞' : esc(fmt(S[i][j]))}</text>`
+        + `<rect x="${f1(cBar)}" y="${f1(y + 7)}" width="${f1(Math.max(0, barW))}" height="14" rx="4" class="na-bartrack"/>`
+        + (m ? `<text class="na-num na-muted" x="${f1(cBar + 8)}" y="${f1(y + 18.5)}">masked</text>`
+          : `<rect x="${f1(cBar)}" y="${f1(y + 7)}" width="${f1(Math.max(0, barW) * a)}" height="14" rx="4" style="fill:${col}"/>`
+          + `<text class="na-num na-strong" x="${f1(cBar + Math.max(0, barW) + 8)}" y="${f1(y + 18.5)}">${esc(fmt(a))}</text>`)
         + '</g>';
     }
-    const tableH = 22 + n * rowH + 4;
+    const tableH = 20 + n * rowH + 2;
     const Hpx = wide ? Math.max(plotH, tableH + 8) : plotH + 8 + tableH;
     const qTex = `q_{${texName(net, i)}}`;
     let capTex = `s_j = ${qTex}\\cdot k_j \\times ${scaleText(D)},\\quad A_{${texName(net, i)},j} = \\operatorname{softmax}_j(s)`;
+    // how to read it (the shadows, the one-dimensional case) is behind the help icon
     let info = '';
-    if (qn < 1e-9) info = 'q = 0: every score is 0, so the attention is spread evenly';
-    else if (dh > 2) info = `the plane of dims ${dims[0] + 1} and ${dims[1] + 1}; the scores use all ${dh}`;
-    else if (dh === 1) info = 'one dimension: the score is q times k, so the key farthest out on q\'s side wins';
-    else if (!ro) info = 'a key\'s score is |q| times the length of its shadow on q\'s line';
+    if (qn < 1e-9) info = 'q = 0: every score is 0, so the attention is spread evenly.';
+    else if (dh > 2) info = `The plane of dims ${dims[0] + 1} and ${dims[1] + 1}; the scores use all ${dh}.`;
     return { svg: s, h: Hpx, cap: capTex, info, geom };
   }
 
@@ -559,17 +595,18 @@ export function install(ctx) {
       const x0 = 46, x1 = W - 14, X = v => x0 + (v - (lo - padv)) / ((hi + padv) - (lo - padv)) * (x1 - x0);
       const lane = k => y0 + k * LH + 4;
       const vv = vis.map(j => V[j][0]);
+      s += `<rect x="${f1(x0)}" y="${f1(y0 - 12)}" width="${f1(x1 - x0)}" height="${f1((n + 1) * LH + CH + 2)}" rx="8" class="na-plotbg"/>`;
       if (vv.length) {
         const a = Math.min(...vv), b = Math.max(...vv);
         s += `<rect x="${f1(X(a))}" y="${f1(y0 - 10)}" width="${f1(Math.max(2, X(b) - X(a)))}" height="${f1((n + 1) * LH + CH)}" class="na-hull" style="fill:${col};stroke:${col}"/>`;
       }
       s += `<line x1="${f1(X(0))}" y1="${f1(y0 - 12)}" x2="${f1(X(0))}" y2="${f1(y0 + (n + 1) * LH + CH - 6)}" class="na-axis"/>`;
-      s += `<text class="na-tick" x="${f1(X(0))}" y="${f1(y0 + (n + 1) * LH + CH + 8)}" text-anchor="middle">0</text>`;
+      s += `<text class="na-tick" x="${f1(X(0))}" y="${f1(y0 + (n + 1) * LH + CH + 9)}" text-anchor="middle">0</text>`;
       for (let j = 0; j < n; j++) {
         const y = lane(j), m = !vis.includes(j), v = V[j][0];
         s += `<text class="na-lane" x="4" y="${f1(y + 4)}">${esc(fitText(plainName(net, j), 11, 40))}</text>`;
-        s += arrow(X(0), y, X(v), y, { color: 'var(--ui-muted)', w: 1.6, op: m ? 0.35 : 0.8, dash: m, attrs: `data-vj="${j}"` });
-        s += tipLabel(X(v), y, v >= 0 ? 1 : -1, 0, 'v', plainName(net, j), 'var(--ui-muted)');
+        s += arrow(X(0), y, X(v), y, { color: m ? 'var(--text-4)' : 'var(--text-3)', w: 1.6, op: m ? 0.8 : 0.9, dash: m, attrs: `data-vj="${j}"` });
+        s += tipLabel(X(v), y, v >= 0 ? 1 : -1, 0, 'v', plainName(net, j), 'var(--text-3)');
         geom.v.push({ j, v: [v], px: [X(v), y], masked: m });
       }
       const yc = lane(n) - LH / 2 + 10;
@@ -583,7 +620,7 @@ export function install(ctx) {
       const yz = yc + CH + LH / 2 - 6;
       s += `<text class="na-lane" x="4" y="${f1(yz + 4)}">z</text>`;
       s += arrow(X(0), yz, X(cur), yz, { color: HIc, w: 3.2 });
-      s += tipLabel(X(cur), yz, cur >= 0 ? 1 : -1, 0, 'z', plainName(net, i), 'var(--ui-fg)');
+      s += tipLabel(X(cur), yz, cur >= 0 ? 1 : -1, 0, 'z', plainName(net, i), 'var(--text-1)');
       geom.z = [cur]; geom.zNet = Z[i]; geom.x0 = X(0); geom.unit = X(1) - X(0);
     } else {
       const [d0, d1] = dimsFor(dh);
@@ -598,106 +635,116 @@ export function install(ctx) {
         cur = nx;
       }
       Hpx = Math.round(clamp(W * 0.72, 200, 400));
-      const F = frame([...vs, cur], 4, 4, W - 8, Hpx - 8);
-      const LP = placer(4, 4, W - 8, Hpx - 8);
+      const F = frame([...vs, cur], 0, 0, W, Hpx - 4);
+      const LP = placer(0, 0, W, Hpx - 4);
       s += axes(F, [dimName(dh, d0), dimName(dh, d1)], LP);
       const hp = hull(vis.map(j => vs[j]));
       if (hp.length >= 3) s += `<polygon class="na-hull" points="${hp.map(p => `${f1(F.X(p[0]))},${f1(F.Y(p[1]))}`).join(' ')}" style="fill:${col};stroke:${col}"/>`;
       else if (hp.length === 2) s += `<line class="na-hull2" x1="${f1(F.X(hp[0][0]))}" y1="${f1(F.Y(hp[0][1]))}" x2="${f1(F.X(hp[1][0]))}" y2="${f1(F.Y(hp[1][1]))}" style="stroke:${col}"/>`;
-      s = `<defs><clipPath id="na-clip"><rect x="4" y="4" width="${f1(W - 8)}" height="${f1(Hpx - 8)}"/></clipPath></defs><g clip-path="url(#na-clip)">${s}</g>`;
+      s = `<defs><clipPath id="na-clip"><rect x="0" y="0" width="${f1(W)}" height="${f1(Hpx - 4)}" rx="8"/></clipPath></defs><g clip-path="url(#na-clip)">${s}</g>`;
       const Ox = F.X(0), Oy = F.Y(0), zx = F.X(cur[0]), zy = F.Y(cur[1]);
       let labs = '';
       vs.forEach((v, j) => {
         const m = !vis.includes(j), x2 = F.X(v[0]), y2 = F.Y(v[1]);
-        s += arrow(Ox, Oy, x2, y2, { color: 'var(--ui-muted)', w: 1.5, op: m ? 0.35 : 0.75, dash: m, attrs: `data-vj="${j}"` });
-        s += `<circle cx="${f1(x2)}" cy="${f1(y2)}" r="3.4" class="na-vtip"/>`;
-        labs += vecLabel(LP, x2, y2, x2 - Ox, y2 - Oy, 'v', plainName(net, j) + (m ? ' (masked)' : ''), 'var(--ui-muted)');
+        s += arrow(Ox, Oy, x2, y2, { color: m ? 'var(--text-4)' : 'var(--text-3)', w: 1.5, op: m ? 0.8 : 0.85, dash: m, attrs: `data-vj="${j}"` });
+        s += `<circle cx="${f1(x2)}" cy="${f1(y2)}" r="3" class="na-vtip"/>`;
+        if (!m) labs += vecLabel(LP, x2, y2, x2 - Ox, y2 - Oy, 'v', plainName(net, j), 'var(--text-3)');
         geom.v.push({ j, v, px: [x2, y2], masked: m });
+      });
+      // the masked values' labels after z's and the weights', and without "(masked)" if it doesn't fit
+      const maskedLabs = () => vs.forEach((v, j) => {
+        if (vis.includes(j)) return;
+        const x2 = F.X(v[0]), y2 = F.Y(v[1]), lab = (sub, strict) => vecLabel(LP, x2, y2, x2 - Ox, y2 - Oy, 'v', sub, 'var(--text-3)', '', strict);
+        labs += lab(`${plainName(net, j)} (masked)`, true) || lab(plainName(net, j), false);
       });
       // the resultant z first, then the chain on top of it: both end at the same point
       s += arrow(Ox, Oy, zx, zy, { color: HIc, w: 4.2, op: 0.95 });
       // z's label goes across the resultant (a value may sit right at its tip)
-      labs += vecLabel(LP, zx, zy, (Oy - zy) || 0.5, (zx - Ox) || 1, 'z', plainName(net, i), 'var(--ui-fg)');
+      labs += vecLabel(LP, zx, zy, (Oy - zy) || 0.5, (zx - Ox) || 1, 'z', plainName(net, i), 'var(--text-1)');
       chain.forEach(c => {
         const ax = F.X(c.a[0]), ay = F.Y(c.a[1]), bx = F.X(c.b[0]), by = F.Y(c.b[1]);
         s += arrow(ax, ay, bx, by, { color: col, w: 2.4, op: 0.6 + 0.4 * c.w, head: 7 });
         const L = Math.hypot(bx - ax, by - ay);
         if (L > 26) {
-          const t = fmt(c.w), tw = textW(t, 11) + 4, mx = (ax + bx) / 2, my = (ay + by) / 2;
+          const t = fmt(c.w), tw = textW(t, 11, '500') + 4, mx = (ax + bx) / 2, my = (ay + by) / 2;
           const b = LP.spot(mx, my, tw, 14, -(by - ay) / L, (bx - ax) / L, { r: 5, strict: true });
           if (b) labs += `<text class="na-wlab" x="${f1(b.x + tw / 2)}" y="${f1(b.y + 11)}" text-anchor="middle">${esc(t)}</text>`;
         }
         geom.steps.push({ j: c.j, a: c.w, from: c.a, to: c.b, px: [[ax, ay], [bx, by]] });
       });
+      maskedLabs();
       s += labs;
       geom.z = cur; geom.zNet = P(Z[i]); geom.o = [F.ox, F.oy]; geom.sc = F.sc;
     }
     const terms = vis.map(j => `${fmt(A[i][j]).replace('−', '-')}\\,v_{${texName(net, j)}}`).join(' + ');
     const zt = (dh <= 3 ? Z[i] : dims.map(d => Z[i][d])).map(v => fmt(v).replace('−', '-')).join(',\\ ');
     const capTex = `z_{${texName(net, i)}} = ${terms || '0'} = (${zt})`;
-    let info = vis.length < n ? 'masked keys drop out; ' : '';
-    info += 'A\'s row sums to 1, so z lies in the shaded hull of the values';
-    if (dh > 2) info = `the plane of dims ${dims[0] + 1} and ${dims[1] + 1}; ` + info;
-    return { svg: s, h: Hpx, cap: capTex, info, geom };
+    // why z stays in the hull is behind the help icon; the note says what drops out and what is drawn
+    const notes = [];
+    if (dh > 2) notes.push(`The plane of dims ${dims[0] + 1} and ${dims[1] + 1}.`);
+    if (vis.length < n) notes.push('Masked keys drop out of the sum.');
+    return { svg: s, h: Hpx, cap: capTex, info: notes.join(' '), geom };
   }
 
   function drawHeat(D) {
     const { net, at, n, H, W } = D, th = theme();
     const heads = D.h != null ? [D.h] : [...Array(H).keys()];
     const names = [...Array(n).keys()].map(t => plainName(net, t));
-    const RL = clamp(Math.max(...names.map(s => textW(s, 12))) + 12, 26, 96);
+    const RL = clamp(Math.max(...names.map(s => textW(s, 11))) + 10, 24, 96);
     const gap = 16;
-    const c = Math.floor(clamp((W - RL - gap - 6) / (2 * n), 18, 80));
-    const numPx = clamp(Math.round(c * 0.27), 9, 16);
+    const c = Math.floor(clamp((W - RL - gap) / (2 * n), 18, 80));
+    const numPx = clamp(Math.round(c * 0.22), 11, 14);
     let maxS = 0;
     for (const hh of heads) for (const row of at.heads[hh].S) for (const v of row) if (Number.isFinite(v)) maxS = Math.max(maxS, Math.abs(v));
     let s = `<defs><pattern id="na-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="6" class="na-hatchline"/></pattern></defs>`;
     const iso = D.iso;
-    let y = 4;
+    let y = 2;
     const geom = { mode: 'heat', heads, c, blocks: [] };
     for (const hh of heads) {
       const { S, A } = at.heads[hh];
-      const hs = H > 1 ? `, head ${hh + 1}` : '';
       const xS = RL, xA = RL + n * c + gap;
-      s += `<text class="na-mtitle" x="${f1(xS)}" y="${f1(y + 12)}">S = QKᵀ·scale${esc(hs)}</text>`
-        + `<text class="na-mtitle" x="${f1(xA)}" y="${f1(y + 12)}">A = softmax(S)${esc(hs)}</text>`;
+      // with 2+ heads each pair of maps is headed by its head's swatch and number
+      const sw = H > 1 ? 14 : 0;
       if (H > 1) {
-        s += `<rect x="${f1(xS - 12)}" y="${f1(y + 4)}" width="6" height="10" rx="2" style="fill:${headColor(hh)}"/>`;
+        for (const x0 of [xS, xA]) s += `<circle cx="${f1(x0 + 5)}" cy="${f1(y + 8)}" r="4" style="fill:${headColor(hh)}"/>`;
       }
-      y += 20;
+      const hs = H > 1 ? `<tspan class="na-leg" dx="6">head ${hh + 1}</tspan>` : '';
+      s += `<text class="na-mtitle" x="${f1(xS + sw)}" y="${f1(y + 12)}">S = QKᵀ · scale${hs}</text>`
+        + `<text class="na-mtitle" x="${f1(xA + sw)}" y="${f1(y + 12)}">A = softmax(S)${hs}</text>`;
+      y += 22;
       for (const x0 of [xS, xA]) {
-        for (let j = 0; j < n; j++) s += `<text class="na-chd" x="${f1(x0 + j * c + c / 2)}" y="${f1(y + 10)}" text-anchor="middle">${esc(fitText(names[j], 11, c - 3))}</text>`;
+        for (let j = 0; j < n; j++) s += `<text class="na-chd" x="${f1(x0 + j * c + c / 2)}" y="${f1(y + 8)}" text-anchor="middle">${esc(fitText(names[j], 11, c - 3))}</text>`;
       }
-      y += 16;
+      y += 14;
       const top = y;
       for (let i = 0; i < n; i++) {
-        s += `<text class="na-rhd${i === D.q ? ' on' : ''}" data-side="q" data-t="${i}" x="${f1(RL - 6)}" y="${f1(y + i * c + c / 2 + 4)}" text-anchor="end">${esc(fitText(names[i], 12, RL - 8))}</text>`;
+        s += `<text class="na-rhd na-chd${i === D.q ? ' on' : ''}" data-side="q" data-t="${i}" x="${f1(RL - 8)}" y="${f1(y + i * c + c / 2 + 4)}" text-anchor="end">${esc(fitText(names[i], 11, RL - 10))}</text>`;
         for (let j = 0; j < n; j++) {
           const m = !Number.isFinite(S[i][j]);
           for (const [x0, v, max, which] of [[xS, S[i][j], maxS || 1, 'S'], [xA, A[i][j], 1, 'A']]) {
             const x = x0 + j * c, yy = y + i * c;
-            const fill = m ? 'url(#na-hatch)' : colorFor(v, max, th);
+            const fill = m ? 'url(#na-hatch)' : cellFill(v, max, th);
             const txt = m ? (which === 'S' ? '−∞' : '0') : fmt(v);
             const hot = iso && ((iso.side === 'q' && iso.t === i) || (iso.side !== 'q' && iso.t === j)) && (iso.h == null || iso.h === hh);
             s += `<g class="na-cell${hot ? ' hot' : ''}" data-i="${i}" data-j="${j}" data-h="${hh}" data-m="${which}">`
-              + `<rect x="${f1(x + 1)}" y="${f1(yy + 1)}" width="${c - 2}" height="${c - 2}" rx="3" style="fill:${fill}"/>`
-              + (c >= 22 ? `<text x="${f1(x + c / 2)}" y="${f1(yy + c / 2 + numPx * 0.36)}" text-anchor="middle" class="${m ? 'na-muted' : ''}" style="font-size:${numPx}px">${esc(txt)}</text>` : '')
+              + `<rect x="${f1(x + 1)}" y="${f1(yy + 1)}" width="${c - 2}" height="${c - 2}" rx="4" style="fill:${fill}"/>`
+              + (c >= 24 ? `<text x="${f1(x + c / 2)}" y="${f1(yy + c / 2 + numPx * 0.36)}" text-anchor="middle" class="${m ? 'na-muted' : ''}" style="font-size:${numPx}px">${esc(txt)}</text>` : '')
               + '</g>';
           }
         }
       }
       if (D.q != null) {
-        for (const x0 of [xS, xA]) s += `<rect class="na-ring" x="${f1(x0 - 1)}" y="${f1(top + D.q * c - 1)}" width="${n * c + 2}" height="${c + 2}" rx="4"/>`;
+        for (const x0 of [xS, xA]) s += `<rect class="na-ring" x="${f1(x0)}" y="${f1(top + D.q * c)}" width="${n * c}" height="${c}" rx="5"/>`;
       }
       geom.blocks.push({ h: hh, xS, xA, top });
-      y = top + n * c + 12;
+      y = top + n * c + 14;
     }
     const capTex = `S = QK^{\\top}\\!\\cdot ${scaleText(D)}${at.causal ? ' + M' : ''},\\quad A = \\operatorname{softmax}(S)${at.causal ? '' : '\\ \\text{row by row}'}`;
-    const dflt = at.causal ? 'hatched: masked, M = −∞ where a key comes after its query'
-      : ro ? '' : 'rows are queries, columns keys; hover a cell for its meaning, click a row to follow it';
-    return { svg: s, h: y, cap: capTex, info: heatInfo || dflt, geom };
+    // the hatching's key stays as a note; how to read the maps is behind the help icon, and a hovered
+    // cell's meaning shows in a tooltip
+    const info = at.causal ? 'Hatched: masked. M = −∞ where a key comes after its query.' : '';
+    return { svg: s, h: y - 4, cap: capTex, info, geom };
   }
-  let heatInfo = '';
 
   const DRAW = { arcs: drawArcs, dots: drawDots, mix: drawMix, heat: drawHeat };
 
@@ -715,6 +762,8 @@ export function install(ctx) {
     layerSel.hidden = ls.length < 2;
     layerSel.disabled = ro;
     if (l >= 0 && layerSel.value !== net.layers[l].id) layerSel.value = net.layers[l].id;
+    const help = `${MODE_HELP[viz.mode]}\n\n${HELP_COMMON}`;
+    if (helpBtn.title !== help) helpBtn.title = help;
   }
 
   let editing = null, picksSig = '';
@@ -728,23 +777,26 @@ export function install(ctx) {
     const sig = JSON.stringify([mode, n, H, names, D.q, D.h, qShown, hShown, ro]);
     if (sig === picksSig) return;
     picksSig = sig;
-    const chip = (attr, v, label, on, auto, title, extra = '') =>
-      `<button type="button" class="na-chip${on ? ' on' : ''}${auto ? ' auto' : ''}" ${attr}="${v}" title="${esc(title)}"${ro ? ' disabled' : ''}>${extra}${label}</button>`;
+    // .on: all (nothing followed); .hi: the followed token or head (the lens); .auto: shown because
+    // dots and mix need one, but not followed
+    const chip = (attr, v, label, cls, title, extra = '') =>
+      `<button type="button" class="na-chip ui-chip${cls}" ${attr}="${v}" title="${esc(title)}"${ro ? ' disabled' : ''}>${extra}${label}</button>`;
+    const state = (on, followed) => (!on ? '' : followed ? ' hi' : ' auto');
     let h = `<span class="na-lab">query</span>`;
-    if (!needOne) h += chip('data-q', -1, 'all', D.q == null, false, 'Every query token');
+    if (!needOne) h += chip('data-q', -1, 'all', D.q == null ? ' on' : '', 'Every query token');
     for (let t = 0; t < n; t++) {
       const on = t === qShown;
       const title = ro ? names[t] : on && D.q === t ? 'Following this token: click to rename it'
         : `${on ? 'Shown because it attends most decisively; click to follow' : 'Follow'} ${names[t]} (${t + 1}); double-click to rename`;
-      h += chip('data-q', t, esc(names[t]), on && D.q === t, on && D.q !== t, title);
+      h += chip('data-q', t, esc(names[t]), state(on, D.q === t), title);
     }
     if (H > 1) {
       h += `<span class="na-lab na-lab2">head</span>`;
-      if (!needOne) h += chip('data-h', -1, 'all', D.h == null, false, 'Every head, one colour each');
+      if (!needOne) h += chip('data-h', -1, 'all', D.h == null ? ' on' : '', 'Every head, one colour each');
       for (let k = 0; k < H; k++) {
         const on = k === hShown;
-        h += chip('data-h', k, `${k + 1}`, on && D.h === k, on && D.h !== k, `Head ${k + 1} only`,
-          `<i class="na-sw" style="background:${headColor(k)}"></i>`);
+        h += chip('data-h', k, `${k + 1}`, state(on, D.h === k), on && D.h !== k ? `Head ${k + 1}, shown because one is needed; click to follow it` : `Head ${k + 1} only`,
+          `<i class="na-sw ui-sw" style="background:${headColor(k)}"></i>`);
       }
     }
     picks.innerHTML = h;
@@ -759,18 +811,18 @@ export function install(ctx) {
       let h = '';
       if ((mode === 'dots' || mode === 'mix') && dh > 2) {
         const opts = [...Array(dh).keys()].map(k => `<option value="${k}">dim ${k + 1}</option>`).join('');
-        h += `<label class="na-dims" title="Which two of the head's ${dh} dimensions to draw">plane <select data-dim="0"${ro ? ' disabled' : ''}>${opts}</select><select data-dim="1"${ro ? ' disabled' : ''}>${opts}</select></label>`;
+        const sel = k => `<select class="ui-field sm" data-dim="${k}"${ro ? ' disabled' : ''}>${opts}</select>`;
+        h += `<label class="na-dims" title="Which two of the head's ${dh} dimensions to draw">plane ${sel(0)}${sel(1)}</label>`;
       }
-      if (mode === 'dots') {
+      // the scale (the temperature): in dots it moves the scores, in mix it moves z
+      if (mode === 'dots' || mode === 'mix') {
         h += `<label class="na-scale" title="The layer's scale: larger sharpens A, smaller flattens it (drag; release to keep it)">scale`
-          + `<input type="range" min="${-SCALE_SPAN}" max="${SCALE_SPAN}" step="0.05" value="0"${ro ? ' disabled' : ''}>`
+          + `<input type="range" class="ui-range" min="${-SCALE_SPAN}" max="${SCALE_SPAN}" step="0.05" value="0"${ro ? ' disabled' : ''}>`
           + `<output></output></label>`
-          + `<button type="button" class="na-reset" data-act="scale-reset" title="Back to 1/√d_k">1/√d</button>`;
+          + `<button type="button" class="na-reset ui-btn xs" data-act="scale-reset" title="Back to 1/√d_k">1/√d</button>`;
       }
-      if (mode === 'mix') h += `<button type="button" class="na-send" data-act="send3d" title="Write this construction into the 3D tab: the v_j, sliders for A_ij, the A_ij v_j tip-to-tail with @, and z">Send to 3D</button>`;
-      h += `<span class="na-info"></span>`;
+      if (mode === 'mix') h += `<button type="button" class="na-send ui-btn sm soft" data-act="send3d" title="Write this construction into the 3D tab: the v_j, sliders for A_ij, the A_ij v_j tip-to-tail with @, and z">${icon('cube')}Send to 3D</button>`;
       ctl.innerHTML = h;
-      capKey = '';   // the info line lives in the rebuilt row
     }
     const dsel = ctl.querySelectorAll('select[data-dim]');
     if (dsel.length) { dsel[0].value = String(dims[0]); dsel[1].value = String(dims[1]); }
@@ -786,8 +838,10 @@ export function install(ctx) {
   }
 
   let capKey = '';
-  function paintCap(tex, info) {
-    const key = tex + '\u0000' + info;
+  // The formula, and a note: what is true now (masking, the lens, a projection), never how to use it
+  // (that is the help icon). reserve: keep the note's line while it is empty (arcs' hover line).
+  function paintCap(tex, info, reserve = false) {
+    const key = tex + '\u0000' + info + (reserve ? '\u0000r' : '');
     if (key === capKey) return;
     capKey = key;
     let html = '';
@@ -795,10 +849,8 @@ export function install(ctx) {
       try { html = window.katex ? window.katex.renderToString(tex, { throwOnError: false }) : esc(tex); }
       catch { html = esc(tex); }
     }
-    cap.innerHTML = `<div class="na-tex">${html}</div>`;
-    const inf = ctl.querySelector('.na-info');
-    if (inf) inf.textContent = info || '';
-    else if (info) cap.insertAdjacentHTML('beforeend', `<div class="na-note">${esc(info)}</div>`);
+    cap.innerHTML = `<div class="na-tex">${html}</div>`
+      + (info || reserve ? `<div class="na-note ui-caption${reserve ? ' reserve' : ''}">${esc(info)}</div>` : '');
   }
 
   // ---------------------------------------------------------------- render
@@ -816,7 +868,15 @@ export function install(ctx) {
     const net = store.net, fwd = store.state.fwd, l = layerOf(net, viz);
     paintHead(net, viz, l);
     const at = l >= 0 ? fwd?.attn?.[l] : null;
-    const W = svgWrap.clientWidth;
+    // the drawing's width in CSS px: the stage's content box (its padding and scrollbar gutter out),
+    // so the SVG is drawn 1:1. The gutter takes the place of the right padding, so the drawing sits
+    // 12 px from both edges.
+    const gutter = svgWrap.offsetWidth - svgWrap.clientWidth;
+    const padR = `${Math.max(0, 12 - gutter)}px`;
+    if (svgWrap.style.paddingRight !== padR) svgWrap.style.paddingRight = padR;
+    const cs = getComputedStyle(svgWrap);
+    const W = Math.max(0, Math.floor(svgWrap.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)));
+    if (viz.mode !== 'heat') tip.hidden = true;
     if (!at || !W) {
       svg.innerHTML = '';
       svg.style.height = '0px';
@@ -847,7 +907,7 @@ export function install(ctx) {
     svg.setAttribute('height', String(Math.ceil(out.h)));
     svg.style.height = `${Math.ceil(out.h)}px`;
     svg.innerHTML = out.svg;
-    paintCap(out.cap, out.info);
+    paintCap(out.cap, out.info, !!out.reserve);
     geom = out.geom && { ...out.geom, l, layer: net.layers[l].id, n, H, dh: spec.dh, scale: at.scale };
   }
 
@@ -897,7 +957,7 @@ export function install(ctx) {
     if (!chip) return;
     editing = i;
     const inp = document.createElement('input');
-    inp.className = 'na-name';
+    inp.className = 'na-name ui-field sm';
     inp.type = 'text';
     inp.maxLength = NAME_MAX;
     inp.value = tokenName(store.net, i) ?? '';
@@ -943,7 +1003,10 @@ export function install(ctx) {
       : dh === 3 ? `(${v.map(r3).join(', ')})` : `(${r3(v[d0])}, ${r3(v[d1])})`);
     const an = (a, b) => (n >= 10 ? `A${a}_${b}` : `A${a}${b}`);
     const term = j => `${an(i + 1, j + 1)} v${j + 1}`;
-    const cols = HEAD_COLORS[theme()];
+    // the heads' colours (and HI for z) from the tokens, as the panel draws them
+    const cs = getComputedStyle(document.documentElement), th = theme();
+    const tok = (name, fallback) => cs.getPropertyValue(name).trim() || fallback;
+    const cols = HEAD_VARS.map((name, k) => tok(name, HEAD_COLORS[th][k] || HEAD_COLORS[th][0]));
     const defs = [
       ...V.map((v, j) => ({ name: `v${j + 1}`, src: `v${j + 1} = ${vec(v)}`, o: { color: '#9aa3a8' } })),
       ...vis.map(j => ({ name: an(i + 1, j + 1), src: `${an(i + 1, j + 1)} = ${r3(A[i][j])}`, o: { min: 0, max: 1 } })),
@@ -967,9 +1030,9 @@ export function install(ctx) {
         const row = g.rowByName(d.name);
         if (row) { if (row.src !== d.src) g.setRowSource(row, d.src); } else add(d.src, d.o);
       }
-      for (const src of chain) if (!g.rows.some(r => r.src.trim() === src)) add(src, { color: cols[Math.min(hh, 2)] });
+      for (const src of chain) if (!g.rows.some(r => r.src.trim() === src)) add(src, { color: cols[hh % cols.length] });
       const zr = g.rowByName(`z${i + 1}`);
-      if (zr) { if (zr.src !== zsrc) g.setRowSource(zr, zsrc); } else add(zsrc, { color: theme() === 'light' ? '#e8a800' : HI });
+      if (zr) { if (zr.src !== zsrc) g.setRowSource(zr, zsrc); } else add(zsrc, { color: tok('--hi', th === 'light' ? '#e8a800' : HI) });
       g.setView?.('graph');
       // frame it: these vectors are about unit length, the 3D tab's default extent is 6; a
       // construction in the plane is seen from the top, as the panel draws it
@@ -1061,7 +1124,7 @@ export function install(ctx) {
     const tok = e.target.closest?.('[data-side]');
     const cell = e.target.closest?.('.na-cell');
     const kj = e.target.closest?.('[data-kj]'), vj = e.target.closest?.('[data-vj]');
-    let next = null, loc = null, info = '';
+    let next = null, loc = null, tipAt = null;
     if (tok) {
       const t = +tok.dataset.t, side = tok.dataset.side;
       loc = { side, t };
@@ -1071,11 +1134,12 @@ export function install(ctx) {
       loc = { side: 'q', t: i, h: hh };
       next = { kind: 'token', layer: l, t: i, ...(H > 1 ? { h: hh } : {}) };
       const at = store.state.fwd?.attn?.[l], v = at?.heads[hh]?.[which]?.[i]?.[j];
-      const a = plainName(net, i), b = plainName(net, j), hs = H > 1 ? ` (head ${hh + 1})` : '';
-      info = !Number.isFinite(v) || (which === 'A' && !Number.isFinite(at.heads[hh].S[i][j]))
-        ? `${which}(${a}, ${b}): masked, ${a} comes before ${b}${hs}`
-        : which === 'S' ? `S(${a}, ${b}) = ${fmt(v)}: q·k × scale, how well ${a}'s query matches ${b}'s key${hs}`
-          : `A(${a}, ${b}) = ${fmt(v)}: how much ${a} reads ${b}${hs}`;
+      const a = plainName(net, i), b = plainName(net, j), hs = H > 1 ? `, head ${hh + 1}` : '';
+      const [main, what] = !Number.isFinite(v) || (which === 'A' && !Number.isFinite(at.heads[hh].S[i][j]))
+        ? [`${which}(${a}, ${b}): masked`, `${a} comes before ${b}${hs}`]
+        : which === 'S' ? [`S(${a}, ${b}) = ${fmt(v)}`, `q·k × scale: how well ${a}'s query matches ${b}'s key${hs}`]
+          : [`A(${a}, ${b}) = ${fmt(v)}`, `how much ${a} reads ${b}${hs}`];
+      tipAt = { el: cell, key: `${which}|${i}|${j}|${hh}|${main}`, html: `${esc(main)}<small>${esc(what)}</small>` };
     } else if (kj) {
       loc = { side: 'k', t: +kj.dataset.kj };
       next = { kind: 'token', layer: l - 1, t: +kj.dataset.kj, g: 1 };
@@ -1083,14 +1147,29 @@ export function install(ctx) {
       loc = { side: 'v', t: +vj.dataset.vj };
       next = { kind: 'token', layer: l - 1, t: +vj.dataset.vj, g: 2 };
     }
-    if (info !== heatInfo) { heatInfo = info; schedule(); }
+    showTip(tipAt);
     if (!same(loc, local)) { local = loc; schedule(); }
     if (next || hoverSet) hoverStore(next);
   });
   svg.addEventListener('pointerleave', () => {
-    if (local || heatInfo) { local = null; heatInfo = ''; schedule(); }
+    showTip(null);
+    if (local) { local = null; schedule(); }
     if (hoverSet) hoverStore(null);
   });
+  // A heatmap cell's meaning, in a tooltip over it (below it when there is no room above).
+  let tipKey = '';
+  function showTip(t) {
+    if (!t) { tip.hidden = true; tipKey = ''; return; }
+    if (t.key !== tipKey) { tipKey = t.key; tip.innerHTML = t.html; }
+    tip.hidden = false;
+    const pr = panel.getBoundingClientRect(), cr = t.el.getBoundingClientRect();
+    const tw = tip.offsetWidth, th = tip.offsetHeight;
+    const x = clamp(cr.left + cr.width / 2 - pr.left - tw / 2, 6, Math.max(6, pr.width - tw - 6));
+    let y = cr.top - pr.top - th - 6;
+    if (y < 4) y = cr.bottom - pr.top + 6;
+    tip.style.left = `${Math.round(x)}px`;
+    tip.style.top = `${Math.round(y)}px`;
+  }
   svg.addEventListener('click', e => {
     if (ro) return;
     const tok = e.target.closest?.('[data-side="q"], .na-tok[data-side="k"]');
@@ -1154,7 +1233,7 @@ export function install(ctx) {
   if (!ro && ctx.addButton) {
     try {
       toolBtn = ctx.addButton({
-        label: 'Attention', icon: '&#8978;', group: 'attnviz',
+        label: 'Attention', icon: icon('attention', '&#8978;'), group: 'attnviz',
         title: 'Attention panel: who reads whom, the dot products, the weighted sum, the heatmaps (A: open / close, M: next mode)',
         onClick: () => toggle(),
       });

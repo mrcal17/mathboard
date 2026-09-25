@@ -5,9 +5,12 @@
 const NAME = '[A-Za-z\\u0370-\\u03FF][A-Za-z0-9_\\u0370-\\u03FF]*';
 const NAME_RE = new RegExp(NAME, 'y');
 const DEF_RE = new RegExp(`^(${NAME})\\s*=`);
+const FNDEF_RE = new RegExp(`^(${NAME})\\s*\\(\\s*(${NAME}(?:\\s*,\\s*${NAME})*)?\\s*\\)\\s*=`); // f(x) = ..., g(x, y) = ...
 const NUM_RE = /(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?/y;
-const OPS = '+-*/·×^()[],;|=@.';
-const OP_ALIASES = { '−': '-', '⋅': '·', '∙': '·' };
+const OPS = "+-*/·×^()[],;|=@.'";
+const OP_ALIASES = { '−': '-', '⋅': '·', '∙': '·', '′': "'" };
+// Coordinates: a row that uses x, y or z without defining them is a graph (y = x^2, z = x^2 - y^2).
+const COORDS = ['x', 'y', 'z'];
 
 // ---------- values ----------
 
@@ -264,7 +267,39 @@ const unit = {
   },
 };
 
+// Activations and friends (stable forms: no overflow for large |x|).
+const sigmoid = (x) => (x >= 0 ? 1 / (1 + Math.exp(-x)) : Math.exp(x) / (1 + Math.exp(x)));
+const softplus = (x) => Math.max(x, 0) + Math.log1p(Math.exp(-Math.abs(x)));
+function erf(x) { // Abramowitz and Stegun 7.1.26, |error| < 1.5e-7
+  const t = 1 / (1 + 0.3275911 * Math.abs(x));
+  const y = 1 - t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429)))) * Math.exp(-x * x);
+  return x < 0 ? -y : y;
+}
+const leaky = (fallback, g) => ({ n: [1, 2], kind: 'num', f: ([x, a = fallback]) => (x >= 0 ? x : g(x, a)) });
+const leakyrelu = leaky(0.01, (x, a) => a * x);
+const silu = numFn((x) => x * sigmoid(x));
+
+// softmax(v [, T]) is a probability vector; softmax(T) or a bare `softmax` row draws the map
+// from logits to the probability triangle (a 'softmaxmap' value).
+const SIMPLEX = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+const softmaxMap = (T) => ({ type: 'softmaxmap', T, extentPoints: SIMPLEX });
+const softmax = {
+  n: [1, 2], bare: () => softmaxMap(1),
+  f: ([z, T], name) => {
+    if (T !== undefined && !(typeof T === 'number' && T > 0)) throw new Error(`${name}'s temperature must be a positive number`);
+    if (kindOf(z) === 'num') {
+      if (T !== undefined) throw new Error(`${name} needs a vector of logits, got a number`);
+      if (!(z > 0)) throw new Error(`${name}'s temperature must be a positive number`);
+      return softmaxMap(z);
+    }
+    if (kindOf(z) !== 'vec') throw new Error(`${name} needs a vector of logits (or a temperature), got ${describe(z)}`);
+    const t = T ?? 1, m = Math.max(...z.v), e = z.v.map((x) => Math.exp((x - m) / t)), s = e[0] + e[1] + e[2];
+    return vec(e.map((x) => x / s));
+  },
+};
+
 // n: exact argument count or [min, max]; kind: required type of every argument (checked before f runs).
+// bare: the value of a row that is just the name (`softmax`); one-number functions plot as y = f(x).
 const FUNCS = {
   dot: { n: 2, kind: 'vec', f: ([u, v]) => dot3(u.v, v.v) },
   cross: { n: 2, kind: 'vec', f: ([u, v]) => vec(cross3(u.v, v.v)) },
@@ -300,6 +335,39 @@ const FUNCS = {
   exp: numFn(Math.exp),
   ln: numFn(Math.log, (x) => x > 0, 'needs a positive number'),
   log: numFn(Math.log10, (x) => x > 0, 'needs a positive number'),
+  sinh: numFn(Math.sinh),
+  cosh: numFn(Math.cosh),
+  tanh: numFn(Math.tanh),
+  sigmoid: numFn(sigmoid),
+  σ: numFn(sigmoid),
+  relu: numFn((x) => Math.max(0, x)),
+  leakyrelu, leaky_relu: leakyrelu,
+  elu: leaky(1, (x, a) => a * Math.expm1(x)),
+  gelu: numFn((x) => 0.5 * x * (1 + erf(x / Math.SQRT2))),
+  softplus: numFn(softplus),
+  silu, swish: silu,
+  mish: numFn((x) => x * Math.tanh(softplus(x))),
+  erf: numFn(erf),
+  heaviside: numFn((x) => (x > 0 ? 1 : x < 0 ? 0 : 0.5)),
+  sign: numFn(Math.sign),
+  floor: numFn(Math.floor),
+  ceil: numFn(Math.ceil),
+  round: numFn(Math.round),
+  mod: {
+    n: 2, kind: 'num',
+    f: ([a, b]) => {
+      if (b === 0) throw new Error('mod by zero');
+      return a - b * Math.floor(a / b);
+    },
+  },
+  softmax,
+  logsumexp: {
+    n: 1, kind: 'vec',
+    f: ([z]) => {
+      const m = Math.max(...z.v);
+      return m + Math.log(z.v.reduce((s, x) => s + Math.exp(x - m), 0));
+    },
+  },
   min: { n: [1, Infinity], kind: 'num', f: (xs) => Math.min(...xs) },
   max: { n: [1, Infinity], kind: 'num', f: (xs) => Math.max(...xs) },
   det: { n: 1, kind: 'mat', f: ([A], name) => det(square(A, name)) },
@@ -376,12 +444,50 @@ export function registerType(type, opts) {
 export function registerConstant(name, fn) { CONSTS[name] = fn; }
 export function isDrawable(v) {
   const t = TYPES.get(v?.type);
-  return t ? t.drawable !== false : v?.type !== 'mat';
+  if (!t) return v?.type !== 'mat';
+  return typeof t.drawable === 'function' ? !!t.drawable(v) : t.drawable !== false;
 }
 export const valueLatex = (v) => TYPES.get(v?.type)?.latex?.(v) ?? null;
-// AST of one line: {name, body, at, literal, error}. Nodes: num{v} name{name} vec{items} mat{rows}
-// neg{a} abs{a} comp{a,i} bin{op,a,b,implicit?} call{name,args}
-export const parseLine = (line) => parseStatement(line);
+// A readout shown as is, without the "= ": {latex} or {text} (both may be empty).
+export const valueReadout = (v) => TYPES.get(v?.type)?.readout?.(v) ?? null;
+
+// Graphs: {type: 'graph', mode: 'curve' | 'surface' | 'param' | null, ins: ['x'] | ['x', 'y'] | ...,
+// dep: the coordinate that is the value ('y' in y = x^2), at(env) -> value, free, callable, params,
+// call(args), fname and d for a plotted built-in}. graph/features/plots.js draws them.
+const FN_TEX = { sigmoid: '\\sigma', σ: '\\sigma', tanh: '\\tanh', sinh: '\\sinh', cosh: '\\cosh', erf: '\\operatorname{erf}' };
+const FORMULAS = {
+  sigmoid: '\\frac{1}{1 + e^{-x}}', σ: '\\frac{1}{1 + e^{-x}}',
+  tanh: '\\frac{e^{x} - e^{-x}}{e^{x} + e^{-x}}', sinh: '\\frac{e^{x} - e^{-x}}{2}', cosh: '\\frac{e^{x} + e^{-x}}{2}',
+  relu: '\\max(0, x)', leakyrelu: '\\max(0.01\\,x,\\ x)', leaky_relu: '\\max(0.01\\,x,\\ x)',
+  elu: '\\max(0, x) + \\min(0,\\ e^{x} - 1)', gelu: 'x\\,\\Phi(x)', softplus: '\\ln(1 + e^{x})',
+  silu: 'x\\,\\sigma(x)', swish: 'x\\,\\sigma(x)', mish: 'x \\tanh(\\ln(1 + e^{x}))',
+  heaviside: '\\mathbb{1}[x > 0]', erf: '\\tfrac{2}{\\sqrt{\\pi}} \\textstyle\\int_0^x e^{-t^2} dt',
+};
+const DERIVATIVES = {
+  sigmoid: '\\sigma(x)\\,(1 - \\sigma(x))', σ: '\\sigma(x)\\,(1 - \\sigma(x))', tanh: '1 - \\tanh^2 x',
+  relu: '\\mathbb{1}[x > 0]', softplus: '\\sigma(x)', sin: '\\cos x', cos: '-\\sin x', exp: 'e^{x}',
+};
+function graphReadout(v) {
+  if (!v.fname) return {};
+  const body = v.d === 1 ? DERIVATIVES[v.fname] : v.d ? null : FORMULAS[v.fname];
+  if (!body) return {};
+  const head = FN_TEX[v.fname] ?? `\\operatorname{${v.fname.replace(/_/g, '\\_')}}`;
+  return { latex: `${head}${primes(v.d)}(x) = ${body}` };
+}
+registerType('graph', { describe: 'a function', format: () => '', numbers: () => [], drawable: (v) => !!v.mode, readout: graphReadout });
+registerType('softmaxmap', {
+  describe: 'the softmax map',
+  format: (v) => `temperature ${formatNumber(v.T)}`,
+  numbers: (v) => [v.T],
+  readout: (v) => ({
+    latex: v.T === 1 ? '\\operatorname{softmax}(z)_i = \\frac{e^{z_i}}{\\sum_j e^{z_j}}'
+      : `\\frac{e^{z_i / T}}{\\sum_j e^{z_j / T}},\\ T = ${formatNumber(v.T)}`,
+  }),
+});
+// AST of one line: {name, params, body, at, literal, error}. Nodes: num{v} name{name, d?} vec{items}
+// mat{rows} neg{a} abs{a} comp{a,i} bin{op,a,b,implicit?} call{name,args,user?,d?} (d: derivative order)
+// userFns: names defined as f(x) = ... elsewhere, so f(2) parses as a call.
+export const parseLine = (line, userFns) => parseStatement(line, userFns);
 export const functionNames = () => Object.keys(FUNCS);
 export const values = { vec, point, mat, kindOf, describe, isVecLike, dot3, cross3, len3, identity, matMul, det, inverse };
 
@@ -444,8 +550,9 @@ function tokenize(src) {
 const bin = (op, a, b) => ({ t: 'bin', op, a, b });
 
 class Parser {
-  constructor(toks) {
+  constructor(toks, userFns) {
     this.toks = toks;
+    this.userFns = userFns ?? new Set();
     this.pos = 0;
     this.absDepth = 0; // inside |...|, a '|' closes rather than starting an implicit product
     this.rowMode = 0;  // directly inside [ ... ]: a space starts the next entry (MATLAB style)
@@ -547,8 +654,17 @@ class Parser {
     }
     if (t.t === 'name') {
       this.pos++;
-      if (isFunc(t.v) && this.isOp('(')) return { t: 'call', name: t.v, args: this.list('(', ')', true) };
-      return { t: 'name', name: t.v };
+      const user = !isFunc(t.v) && this.userFns.has(t.v);
+      let d = 0; // sigmoid', f'': derivatives
+      while (this.isOp("'")) { this.pos++; d++; }
+      if (d && !user && !isFunc(t.v)) throw new Error(`' (a derivative) goes after a function, like sigmoid' or f'`);
+      if ((user || isFunc(t.v)) && this.isOp('(')) {
+        const node = { t: 'call', name: t.v, args: this.list('(', ')', true) };
+        if (user) node.user = true;
+        if (d) node.d = d;
+        return node;
+      }
+      return d ? { t: 'name', name: t.v, d } : { t: 'name', name: t.v };
     }
     if (t.v === '(') {
       const items = this.list('(', ')');
@@ -642,17 +758,24 @@ function stripComment(s) {
   return i < 0 ? s : s.slice(0, i);
 }
 
-// Parses one line into {name, body, at, literal, error}, or null for blank/comment lines.
-function parseStatement(line) {
+// Parses one line into {name, params, body, at, literal, error}, or null for blank/comment lines.
+// params is set for a function definition, f(x) = x^2.
+function parseStatement(line, userFns) {
   const text = stripComment(String(line ?? '')).trim();
   if (!text) return null;
-  const def = DEF_RE.exec(text);
-  const st = { name: def ? def[1] : null, body: null, at: null, literal: false, error: null };
+  const fdef = FNDEF_RE.exec(text);
+  const def = fdef ?? DEF_RE.exec(text);
+  const st = { name: def ? def[1] : null, params: null, body: null, at: null, literal: false, error: null };
   try {
     if (st.name && isFunc(st.name)) throw new Error(`${st.name} is a built-in function; pick another name`);
+    if (fdef) {
+      st.params = fdef[2] ? fdef[2].split(',').map((s) => s.trim()) : [];
+      const bad = st.params.find((p, i) => isFunc(p) || st.params.indexOf(p) !== i);
+      if (bad) throw new Error(isFunc(bad) ? `${bad} is a built-in function; pick another parameter name` : `${bad} is listed twice`);
+    }
     const toks = tokenize(def ? text.slice(def[0].length) : text);
     if (def && !toks.length) throw new Error("missing value after '='");
-    const p = new Parser(toks);
+    const p = new Parser(toks, userFns);
     st.body = p.expr();
     if (p.eat('@')) {
       if (!p.peek()) throw new Error("missing origin after '@'");
@@ -663,7 +786,7 @@ function parseStatement(line) {
       if (rest.t === 'op' && rest.v === '=' && !def) throw new Error("only a single name can go left of '='");
       throw p.unexpected();
     }
-    st.literal = !!def && toks.at(-1).t === 'num' &&
+    st.literal = !!def && !fdef && toks.at(-1).t === 'num' &&
       (toks.length === 1 || (toks.length === 2 && toks[0].t === 'op' && toks[0].v === '-'));
   } catch (e) {
     st.body = st.at = null;
@@ -675,7 +798,7 @@ function parseStatement(line) {
 // ---------- evaluation ----------
 
 function refs(n, out = []) {
-  if (n.t === 'name') out.push(n.name);
+  if (n.t === 'name' || (n.t === 'call' && n.user)) out.push(n.name);
   for (const c of [n.a, n.b, ...(n.items ?? []), ...(n.args ?? []), ...(n.rows?.flat() ?? [])]) {
     if (c) refs(c, out);
   }
@@ -703,41 +826,178 @@ function findCycle(start, deps) {
   return null;
 }
 
-function evalNode(n, lookup) {
-  const ev = (x) => evalNode(x, lookup);
-  const toNum = (x, what) => {
-    if (kindOf(x) !== 'num') throw new Error(`${what} must be numbers, got ${describe(x)}`);
-    return x;
+// A row compiles once into a closure env => value, so a graph can sample it thousands of times.
+// env holds the free coordinates (x, y, z) and a function's parameters. cx: {lookup, free, params, coordFree}.
+
+const toNum = (x, what) => {
+  if (kindOf(x) !== 'num') throw new Error(`${what} must be numbers, got ${describe(x)}`);
+  return x;
+};
+const mulNum = (a, b) => a * b;
+const FAST = { // number op number, with the same errors as binary()
+  '+': (a, b) => a + b,
+  '-': (a, b) => a - b,
+  '*': mulNum, '·': mulNum, '×': mulNum,
+  '/': (a, b) => { if (b === 0) throw new Error('division by zero'); return a / b; },
+  '^': (a, b) => ((a < 0 && !Number.isInteger(b)) || (a === 0 && b < 0) ? pow(a, b) : a ** b),
+};
+const NO_ENV = Object.freeze({});
+const primes = (d) => "'".repeat(d);
+
+// The d-th derivative of a one-number function by central differences (nested for d > 1, with a
+// wider step, since rounding grows like 1/h^d).
+function derivative(g, d, name) {
+  let f = (x) => {
+    const v = g([x]);
+    if (typeof v !== 'number') throw new Error(`${name}${primes(d)} needs a function with a number value`);
+    return v;
   };
+  const h0 = d === 1 ? 1e-5 : 2e-3;
+  for (let k = 0; k < d; k++) {
+    const inner = f;
+    f = (x) => { const h = h0 * Math.max(1, Math.abs(x)); return (inner(x + h) - inner(x - h)) / (2 * h); };
+  }
+  return (args) => {
+    if (args.length !== 1 || typeof args[0] !== 'number') throw new Error(`${name}${primes(d)} needs one number`);
+    return f(args[0]);
+  };
+}
+
+function compile(n, cx) {
+  const C = (x) => compile(x, cx);
   switch (n.t) {
-    case 'num': return n.v;
-    case 'name': return lookup(n.name);
-    case 'vec': return vec(n.items.map((it) => toNum(ev(it), 'vector components')));
-    case 'mat': return colToVec(n.rows.map((r) => r.map((it) => toNum(ev(it), 'matrix entries'))));
-    case 'neg': return neg(ev(n.a));
-    case 'abs': return magnitude(ev(n.a), '|...|');
-    case 'comp': {
-      const a = ev(n.a);
-      if (!isVecLike(a)) throw new Error(`.${'xyz'[n.i]} needs a vector or point, got ${describe(a)}`);
-      return a.v[n.i];
+    case 'num': { const v = n.v; return () => v; }
+    case 'name': return compileName(n, cx);
+    case 'vec': {
+      const items = n.items.map(C);
+      return (e) => vec(items.map((f) => toNum(f(e), 'vector components')));
     }
-    case 'bin': return binary(n.op, ev(n.a), ev(n.b));
-    case 'call': return call(n.name, n.args.map(ev));
+    case 'mat': {
+      const rows = n.rows.map((r) => r.map(C));
+      return (e) => colToVec(rows.map((r) => r.map((f) => toNum(f(e), 'matrix entries'))));
+    }
+    case 'neg': { const a = C(n.a); return (e) => { const x = a(e); return typeof x === 'number' ? -x : neg(x); }; }
+    case 'abs': { const a = C(n.a); return (e) => magnitude(a(e), '|...|'); }
+    case 'comp': {
+      const a = C(n.a), i = n.i;
+      return (e) => {
+        const x = a(e);
+        if (!isVecLike(x)) throw new Error(`.${'xyz'[i]} needs a vector or point, got ${describe(x)}`);
+        return x.v[i];
+      };
+    }
+    case 'bin': {
+      const a = C(n.a), b = C(n.b), op = n.op, fast = FAST[op];
+      return (e) => {
+        const x = a(e), y = b(e);
+        return typeof x === 'number' && typeof y === 'number' ? fast(x, y) : binary(op, x, y);
+      };
+    }
+    case 'call': return compileCall(n, cx);
   }
   throw new Error(`unknown node '${n.t}'`);
 }
 
+function compileName(n, cx) {
+  const name = n.name;
+  if (n.d) throw new Error(`${name}${primes(n.d)} is a function; call it like ${name}${primes(n.d)}(x)`);
+  if (cx.params?.includes(name)) return (e) => e[name];
+  if (cx.coordFree(name)) {
+    cx.free.add(name);
+    return (e) => e[name];
+  }
+  const v = cx.lookup(name);
+  if (v?.type === 'graph') { // a = x^2 used in another row: that row is a graph of x too
+    if (v.callable) throw new Error(`${name} is a function; call it like ${name}(...)`);
+    for (const c of v.free) cx.free.add(c);
+    return (e) => v.at(e);
+  }
+  return () => v;
+}
+
+function compileCall(n, cx) {
+  const args = n.args.map((a) => compile(a, cx)), name = n.name;
+  let g;
+  if (n.user) {
+    const f = cx.lookup(name);
+    if (f?.type !== 'graph' || !f.callable) throw new Error(`${name} is not a function`);
+    const k = f.params.length;
+    if (args.length !== k) throw new Error(`${name} needs ${arity(k, k)}, got ${args.length}`);
+    if (n.d && k !== 1) throw new Error(`${name}${primes(n.d)} needs a function of one variable`);
+    g = f.call;
+  } else {
+    g = (vals) => call(name, vals);
+  }
+  if (n.d) g = derivative(g, n.d, name);
+  if (args.length === 1) { const a = args[0]; return (e) => g([a(e)]); }
+  return (e) => g(args.map((a) => a(e)));
+}
+
+// What a graph's samples are: 'num' or 'vec'. 1/x fails at 0, so try a few points; null if all fail.
+function probe(at, ins) {
+  let err = null;
+  for (const t of [0.37, -0.61, 1.3, 2.9, -4.1, 5.3]) {
+    try {
+      const e = {};
+      ins.forEach((c, i) => { e[c] = t * (i ? -0.7 : 1); });
+      const k = kindOf(at(e));
+      return k === 'point' ? 'vec' : k;
+    } catch (e) { err = e; }
+  }
+  return { error: err };
+}
+
+// A row with free coordinates: a curve (y = f(x), x = g(y), ...), a surface (z = f(x, y)) or,
+// for a vector of one coordinate, a parametric curve. dep is the row's name for y = ..., else null.
+function graphOf(at, free, dep) {
+  if (dep && free.has(dep)) throw new Error(`${dep} is on both sides of the =`);
+  const ins = COORDS.filter((c) => free.has(c)), named = !!dep;
+  if (!dep) {
+    if (free.has('z')) throw new Error('z is the height here: write z = f(x, y), or y = f(x, z)');
+    dep = ins.length === 1 && ins[0] === 'x' ? 'y' : 'z';
+  }
+  const k = probe(at, ins);
+  if (k?.error) throw k.error;
+  if (k === 'vec') {
+    if (named) throw new Error(`${dep} = ... needs a number, got a vector`);
+    if (ins.length !== 1) throw new Error('a surface needs a number; a vector of one coordinate draws a curve');
+    return { type: 'graph', mode: 'param', ins, dep: null, free: ins, at };
+  }
+  if (k !== 'num') throw new Error(`can't draw a graph of ${KIND[k] ?? 'this'}`);
+  return { type: 'graph', mode: ins.length === 1 ? 'curve' : 'surface', ins, dep, free: ins, at };
+}
+
 export function evaluate(lines) {
-  const stmts = Array.from(lines ?? [], parseStatement);
+  const src = Array.from(lines ?? []);
+  const userFns = new Set(); // f in f(x) = ..., so f(2) parses as a call on every row
+  for (const l of src) {
+    const m = FNDEF_RE.exec(stripComment(String(l ?? '')).trim());
+    if (m && !isFunc(m[1])) userFns.add(m[1]);
+  }
+  const stmts = src.map((l) => parseStatement(l, userFns));
+
+  // A row named x, y or z is a value unless it uses a coordinate that isn't a value itself:
+  // x = [1, 2, 3] and y = A x are values, y = x^2 is a graph of y (s.eq) and defines nothing.
+  const valueCoords = new Set();
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const s of stmts) {
+      if (!s?.name || s.params || !COORDS.includes(s.name) || valueCoords.has(s.name)) continue;
+      const cs = s.body ? refs(s.body).filter((n) => COORDS.includes(n)) : [];
+      if (cs.every((c) => c !== s.name && valueCoords.has(c))) { valueCoords.add(s.name); grew = true; }
+    }
+  }
+  for (const s of stmts) if (s?.name && !s.params && COORDS.includes(s.name) && !valueCoords.has(s.name)) s.eq = true;
+  const coordFree = (name) => COORDS.includes(name) && !valueCoords.has(name) && !userFns.has(name);
 
   const defs = new Map(); // name -> defining row indices
   stmts.forEach((s, i) => {
-    if (s?.name && !isFunc(s.name)) defs.set(s.name, [...(defs.get(s.name) ?? []), i]);
+    if (s?.name && !isFunc(s.name) && !s.eq) defs.set(s.name, [...(defs.get(s.name) ?? []), i]);
   });
   const deps = new Map(); // uniquely defined name -> names its value refers to
   for (const [name, idx] of defs) {
-    const body = stmts[idx[0]].body;
-    if (idx.length === 1 && body) deps.set(name, refs(body));
+    const s = stmts[idx[0]];
+    if (idx.length === 1 && s.body) deps.set(name, refs(s.body).filter((r) => !s.params?.includes(r)));
   }
 
   const staticError = (s) => {
@@ -756,7 +1016,7 @@ export function evaluate(lines) {
       let r;
       if (err) r = { error: err };
       else {
-        try { r = { value: finite(evalNode(s.body, lookup)) }; }
+        try { r = { value: rowValue(s) }; }
         catch (e) { r = { error: e.message }; }
       }
       memo.set(i, r);
@@ -777,6 +1037,68 @@ export function evaluate(lines) {
     throw new Error(`${name} is not defined`);
   };
 
+  const cxFor = (params) => ({ lookup, free: new Set(), params, coordFree });
+  const evalConst = (node) => {
+    const cx = cxFor(null), f = compile(node, cx);
+    if (cx.free.size) throw new Error(`${[...cx.free][0]} is not defined`);
+    return f(NO_ENV);
+  };
+
+  // f(x) = ...: callable from other rows; one or two parameters also draw it.
+  const userFunction = (s) => {
+    const params = s.params, cx = cxFor(params), body = compile(s.body, cx);
+    const extra = [...cx.free].filter((c) => !params.includes(c));
+    if (extra.length) throw new Error(`${s.name} uses ${extra.join(' and ')}; add ${extra.length > 1 ? 'them' : 'it'} to ${s.name}(${params.join(', ')})`);
+    const fcall = (vals) => {
+      const e = {};
+      for (let i = 0; i < params.length; i++) e[params[i]] = vals[i];
+      return body(e);
+    };
+    const g = { type: 'graph', callable: true, params, call: fcall, free: [], mode: null };
+    if (params.length === 1) {
+      const at = (e) => fcall([e.x]), k = probe(at, ['x']);
+      Object.assign(g, { mode: k === 'vec' ? 'param' : 'curve', ins: ['x'], dep: k === 'vec' ? null : 'y', at });
+    } else if (params.length === 2) {
+      Object.assign(g, { mode: 'surface', ins: ['x', 'y'], dep: 'z', at: (e) => fcall([e.x, e.y]) });
+    }
+    return g;
+  };
+
+  // A row that is only a function's name draws it: sigmoid, relu', f'. softmax has its own picture.
+  const bareGraph = (body) => {
+    if (body.t !== 'name') return null;
+    const { name, d = 0 } = body;
+    let g;
+    if (isFunc(name)) {
+      const spec = FUNCS[name];
+      if (!d && spec.bare) return spec.bare();
+      const lo = Array.isArray(spec.n) ? spec.n[0] : spec.n;
+      if (lo !== 1 || (spec.kind !== 'num' && name !== 'abs')) {
+        if (d) throw new Error(`${name}${primes(d)} needs a function of one number`);
+        return null;
+      }
+      g = (vals) => call(name, vals);
+    } else if (userFns.has(name) && defs.has(name)) {
+      const f = lookup(name);
+      if (!d) return f.mode ? { type: 'graph', mode: f.mode, ins: f.ins, dep: f.dep, free: f.ins, at: f.at } : null;
+      if (f.params.length !== 1) throw new Error(`${name}${primes(d)} needs a function of one variable`);
+      g = f.call;
+    } else {
+      return null;
+    }
+    if (d) g = derivative(g, d, name);
+    return { type: 'graph', mode: 'curve', ins: ['x'], dep: 'y', free: ['x'], at: (e) => g([e.x]), fname: name, d };
+  };
+
+  const rowValue = (s) => {
+    if (s.params) return userFunction(s);
+    const bare = bareGraph(s.body);
+    if (bare) return bare;
+    const cx = cxFor(null), f = compile(s.body, cx);
+    if (!cx.free.size) return finite(f(NO_ENV));
+    return graphOf(f, cx.free, s.eq ? s.name : null);
+  };
+
   return stmts.map((s, i) => {
     const row = { name: null, value: null, origin: null, error: null, slider: null };
     if (!s) return row;
@@ -789,7 +1111,7 @@ export function evaluate(lines) {
     row.value = r.value;
     if (s.at) {
       try {
-        const o = finite(evalNode(s.at, lookup));
+        const o = finite(evalConst(s.at));
         if (!isVecLike(o)) throw new Error(`@ needs a vector or point, got ${describe(o)}`);
         row.origin = o.v.slice();
       } catch (e) {

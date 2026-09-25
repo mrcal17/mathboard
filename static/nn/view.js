@@ -10,16 +10,21 @@
 // when the click is clearly between two columns or beyond the ends; drag from a neuron's handle
 // (the dot on its right edge) to another neuron to connect them. W: numbers on the edges.
 //
-// Sequences (docs/NN_ATTENTION.md): a token layer's neurons sit in one rounded box per token
-// (t₁…tₙ), inside a band per group (Q / K / V). An attention layer draws its data-dependent edges
-// V_j -> Z_i (width and opacity from A_ij) and an n×n heatmap of A in its header; hovering a Z
-// token (or neuron, or a heatmap cell) shows its attention row, hovering a V token or neuron its
-// column. Token boxes, heatmap cells and attention edges hover through the store as
-// { kind: 'token', layer, t, g?, h? }, so the matrix panel, the cards and the audience see it too.
-// A hovered or selected tied edge lights its whole tie group; fixed edges are dashed. Edits keep
-// token layers whole: a double-click adds a feature to every token (or says why it can't), and a
-// new edge between tokenwise-tied layers becomes a new shared entry, added for every token.
-// Token boxes show net.meta.tokenNames when set (else t₁…tₙ).
+// Sequences (docs/NN_ATTENTION.md): a token layer's neurons sit in one soft box per token, grouped
+// under their group's letter (Q / K / V). The token labels (t₁…tₙ, or net.meta.tokenNames) show once
+// per row, left of the first token layer; any other box shows its label while it is hovered or
+// followed. An attention layer draws its data-dependent edges V_j -> Z_i (width and opacity from
+// A_ij) and an n×n heatmap of A left of its header's name; hovering a Z token (or neuron, or a
+// heatmap cell) shows its attention row, hovering a V token or neuron its column. Token boxes,
+// heatmap cells and attention edges hover through the store as { kind: 'token', layer, t, g?, h? },
+// so the matrix panel, the cards and the audience see it too. A hovered or selected tied edge
+// lights its whole tie group; fixed edges are dotted and neutral (not parameters). Edits keep token
+// layers whole: a double-click adds a feature to every token (or says why it can't), and a new edge
+// between tokenwise-tied layers becomes a new shared entry, added for every token.
+//
+// Look (docs/DESIGN.md section 7 A): no lane or header boxes by default. A lane tints while its
+// header is hovered and takes an HI outline when selected; edges get a crisp HI outline and
+// neurons an HI ring on hover and selection. Headers that would collide drop a sub line first.
 //
 // Lens (docs/NN_LENS.md, rules in focus.js): what state.lens leaves out of its story is dimmed
 // (opacity --le, about 0.1, and no numbers); what its show toggles and thresholds remove is not
@@ -32,8 +37,11 @@ import { emphasis, tokenNames } from './focus.js';
 const NS = 'http://www.w3.org/2000/svg';
 const XHTML = 'http://www.w3.org/1999/xhtml';
 const R = 26;                          // neuron radius, world px (CSS px at zoom 1)
+// The HI ring's radius: a 3 px gap outside the rim, or outside the δ ring (r R + 4, up to 5.5 wide).
+const HL_R = R + 4.5, HL_R_D = R + 10;
 const MIN_K = 0.15, MAX_K = 4, FIT_MAX_K = 1.6;
 const HEAD_UP = R + 50;                // header centre sits this far above the topmost neuron's centre
+const LANE_TOP = 27;                   // lanes start this far below the header centre (clear of its pill)
 const LANE_DOWN = R + 30;              // lanes end this far below the lowest neuron's centre
 const COL = 160;                       // column spacing for empty layers (as model.js)
 const SNAP = 10;                       // a dragged neuron snaps onto its column within this (Alt: off)
@@ -41,18 +49,25 @@ const TEXT_K = 0.85, TEXT_MAX = 1.5;   // zoomed out past TEXT_K, text grows (up
 const BEYOND = 2.5 * R;                // a double-click this far past the end columns adds a layer
 const GAP = 170;                       // a layer added by double-click keeps this far from its neighbours (as nn.js)
 const ROW = 80;                        // neuron spacing in a column (as model.js)
-// Token boxes: padding around the token's neurons (the left gutter holds t₁, the bottom the value
-// under the circle), and the group band's padding around its boxes (Q / K / V sit to its left).
-const TOK = { l: 20, r: 6, t: 6, b: 22, gap: 5 };
+// Token boxes: padding around the token's neurons (the bottom holds the value under the circle),
+// and the group band's padding around its boxes (Q / K / V sit to its left). A row's token label
+// sits TOK_LAB left of its box.
+const TOK = { l: 8, r: 8, t: 6, b: 24, gap: 5 };
 const GRP = { l: 6, r: 6, t: 6, b: 6 };
-const VARS = ['--nnv-hi', '--nnv-bg', '--nnv-text', '--nnv-muted', '--nnv-node', '--nnv-rim', '--nnv-band',
-  '--nnv-band-line', '--nnv-head', '--nnv-head-line', '--nnv-dot', '--nnv-bad', '--nnv-att', '--nnv-tok',
-  '--nnv-tok-line', '--nnv-grp', '--nnv-grp-line'];
+const TOK_LAB = 7;
+// Headers (in header px, before the text boost): the name's and the sub line's baselines, the
+// pill's padding round the text, the heatmap's gap to the name, and the air between two pills.
+const HEAD = { name: -3, sub: 13, top: -20, bot: 20, botName: 7, padX: 10, hmGap: 8, air: 4 };
+const HM_H = 26;                       // the heatmap of A is about this tall: two lines of header text
+const VARS = ['--nnv-bg', '--nnv-text', '--nnv-text-2', '--nnv-muted', '--nnv-line', '--nnv-line-3', '--nnv-hover',
+  '--nnv-hi', '--nnv-hi-text', '--nnv-att', '--nnv-bad', '--nnv-node', '--nnv-rim', '--nnv-dot', '--nnv-tok'];
 const MARKS = ['sel', 'hov', 'rel', 'lit', 'bias', 'show', 'drop', 'tie', 'foc'];
+// The dot grid goes once text grows past this (zoomed out).
+const FAR_TS = 1.3;
 // Lens: a dimmed thing is drawn at DIM + (1 - DIM)·emphasis; below NUM_MIN it also loses its numbers.
 const DIM = 0.1, NUM_MIN = 0.25;
-// Token names: a name's width at the largest text boost (a gutter left of the token box holds it).
-const NAME_MAX = 8, NAME_CH = 7.2 * TEXT_MAX;
+// Token names: at most NAME_MAX characters beside the box (the full name is the box's tooltip).
+const NAME_MAX = 8;
 // Fit: the panels floating over the stage that the net fits beside (px of air around each), the
 // smallest free area worth fitting into, and how much scale a larger free area may cost.
 const FLOATS = '.nn-train, .nn-attnviz, .nn-s3d', FLOAT_GAP = 6, FREE_MIN = 160, FIT_SLACK = 0.9;
@@ -213,8 +228,13 @@ export function install(ctx) {
   const gNodes = mk('g', { class: 'nnv-nodes' }, content);
   const gHeads = mk('g', { class: 'nnv-heads' }, content);
   const ghost = mk('path', { class: 'nnv-ghost', display: 'none' }, content);
-  const hint = mk('text', { class: 'nnv-hint', x: '50%', y: '50%', display: 'none' }, svg);
-  hint.textContent = 'Double-click to add a neuron';
+  // The empty-net hint: HTML in the SVG, for its key chips (screen px: placeHint centres it).
+  const HINT_W = 520, HINT_H = 32;
+  const hint = mk('foreignObject', { class: 'nnv-hint', x: 0, y: 0, width: HINT_W, height: HINT_H, display: 'none' }, svg);
+  const hintIn = document.createElementNS(XHTML, 'div');
+  hintIn.className = 'nnv-hint-in';
+  hintIn.innerHTML = '<kbd class="lg">Double-click</kbd><span>to add a neuron,</span><kbd class="lg">N</kbd><span>for a new net</span>';
+  hint.appendChild(hintIn);
   stage.prepend(svg);
 
   // ---------------------------------------------------------------- state
@@ -316,7 +336,7 @@ export function install(ctx) {
 
   function makeNode(n) {
     const g = mk('g', { class: 'nnv-node', 'data-kind': 'node', 'data-id': n.id }, gNodes);
-    mk('circle', { class: 'nnv-hl', r: R + 9 }, g);
+    const hl = mk('circle', { class: 'nnv-hl', r: HL_R }, g);
     const gring = mk('circle', { class: 'nnv-gring', r: R + 4 }, g);
     mk('circle', { class: 'nnv-base', r: R }, g);
     const fill = mk('circle', { class: 'nnv-fill', r: R }, g);
@@ -325,19 +345,20 @@ export function install(ctx) {
     const div = document.createElementNS(XHTML, 'div');
     div.className = 'nnv-tex';
     fo.appendChild(div);
-    const val = mk('text', { class: 'nnv-val', y: R + 10 }, g);
-    const grad = mk('text', { class: 'nnv-grad', x: R + 7, y: -R * 0.45 }, g);
-    const tgt = mk('text', { class: 'nnv-tgt', x: R + 7, y: R * 0.5 }, g);
-    const bias = mk('text', { class: 'nnv-bias', x: -R - 7, y: -R * 0.45 }, g);
+    const val = mk('text', { class: 'nnv-val', y: R + 8 }, g);
+    const grad = mk('text', { class: 'nnv-grad', x: R + 9, y: -R * 0.5 }, g);
+    const tgt = mk('text', { class: 'nnv-tgt', x: R + 9, y: R * 0.5 }, g);
+    const bias = mk('text', { class: 'nnv-bias', x: -R - 9, y: -R * 0.5 }, g);
     const bn = mk('tspan', { class: 'nnv-wl-n' }, bias), bs = mk('tspan', { class: 'nnv-wl-s' }, bias), bv = mk('tspan', null, bias);
-    if (!audience) mk('circle', { class: 'nnv-handle', 'data-kind': 'handle', 'data-id': n.id, cx: R + 1, r: 7 }, g);
-    const r = { id: n.id, g, gring, fill, fo, div, val, grad, tgt, bias, bn, bs, bv, img: null, label: undefined, x: NaN, y: NaN };
+    if (!audience) mk('circle', { class: 'nnv-handle', 'data-kind': 'handle', 'data-id': n.id, cx: R + 1, r: 5 }, g);
+    const r = { id: n.id, g, hl, gring, fill, fo, div, val, grad, tgt, bias, bn, bs, bv, img: null, label: undefined, x: NaN, y: NaN };
     if (images.has(n.id)) applyImage(r, images.get(n.id));
     return r;
   }
   function makeEdge(e) {
     const g = mk('g', { class: 'nnv-edge', 'data-kind': 'edge', 'data-id': e.id }, gEdges);
     const hit = mk('path', { class: 'nnv-hit' }, g);
+    const ol = mk('path', { class: 'nnv-ol' }, g);        // the HI outline, under the line
     const line = mk('path', { class: 'nnv-line' }, g);
     const lab = mk('text', { class: 'nnv-wl' }, gLabels);
     const t1 = mk('tspan', { x: 0 }, lab);
@@ -345,17 +366,18 @@ export function install(ctx) {
     const ts = mk('tspan', { class: 'nnv-wl-s' }, t1);   // its subscript, e.g. Q
     const tv = mk('tspan', null, t1);                     // (i,j) = value
     const t2 = mk('tspan', { x: 0, dy: '1.2em', class: 'nnv-wl-g' }, lab);
-    return { id: e.id, g, hit, line, lab, t1, tn, ts, tv, t2, G: null, kind: '' };
+    return { id: e.id, g, hit, ol, line, lab, t1, tn, ts, tv, t2, G: null, kind: '' };
   }
   function makeLayer(l) {
     const band = mk('rect', { class: 'nnv-band', rx: 18 }, gBands);
     const g = mk('g', { class: 'nnv-head', 'data-kind': 'layer', 'data-id': l.id }, gHeads);
-    const gi = mk('g', { class: 'nnv-head-in' }, g);   // carries the text boost (see scaleHead)
+    const tip = mk('title', null, g);                   // the whole header, while its sub line gives way
+    const gi = mk('g', { class: 'nnv-head-in' }, g);   // carries the text boost (see placeHead)
     if (textScale !== 1) put(gi, 'transform', `scale(${textScale})`);
-    const bg = mk('rect', { class: 'nnv-head-bg', rx: 9, y: -21, height: 40 }, gi);
-    const name = mk('text', { class: 'nnv-head-name', y: -4 }, gi);
-    const sub = mk('text', { class: 'nnv-head-sub', y: 12 }, gi);
-    return { id: l.id, band, g, gi, bg, name, sub, nameS: null, subS: null, measured: false };
+    const bg = mk('rect', { class: 'nnv-head-bg', rx: 8, y: HEAD.top, height: HEAD.bot - HEAD.top }, gi);   // the pill: hit area, hover, selection
+    const name = mk('text', { class: 'nnv-head-name', y: HEAD.name }, gi);
+    const sub = mk('text', { class: 'nnv-head-sub', y: HEAD.sub }, gi);
+    return { id: l.id, band, g, tip, gi, bg, name, sub, nameS: null, subS: null, nameW: 0, subW: 0, measured: false };
   }
   const drop = r => { r.g.remove(); r.lab?.remove(); r.band?.remove(); r.hm = null; };
 
@@ -381,14 +403,16 @@ export function install(ctx) {
   const attKey = a => (a ? `${a.T}|${a.d}|${a.heads}|${a.vG}|${a.qG}|${a.kG}` : '');
   function syncTokens() {
     const net = store.net, I = ix(), live = new Set(), names = tokenNames(net);
+    // The row labels (t₁, or the token's word) sit beside the first token layer only.
+    const rowL = I.tok.findIndex(s => s?.d && s.T > 1);
     let changed = false;
     net.layers.forEach((l, i) => {
       live.add(l.id);
-      const key = tokKey(I.tok[i], names), r = toks.get(l.id);
+      const base = tokKey(I.tok[i], names), key = base && i === rowL ? `${base}|row` : base, r = toks.get(l.id);
       if ((r?.key ?? '') !== key) {
         if (r) dropTok(r);
         toks.delete(l.id);
-        if (key) toks.set(l.id, makeTok(l.id, I.tok[i], key, names));
+        if (key) toks.set(l.id, makeTok(l.id, I.tok[i], key, names, i === rowL));
         changed = true;
       }
       const akey = attKey(I.att[i]), q = atts.get(l.id), head = layers.get(l.id);
@@ -403,12 +427,10 @@ export function install(ctx) {
     for (const [id, q] of atts) if (!live.has(id)) { dropAtt(q); atts.delete(id); changed = true; }
     return changed;
   }
-  // A token's name, shortened for its box (the full name is the box's tooltip).
+  // A token's name, shortened for its label (the full name is the box's tooltip).
   const shortName = n => (n.length > NAME_MAX ? `${n.slice(0, NAME_MAX - 1)}…` : n);
-  function makeTok(id, s, key, names = []) {
-    // The left gutter holds t₁, or the longest name (at the largest text boost).
-    const long = Math.max(0, ...names.slice(0, s.T).map(n => (n ? shortName(n).length : 0)));
-    const r = { key, bands: [], boxes: [], gut: long ? Math.max(TOK.l, Math.round(10 + long * NAME_CH)) : TOK.l };
+  function makeTok(id, s, key, names = [], row = false) {
+    const r = { key, row, bands: [], boxes: [], gut: TOK.l };
     (s.groups || []).forEach((name, g) => {
       const rect = mk('rect', { class: 'nnv-grp', rx: 16 }, gGroups);
       const lab = mk('text', { class: 'nnv-grp-lab' }, gTokLabs);
@@ -420,7 +442,7 @@ export function install(ctx) {
     for (let g = 0; g < s.G; g++) for (let t = 0; t < s.T; t++) {
       const el = mk('g', { class: 'nnv-tok', 'data-kind': 'token', 'data-id': id, 'data-g': g, 'data-t': t }, gToks);
       const rect = mk('rect', { class: 'nnv-tok-box', rx: 12 }, el);
-      const lab = mk('text', { class: 'nnv-tok-lab' }, gTokLabs);
+      const lab = mk('text', { class: row ? 'nnv-tok-lab row' : 'nnv-tok-lab' }, gTokLabs);
       if (names[t]) {
         lab.classList.add('name');
         lab.textContent = shortName(names[t]);
@@ -453,15 +475,12 @@ export function install(ctx) {
       q.labs.push({ el: mk('text', { class: 'nnv-al' }, gAttLabs), h, i, j });
     }
     if (head) {
-      const cell = clamp(Math.floor(42 / a.T), 4, 14), n = a.T * cell, gap = 7;
-      const g = mk('g', { class: 'nnv-hm' }, head.g);   // above the header box, so free of its neighbours' squeeze
+      // About as tall as the header's two lines of text; cells 1 px apart, no frame.
+      const cell = clamp(Math.floor(HM_H / a.T), 4, 13), n = a.T * cell - 1, gap = 5;
+      const g = mk('g', { class: 'nnv-hm' }, head.gi);   // left of the header's name, placed by placeHead
       const hm = { g, cell, n, W: a.heads * n + (a.heads - 1) * gap, H: n, cells: [], hl: [] };
-      g.dataset.w = hm.W;
-      g.dataset.h = hm.H;
-      mk('text', { class: 'nnv-hm-cap', x: -7, y: r1(n / 2) }, g).textContent = 'A';
       for (let h = 0; h < a.heads; h++) {
         const x0 = h * (n + gap);
-        mk('rect', { class: 'nnv-hm-frame', x: x0 - 1.5, y: -1.5, width: n + 2, height: n + 2, rx: 2 }, g);
         for (let i = 0; i < a.T; i++) for (let j = 0; j < a.T; j++) {
           const el = mk('rect', { class: 'nnv-hm-c', 'data-kind': 'attcell', 'data-id': id, 'data-i': i, 'data-j': j, 'data-h': h,
             x: x0 + j * cell, y: i * cell, width: cell - 1, height: cell - 1 }, g);
@@ -469,7 +488,7 @@ export function install(ctx) {
         }
         hm.hl.push({ el: mk('rect', { class: 'nnv-hm-hl', display: 'none', rx: 1.5 }, g), x0 });
       }
-      q.hm = head.hm = hm;   // placed by scaleHead
+      q.hm = head.hm = hm;   // placed by placeHead
     }
     return q;
   }
@@ -489,20 +508,18 @@ export function install(ctx) {
     try { k.render(String(tex), r.div, { throwOnError: false, output: 'html' }); }
     catch { r.div.textContent = tex; }
   }
-  // The header box holds the name and subtitle; an attention layer's heatmap of A sits just above it.
-  function sizeHead(r, textW) {
-    const w = Math.max(64, textW + 26);
-    r.w = w;
-    put(r.bg, 'x', r1(-w / 2));
-    put(r.bg, 'width', r1(w));
-  }
+  // A header is its name over a sub line (act · size), with an attention layer's heatmap of A left
+  // of both, and a pill round them that shows only on hover and selection. Widths are header px,
+  // before the text boost; the sub line is measured while hidden too (visibility, not display).
   function measureHead(r) {
-    let w = 0;
-    try { w = Math.max(r.name.getComputedTextLength(), r.sub.getComputedTextLength()); } catch { /* not rendered */ }
-    if (!w) return;
+    let a = 0, b = 0;
+    try { a = r.name.getComputedTextLength(); b = r.sub.getComputedTextLength(); } catch { /* not rendered */ }
+    if (!a) return;
     r.measured = true;
-    sizeHead(r, w);
+    r.nameW = a;
+    r.subW = b;
   }
+  const headW = (r, sub) => (r.hm ? r.hm.W + HEAD.hmGap : 0) + Math.max(24, r.nameW, sub ? r.subW : 0) + 2 * HEAD.padX;
   function headSub(l, i, count) {
     const s = ix().tok[i], act = model.ACTS?.[l.act]?.label || l.act || 'Identity';
     if (!s) return i === 0 ? `${count} input${count === 1 ? '' : 's'}` : `${act} · ${count}`;
@@ -538,7 +555,8 @@ export function install(ctx) {
       txt(r.name, name); txt(r.sub, sub);
       r.g.setAttribute('aria-label', `${name}: ${sub}`);
       r.measured = false;
-      sizeHead(r, Math.max(name.length * 8.6, sub.length * 7));   // until measured
+      r.nameW = name.length * 8.2;   // until measured
+      r.subW = sub.length * 6.6;
       r.band.classList.toggle('empty', !count);
       heads = true;
     });
@@ -595,9 +613,12 @@ export function install(ctx) {
       r.G = geom(a, b);
       put(r.line, 'd', r.G.d);
       put(r.hit, 'd', r.G.d);
-      // Stagger the numbers by source row so the labels of edges into one neuron don't stack.
-      const n = I.byLayer[I.li.get(a.layer)]?.length || 1;
-      const p = r.G.at(0.3 + (0.4 * ((I.rank.get(a.id) ?? 0) + 0.5)) / n);
+      if (r.olOn) put(r.ol, 'd', r.G.d);   // the outline follows only while it shows (see outline())
+      // The number sits about 40% along from the source, where the edges fanning out of it have
+      // parted (a skip edge's halfway, on its bow, clear of the columns it jumps); the edges into one
+      // target are staggered by source row, so their numbers don't stack.
+      const la = I.li.get(a.layer), n = I.byLayer[la]?.length || 1, u0 = Math.abs(I.li.get(b.layer) - la) >= 2 ? 0.5 : 0.4;
+      const p = r.G.at(u0 + 0.3 * (((I.rank.get(a.id) ?? 0) + 0.5) / n - 0.5));
       put(r.lab, 'transform', `translate(${r1(p.x)},${r1(p.y)})`);
     }
     const ext = layoutTokens();
@@ -611,8 +632,8 @@ export function install(ctx) {
       const x0 = Math.min(c.minX - R - 14, (ext[i]?.x0 ?? Infinity) - 8), x1 = Math.max(c.maxX + R + 14, (ext[i]?.x1 ?? -Infinity) + 8);
       put(r.band, 'x', r1(x0));
       put(r.band, 'width', r1(x1 - x0));
-      put(r.band, 'y', r1(top + 23));
-      put(r.band, 'height', r1(Math.max(0, Math.max(bottom, (ext[i]?.y1 ?? -Infinity) + 6) - top - 23)));
+      put(r.band, 'y', r1(top + LANE_TOP));
+      put(r.band, 'height', r1(Math.max(0, Math.max(bottom, (ext[i]?.y1 ?? -Infinity) + 6) - top - LANE_TOP)));
       if (!r.measured && shown) measureHead(r);
     });
     fitHeads();
@@ -622,24 +643,57 @@ export function install(ctx) {
     placeAttLabels();
   }
   const pathOf = id => (edges.get(id) || attLines.get(id))?.G?.d;
-  // Headers get the text boost, but never grow past their neighbours: two adjacent headers that
-  // would touch shrink by one factor (long layer names, columns packed close).
-  function fitHeads() {
-    const I = ix(), hs = store.net.layers.map((l, i) => ({ r: layers.get(l.id), x: I.cols[i].x, s: Infinity }))
+  // Headers get the text boost (ts), and may be wider than their lane, but never run into a
+  // neighbour. Two headers that would touch first drop a sub line where that makes one narrower
+  // (the narrower header's alone, else the other's, else both), and only then shrink by one factor
+  // (long layer names, columns packed close). Returns layer id -> { s: scale, sub: sub line shown }.
+  function headFit(ts) {
+    const I = ix(), out = new Map();
+    const hs = store.net.layers.map((l, i) => ({ r: layers.get(l.id), x: I.cols[i].x, sub: true, s: ts }))
       .filter(h => h.r).sort((a, b) => a.x - b.x);
+    const W = h => headW(h.r, h.sub);
     for (let k = 0; k + 1 < hs.length; k++) {
-      const a = hs[k], b = hs[k + 1], s = (2 * (b.x - a.x - 8)) / ((a.r.w || 64) + (b.r.w || 64));
+      const a = hs[k], b = hs[k + 1], room = b.x - a.x - HEAD.air;
+      const fits = () => ((W(a) + W(b)) * ts) / 2 <= room;
+      if (fits()) continue;
+      const can = (W(a) <= W(b) ? [a, b] : [b, a]).filter(h => h.sub && h.r.subW > h.r.nameW);
+      const tries = can.length === 2 ? [[can[0]], [can[1]], can] : [can];
+      for (const t of tries) {
+        for (const h of t) h.sub = false;
+        if (fits()) break;
+        if (t !== tries[tries.length - 1]) for (const h of t) h.sub = true;
+      }
+      if (fits()) continue;
+      const s = (2 * room) / (W(a) + W(b));
       a.s = Math.min(a.s, s);
       b.s = Math.min(b.s, s);
     }
-    for (const h of hs) { h.r.fs = h.s; scaleHead(h.r); }
+    for (const h of hs) out.set(h.r.id, { s: Math.round(Math.max(0.6, h.s) * 100) / 100, sub: h.sub });
+    return out;
   }
-  function scaleHead(r) {
-    r.gi.__fs = r.fs;
-    const s = Math.round(Math.min(textScale, Math.max(0.6, r.fs ?? Infinity)) * 100) / 100;
-    put(r.gi, 'transform', s === 1 ? null : `scale(${s})`);
-    // The heatmap of A sits over the header box (whose top is at -21 s) with the full text boost.
-    if (r.hm) put(r.hm.g, 'transform', `translate(${r1(-textScale * r.hm.W / 2)},${r1(-21 * s - 7 - textScale * r.hm.H)}) scale(${textScale})`);
+  function fitHeads() {
+    for (const [id, f] of headFit(textScale)) placeHead(layers.get(id), f);
+  }
+  // Lay out one header for fit f: the boost, the sub line, the heatmap left of the text (centred on
+  // the two lines), and the pill round it all. el: a png() clone's elements instead of the live ones.
+  function placeHead(r, f, el = null) {
+    const E = el || { g: r.g, gi: r.gi, bg: r.bg, name: r.name, sub: r.sub, tip: r.tip, hm: r.hm?.g };
+    const sub = f.sub, tw = Math.max(24, r.nameW, sub ? r.subW : 0), w = headW(r, sub);
+    const cx = r.hm ? (r.hm.W + HEAD.hmGap) / 2 : 0;   // the text's centre: the whole header is centred on the column
+    put(E.gi, 'transform', f.s === 1 ? null : `scale(${f.s})`);
+    if (E.g.__nosub !== !sub) { E.g.__nosub = !sub; E.g.classList.toggle('nosub', !sub); }
+    if (E.tip) txt(E.tip, sub ? '' : `${r.nameS}: ${r.subS}`);
+    put(E.name, 'x', cx ? r1(cx) : null);
+    put(E.sub, 'x', cx ? r1(cx) : null);
+    let bot = sub ? HEAD.bot : HEAD.botName;
+    if (r.hm && E.hm) {
+      const capTop = HEAD.name - 10, y = capTop + (HEAD.sub - capTop - r.hm.H) / 2;
+      put(E.hm, 'transform', `translate(${r1(cx - tw / 2 - HEAD.hmGap - r.hm.W)},${r1(y)})`);
+      bot = Math.max(bot, y + r.hm.H + 6);
+    }
+    put(E.bg, 'x', r1(-w / 2));
+    put(E.bg, 'width', r1(w));
+    put(E.bg, 'height', r1(bot - HEAD.top));
   }
 
   // Token boxes around each token's neurons, group bands around each group's boxes. Returns each
@@ -674,9 +728,9 @@ export function install(ctx) {
         const { b } = q;
         put(b.rect, 'x', r1(q.x0)); put(b.rect, 'y', r1(q.y0));
         put(b.rect, 'width', r1(q.x1 - q.x0)); put(b.rect, 'height', r1(q.y1 - q.y0));
-        put(b.lab, 'x', r1(q.x0 + r.gut / 2 + 1));
-        // A name sits level with the token's first neuron, clear of the numbers under it.
-        put(b.lab, 'y', r1(b.name ? q.cy0 : (q.cy0 + q.cy1) / 2));
+        // The label sits left of the box, level with the middle of its neurons.
+        put(b.lab, 'x', r1(q.x0 - TOK_LAB));
+        put(b.lab, 'y', r1((q.cy0 + q.cy1) / 2));
         grow(q.x0, q.x1, q.y0, q.y1);
       }
       const bands = r.bands.map(band => {
@@ -698,8 +752,9 @@ export function install(ctx) {
         const { band, x0, x1, y0, y1 } = b;
         put(band.rect, 'x', r1(x0)); put(band.rect, 'y', r1(y0));
         put(band.rect, 'width', r1(x1 - x0)); put(band.rect, 'height', r1(y1 - y0));
-        // Left of the band, as in Q = [ ... ]; above it when another group sits right there (dragged side by side).
-        const top = bands.some(o => o !== b && o.x1 <= x0 + 1 && x0 - o.x1 < 34 && o.y0 < y1 && y0 < o.y1);
+        // Left of the band, as in Q = [ ... ]; above it when another group sits right there (dragged
+        // side by side), or when the row labels do.
+        const top = r.row || bands.some(o => o !== b && o.x1 <= x0 + 1 && x0 - o.x1 < 34 && o.y0 < y1 && y0 < o.y1);
         band.lab.classList.toggle('top', top);
         put(band.lab, 'x', r1(top ? x0 + 10 : x0 - 5));
         put(band.lab, 'y', r1(top ? y0 - 10 : (y0 + y1) / 2));
@@ -727,8 +782,8 @@ export function install(ctx) {
     if (hint.getAttribute('display') === 'none') return;
     const I = ix(), xs = I.cols.map(c => c.x);
     const x = xs.length ? (Math.min(...xs) + Math.max(...xs)) / 2 : 450;
-    put(hint, 'x', r1(x * V.k + V.x));
-    put(hint, 'y', r1((I.cy + LANE_DOWN) * V.k + V.y + 30));
+    put(hint, 'x', r1(x * V.k + V.x - HINT_W / 2));
+    put(hint, 'y', r1((I.cy + LANE_DOWN) * V.k + V.y + 30 - HINT_H / 2));
   }
   function layoutPair() {
     const I = ix(), a = pairIds && I.nodeById.get(pairIds[0]), b = pairIds && I.nodeById.get(pairIds[1]);
@@ -757,7 +812,8 @@ export function install(ctx) {
     put(r.ts, 'dy', lo ? '0.3em' : null);
     put(r.tv, 'dy', lo ? '-0.3em' : null);
     txt(r.tv, tp ? `${tp.i ? `(${tp.i},${tp.j})` : ''} = ${num(e.w)}` : full && e.fixed ? `${num(e.w)} fixed` : num(e.w));
-    const g = bwd?.edge?.[e.id], sum = tp ? bwd?.tie?.[e.tie] : undefined;
+    // ∂L/∂w only on the hovered or selected edge: with W on, the rest show their value alone.
+    const g = full ? bwd?.edge?.[e.id] : undefined, sum = tp ? bwd?.tie?.[e.tie] : undefined;
     txt(r.t2, e.fixed || !isNum(g) ? '' : `∂L/∂w ${numg(g)}${isNum(sum) ? ` · Σ ${numg(sum)}` : ''}`);
   }
   function paint() {
@@ -797,6 +853,7 @@ export function install(ctx) {
         put(r.gring, 'stroke', 'none');
         txt(r.grad, '');
       }
+      put(r.hl, 'r', isNum(d) ? HL_R_D : HL_R);   // outside the δ ring when there is one
       txt(r.tgt, L > 1 && l === L - 1 && isNum(n.target) ? `y = ${num(n.target)}` : '');
       paintBias(r, n, l > 0 && !I.tok[l]?.att);
     }
@@ -804,8 +861,10 @@ export function install(ctx) {
       const r = edges.get(e.id);
       if (!r) continue;
       const w = isNum(e.w) ? e.w : 0;
+      r.sw = r1(1.2 + 5 * Math.min(1, Math.abs(w) / maxW));
       put(r.line, 'stroke', colorFor(w, maxW, th));
-      put(r.line, 'stroke-width', r1(1.2 + 5 * Math.min(1, Math.abs(w) / maxW)));
+      put(r.line, 'stroke-width', r.sw);
+      if (r.olOn) put(r.ol, 'stroke-width', r1(r.sw + 3));
       if (showW || r.lab.__show) paintLabel(r, e);
     }
     paintAtt();
@@ -840,7 +899,7 @@ export function install(ctx) {
       for (const c of q.hm?.cells || []) {
         const v = attA(l, c.h, c.i, c.j), masked = a.causal && c.j > c.i;
         put(c.el, 'class', masked ? 'nnv-hm-c mask' : isNum(v) ? 'nnv-hm-c' : 'nnv-hm-c nan');
-        put(c.el, 'fill-opacity', masked || !isNum(v) ? null : (0.07 + 0.93 * clamp(v, 0, 1)).toFixed(3));
+        put(c.el, 'fill-opacity', masked || !isNum(v) ? null : (0.1 + 0.9 * clamp(v, 0, 1)).toFixed(3));
       }
       for (const t of q.labs) if (t.on) txt(t.el, num(attA(l, t.h, t.i, t.j)));
     }
@@ -1143,7 +1202,7 @@ export function install(ctx) {
       }
     }
     const box = toks.get(store.net.layers[row ? F.l : F.l - 1].id)?.boxes.find(b => b.t === F.t && b.g === (row ? 0 : a.vG));
-    if (box) mark(box.el, 'foc');
+    if (box) { mark(box.el, 'foc'); mark(box.lab, 'foc'); }
     // A number rides a visible edge only: not one the lens hides, nor (for its own row) dims.
     const off = t => !!E && (E.hidden.attn(F.l, t.i, t.j, t.h) || (F.lens && E.any && E.attn(F.l, t.i, t.j, t.h) < NUM_MIN));
     for (const t of q.labs) {
@@ -1159,8 +1218,8 @@ export function install(ctx) {
       put(hl.el, 'display', null);
       put(hl.el, 'x', r1(hl.x0 + (row ? 0 : F.t * hm.cell) - 1.5));
       put(hl.el, 'y', r1((row ? F.t * hm.cell : 0) - 1.5));
-      put(hl.el, 'width', r1((row ? hm.n : hm.cell) + 2));
-      put(hl.el, 'height', r1((row ? hm.cell : hm.n) + 2));
+      put(hl.el, 'width', r1((row ? a.T : 1) * hm.cell + 2));   // 1.5 px round the cells (each cell - 1 wide)
+      put(hl.el, 'height', r1((row ? 1 : a.T) * hm.cell + 2));
     }
   }
   // A shown A_ij sits on its edge: near V_j for a row (the edges fan into Z_i), near Z_i for a column.
@@ -1181,6 +1240,21 @@ export function install(ctx) {
       }
     }
   }
+  // The edges whose HI outline can show (hovered, selected, tied to those, lit): only these keep
+  // their outline's path and width current, so training and dragging don't pay for the rest.
+  let outlined = [];
+  function outline(ids) {
+    for (const r of outlined) r.olOn = false;
+    outlined = [];
+    for (const id of ids) {
+      const r = edges.get(id);
+      if (!r || r.olOn) continue;
+      r.olOn = true;
+      outlined.push(r);
+      put(r.ol, 'd', r.G?.d ?? '');
+      put(r.ol, 'stroke-width', r1((r.sw ?? 1.2) + 3));
+    }
+  }
   function highlight() {
     for (const [e, c] of marked) { e.classList.remove(c); if (c === 'show') e.__show = false; }
     marked = [];
@@ -1189,6 +1263,7 @@ export function install(ctx) {
     const onEdge = (id, c) => { const r = edges.get(id) || attLines.get(id); if (r) { mark(r.g, c); mark(r.lab, c); } };
     const onLayer = (id, c) => { const r = layers.get(id); if (r) { mark(r.g, c); mark(r.band, c); } };
     const I = ix(), S = resolve(store.state.sel), H = resolve(store.state.hover), A = resolveAnim(store.state.anim);
+    outline([...S.edges, ...S.ties, ...H.edges, ...H.ties, ...A.edges]);
     S.nodes.forEach(id => onNode(id, 'sel'));
     S.edges.forEach(id => onEdge(id, 'sel'));
     S.ties.forEach(id => onEdge(id, 'tie'));
@@ -1199,7 +1274,11 @@ export function install(ctx) {
     H.layers.forEach(id => onLayer(id, 'hov'));
     H.relNodes.forEach(id => onNode(id, 'rel'));
     H.relEdges.forEach(id => onEdge(id, 'rel'));
-    for (const { l, g, t } of H.tokens) mark(toks.get(store.net.layers[l]?.id)?.boxes.find(b => b.g === g && b.t === t)?.el, 'hov');
+    for (const { l, g, t } of H.tokens) {   // a hovered box shows its label too
+      const b = toks.get(store.net.layers[l]?.id)?.boxes.find(x => x.g === g && x.t === t);
+      mark(b?.el, 'hov');
+      mark(b?.lab, 'hov');
+    }
     if (H.bias) H.bias.forEach((id, k) => { onNode(id, 'bias'); if (k) onNode(id, 'rel'); });
     if (A.node) {
       A.nodes.forEach(id => onNode(id, 'lit'));
@@ -1301,7 +1380,8 @@ export function install(ctx) {
     if (ts === textScale) return;
     textScale = ts;
     svg.style.setProperty('--nnv-ts', ts);
-    for (const r of layers.values()) scaleHead(r);
+    svg.classList.toggle('far', ts > FAR_TS);   // zoomed out: no dot grid
+    fitHeads();
   }
   function moveTo(k, x, y, ms = 0) {
     cancelAnimationFrame(fitAnim);
@@ -1437,14 +1517,14 @@ export function install(ctx) {
     const clone = svg.cloneNode(true);
     for (const e of clone.querySelectorAll('.nnv-grid, pattern, .nnv-pulses, .nnv-ghost, .nnv-pair, .nnv-handle, .nnv-hint, .nnv-hm-hl')) e.remove();
     for (const c of MARKS) for (const e of clone.querySelectorAll(`.${c}`)) e.classList.remove(c);
-    clone.classList.remove('focus', 'panning', 'wiring', 'dragging');
-    const heads = [...svg.querySelectorAll('.nnv-head')];   // drawn at zoom 1, still fitted between neighbours
-    [...clone.querySelectorAll('.nnv-head')].forEach((h, i) => {
-      const gi = h.querySelector('.nnv-head-in'), hm = h.querySelector('.nnv-hm');
-      const s = Math.round(Math.min(1, Math.max(0.6, heads[i]?.querySelector('.nnv-head-in')?.__fs ?? Infinity)) * 100) / 100;
-      if (s === 1) gi?.removeAttribute('transform'); else gi?.setAttribute('transform', `scale(${s})`);
-      if (hm) hm.setAttribute('transform', `translate(${r1(-hm.dataset.w / 2)},${r1(-21 * s - 7 - hm.dataset.h)})`);
-    });
+    clone.classList.remove('focus', 'panning', 'wiring', 'dragging', 'far');
+    const fit1 = headFit(1);   // headers drawn at zoom 1, still fitted between neighbours
+    for (const h of clone.querySelectorAll('.nnv-head')) {
+      const r = layers.get(h.dataset.id), f = r && fit1.get(r.id);
+      if (!f) continue;
+      const q = s => h.querySelector(s);
+      placeHead(r, f, { g: h, gi: q('.nnv-head-in'), bg: q('.nnv-head-bg'), name: q('.nnv-head-name'), sub: q('.nnv-head-sub'), hm: q('.nnv-hm') });
+    }
     clone.querySelector('.nnv-world').setAttribute('transform', `translate(${r1(pad - b.x)},${r1(pad - b.y)})`);
     clone.setAttribute('xmlns', NS);
     clone.setAttribute('width', W);

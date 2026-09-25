@@ -1669,6 +1669,52 @@ function wordData(label, used, pick) {
   };
 }
 
+// ---- the next-word task (the tiny language model, docs/NN_FLOW.md)
+
+// Sentences "subject verb object" over WORDS, read after a start token '.': position t reads the
+// words up to t and its target is word t + 1, so '. dog chases' has the targets 'dog chases cats'.
+// The verb agrees with its subject, and the object is the other animal in the other number (dog
+// chases cats, cats chase dog). After the verb only the subject, two positions back, says which
+// animal comes next, so the last position has to attend to it. The first word is a four-way guess:
+// nothing comes before it, so its best prediction is 1/4 on each noun.
+// Tokens are one-hot over NEXT_VOCAB (slot k = word k), and the targets are one-hot too.
+const NEXT_VOCAB = Object.freeze(['.', 'dog', 'cat', 'dogs', 'cats', 'chases', 'chase']);
+const NEXT_OBJECT = { dog: 'cats', cat: 'dogs', dogs: 'cat', cats: 'dog' };
+const NEXT_VERB = agree('chases', 'chase');
+function nextWordData(label) {
+  const V = NEXT_VOCAB.length, T = 3;
+  const hot = w => NEXT_VOCAB.map(v => (v === w ? 1 : 0));
+  return {
+    label, inputs: T * V, outputs: T * V, kind: 'seq', tokens: T,
+    // a softmax per position and cross-entropy: what the Train panel's Adapt gives a net for it
+    loss: 'xent',
+    // vocab: each word's one-hot slot (the WORDS tasks map words to vectors instead)
+    vocab: Object.freeze(Object.fromEntries(NEXT_VOCAB.map((w, k) => [w, k]))),
+    // each token of an output row named by its most likely word (null where a value is not finite)
+    decode: y => Array.from({ length: T }, (_, t) => {
+      let best = 0;
+      for (let k = 0; k < V; k++) {
+        if (!isNum(y?.[t * V + k])) return null;
+        if (y[t * V + k] > y[t * V + best]) best = k;
+      }
+      return NEXT_VOCAB[best];
+    }),
+    make: (n = 200, seed = 1, noise = 0) => {
+      const r = rng(seed ?? 1), rn = rng(`${seedInt(seed ?? 1)}:noise`);
+      const count = clampInt(n, 0, 1e6, 200), s = num(noise, 0);
+      const X = [], Y = [], words = [], targetWords = [];
+      for (let i = 0; i < count; i++) {
+        const subj = pickOf(r, NOUNS), sentence = [subj, NEXT_VERB(subj), NEXT_OBJECT[subj]];
+        const w = ['.', ...sentence.slice(0, T - 1)];
+        X.push(w.flatMap(v => hot(v).map(c => (s ? c + s * gauss(rn) : c))));
+        Y.push(sentence.flatMap(hot));
+        words.push(w); targetWords.push(sentence);
+      }
+      return { X, Y, words, targetWords };
+    },
+  };
+}
+
 export const DATASETS = {
   xor: dataset('XOR', 2, 1, 'class', (r, i) => {
     const sx = i & 1 ? 1 : -1, sy = i & 2 ? 1 : -1;
@@ -1751,6 +1797,8 @@ export const DATASETS = {
       const s = pickOf(r, NOUNS), v = pickOf(r, VERBS)(s), o = pickOf(r, NOUNS.filter(w => plural(w) !== plural(s)));
       return { words: [s, v, o], src: [0, 0, 2] };
     }),
+  // Next word (a softmax over 7 words at each of 3 positions, xent): '. dog chases' -> 'dog chases cats'.
+  nl_next: nextWordData('Next word: dog chases cats (3 positions × 7 words)'),
 };
 
 // ------------------------------------------------------------------ presets
@@ -1977,6 +2025,73 @@ function wordNet(title, key, seed) {
 }
 const tokLabel = sym => (t, f) => `${sym}_{${t},${f}}`;
 const qkvLabel = (t, f, g) => `${g.toLowerCase()}_{${t},${f}}`;
+
+// The tiny language model (docs/NN_FLOW.md): a whole decoder-only transformer on nl_next.
+//   one-hot words O (3 × 7) -> X = O W_E + P (the embedding, and a position vector per slot as the
+//   layer's own untied biases) -> Q, K, V -> 2 causal heads -> H = X + Z W_O + b_O -> FFN
+//   F = ReLU(H W_1 + b_1) (d -> 4d) -> Y = H + F W_2 + b_2 -> softmax(Y W_U + b_U) per position.
+// d_model 4, head size 2. Every matrix is tied across positions, the two + are fixed residual edges.
+// No LayerNorm: model.js has no per-token normalization (docs/NN_FLOW.md says why).
+// The weights are drawn by randomize with the Train panel's Reset recipe (He, as the net has a
+// ReLU, and the biases at 0, so P starts at 0 too), except that W_Q, W_K start small (every
+// position first reads its past about evenly) and W_O, W_2 small (the block starts near Y = X).
+// meta.train.init keeps that recipe, so Reset with init seed 1 gives back these exact weights.
+// meta.vocab names the one-hot slots and meta.flow asks for the Flow view (flow.js).
+const LM_INIT = Object.freeze({ W_Q: 'small', W_K: 'small', W_O: 'small', W_2: 'small' });
+function lmNet(seed) {
+  const V = NEXT_VOCAB.length, T = 3, d = 4, F = 4 * d;
+  const word = k => `\\text{${NEXT_VOCAB[k]}}`;
+  const zero = (rows, cols) => Array.from({ length: rows }, () => new Array(cols).fill(0));
+  const net = seqBlank('Tiny language model', 'xent', [
+    { name: 'Words (one-hot)', tokens: T, d: V, label: (t, f) => `${word(f - 1)}_{${t}}` },
+    { name: 'X = E[w] + P', tokens: T, d, label: tokLabel('x') },
+    { name: 'Q, K, V', tokens: T, d, groups: QKV, label: qkvLabel },
+    { name: 'Attention Z, 2 causal heads', tokens: T, d, attention: { heads: 2, causal: true }, label: tokLabel('z') },
+    { name: 'H = X + Z W_O', tokens: T, d, label: tokLabel('h') },
+    { name: 'FFN: ReLU(H W₁)', act: 'relu', tokens: T, d: F, label: tokLabel('f') },
+    { name: 'Y = H + FFN', tokens: T, d, label: tokLabel('y') },
+    { name: 'Next word: softmax(Y W_U)', act: 'softmax', tokens: T, d: V, label: (t, f) => `p_{${t}}(${word(f - 1)})` }]);
+  wireTied(net, 0, 1, 'W_E', zero(V, d));   // the biases of X stay untied: P, a vector per position
+  for (const g of QKV) {
+    wireTied(net, 1, 2, `W_${g}`, zero(d, d), { to: g });
+    tieBias(net, 2, `b_${g}`, zero(1, d)[0], g);
+  }
+  wireTied(net, 3, 4, 'W_O', zero(d, d));
+  wireResidual(net, 1, 4);
+  tieBias(net, 4, 'b_O', zero(1, d)[0]);
+  wireTied(net, 4, 5, 'W_1', zero(d, F));
+  tieBias(net, 5, 'b_1', zero(1, F)[0]);
+  wireTied(net, 5, 6, 'W_2', zero(F, d));
+  wireResidual(net, 4, 6);
+  tieBias(net, 6, 'b_2', zero(1, d)[0]);
+  wireTied(net, 6, 7, 'W_U', zero(d, V));
+  tieBias(net, 7, 'b_U', zero(1, V)[0]);
+  net.meta.train.init = { ...LM_INIT };
+  randomize(net, { seed, scheme: 'he', init: LM_INIT });
+  net.meta.vocab = [...NEXT_VOCAB];
+  net.meta.flow = true;
+  return lmLayout(seqIO(net, 'nl_next'));
+}
+// Every layer as a tokens × d grid (a row per position, a column per feature, Q, K, V stacked),
+// side by side and centred on the Q, K, V block. The net is wide (the FFN has 16 columns): the
+// Flow view is where it reads best.
+function lmLayout(net) {
+  const FX = 88, RP = 90, GG = 60, GAP = 170, TOP = 120;
+  const q = tokenShape(net, 2), block = q.tokens * RP + GG;
+  const mid = TOP + (block * (q.groups.length - 1) + (q.tokens - 1) * RP) / 2;
+  let x = 110;
+  net.layers.forEach((_, l) => {
+    const { tokens, d, groups } = tokenShape(net, l), G = groups ? groups.length : 1;
+    const top = mid - ((G - 1) * block + (tokens - 1) * RP) / 2;
+    nodesIn(net, l).forEach((n, k) => {
+      const g = Math.floor(k / (tokens * d)), t = Math.floor(k / d) % tokens;
+      n.x = x + (k % d) * FX;
+      n.y = Math.round((top + g * block + t * RP) * 10) / 10;
+    });
+    x += (d - 1) * FX + GAP;
+  });
+  return net;
+}
 
 const eye = (i, j) => (i === j ? 1 : null);                        // identity shortcut, rest masked
 const band = (k, stride = 1) => (i, j) => {                         // convolution: kernel k per row
@@ -2486,6 +2601,10 @@ export const PRESETS = {
     tieBias(net, 5, 'b_2', randB(r, 2));
     return layout(seqIO(net, 'seq_addmax'), 1100, 1100);
   }),
+  tiny_lm: preset({
+    group: ATT, label: 'Tiny language model: next word (train it)', dataset: 'nl_next', lr: 0.1, noise: 0,
+    note: 'Words in, a softmax over 7 words out at each position: embedding + position, 2 causal heads, W_O, a ReLU FFN. Open Flow (G) and train: after dog chases, cats wins; the first word stays a 1-in-4 guess.',
+  }, seed => lmNet(seed)),
 
   // ---------------------------------------------------------------- embeddings and autoencoders
   autoencoder: preset({

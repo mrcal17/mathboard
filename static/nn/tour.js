@@ -581,6 +581,8 @@ function el(tag, cls, text) {
   return e;
 }
 const escHtml = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+// A line icon from static/icons.js (docs/DESIGN.md, Icons), else the glyph it replaced.
+const icon = (name, alt = '') => globalThis.mathboardIcons?.svg(name) || alt;
 
 // Plain text with $…$ KaTeX.
 function richHTML(s) {
@@ -604,15 +606,17 @@ export function install(ctx) {
   const steps = () => buildSteps(store.net, M, store.state.fwd);
 
   // ---------------------------------------------------------------- the card
-  const card = el('div', 'nn-tour');
+  // The .ui-float recipe (docs/DESIGN.md C15): the count as a neutral chip, the title, then back,
+  // next (Done on the last step) and close as icon buttons; the text; a 2 px progress rule.
+  const card = el('div', 'nn-tour ui-float');
   card.hidden = true;
   card.setAttribute('role', 'status');
   card.setAttribute('aria-live', 'polite');
-  const count = el('span', 'nn-tour-count');
+  const count = el('span', 'nn-tour-count ui-chip');
   const title = el('span', 'nn-tour-title');
   const nav = el('span', 'nn-tour-nav');
   const btn = (html, tip, fn, cls = '') => {
-    const b = el('button', `nn-tour-btn ${cls}`.trim());
+    const b = el('button', `nn-tour-btn ui-btn sm icon ${cls}`.trim());
     b.type = 'button';
     b.innerHTML = html;
     b.title = tip;
@@ -621,9 +625,10 @@ export function install(ctx) {
     nav.append(b);
     return b;
   };
-  const prevBtn = btn('&#8592;', 'Back (← / PageUp)', () => go(-1));
-  const nextBtn = btn('&#8594;', 'Next (→ / PageDown)', () => go(1), 'next');
-  btn('&times;', 'End the walkthrough (Esc)', () => end(), 'close');
+  const NEXT = icon('chevron-right', '&#8594;');
+  const prevBtn = btn(icon('chevron-left', '&#8592;'), 'Back (← / PageUp)', () => go(-1));
+  const nextBtn = btn(NEXT, 'Next (→ / PageDown)', () => go(1), 'next');
+  btn(icon('close', '&times;'), 'End the walkthrough (Esc)', () => end(), 'close');
   const head = el('div', 'nn-tour-head');
   head.append(count, title, nav);
   const text = el('div', 'nn-tour-text');
@@ -648,9 +653,14 @@ export function install(ctx) {
     fill.style.width = `${((i + 1) / n) * 100}%`;
     prevBtn.disabled = i === 0;
     const lastStep = i === n - 1;
-    nextBtn.innerHTML = lastStep ? 'Done' : '&#8594;';
+    if (nextBtn.classList.contains('done') !== lastStep) {
+      // the last step's Next is the card's one primary action: Done, in words
+      nextBtn.innerHTML = lastStep ? 'Done' : NEXT;
+      nextBtn.classList.toggle('done', lastStep);
+      nextBtn.classList.toggle('icon', !lastStep);
+      nextBtn.classList.toggle('primary', lastStep);
+    }
     nextBtn.title = lastStep ? 'End the walkthrough (→ or Esc)' : 'Next (→ / PageDown)';
-    nextBtn.classList.toggle('done', lastStep);
     if (wasHidden || shown.i !== i) placeSoon();   // again once the step's panels and the view settle
     shown.i = i;
   }
@@ -660,26 +670,32 @@ export function install(ctx) {
   // the neurons it would cover (those of the focused layers count 4) and the layer headers (2, the
   // focused one 8), the floating panels by the share of them covered (the attention panel, which
   // the steps talk about, counts double, and its header 3 more; a folded Train panel, just a
-  // header, little), then the net's box. Ties go to the bottom centre at full width; a narrower card (taller, a small
-  // penalty) is tried too, to fit between two panels.
+  // header, little; the lens bar's controls count double too), then the net's box. Ties go to the bottom centre at
+  // full width; a narrower card (taller, a small penalty) is tried too, to fit between two panels,
+  // and so is the row just above a shown lens bar.
   const PAD = 12, STEP_X = 24, NARROW = 0.4;
   function place() {
     if (card.hidden) return;
     const sw = stage.clientWidth, sh = stage.clientHeight;
     if (!sw || !sh) return;
-    const full = Math.round(Math.min(640, Math.max(380, sw * 0.62)));
+    const full = Math.round(Math.min(600, Math.max(380, sw * 0.62)));
     const widths = [...new Set([full, Math.max(340, full - 120), Math.max(340, full - 240)])];
     const sr = stage.getBoundingClientRect();
     const rectOf = e => { const r = e.getBoundingClientRect(); return { x: r.left - sr.left, y: r.top - sr.top, w: r.width, h: r.height }; };
     const panels = [];
     const visibleEl = e => !e.hidden && e.offsetWidth > 0 && e.offsetHeight > 0 && getComputedStyle(e).display !== 'none';
     const viz = ctx.attnviz?.el || null;
+    let lensTop = null;
     for (const c of stage.children) {
       if (c === card || c.tagName === 'svg' || !visibleEl(c)) continue;
       const r = rectOf(c);
       if (r.w * r.h > 0.8 * sw * sh) {   // an overlay layer (the inspector's): its children are the panels
         for (const k of c.children) if (visibleEl(k)) panels.push({ ...rectOf(k), k: 6 });
-      } else panels.push({ ...r, k: c === viz || c.contains(viz) ? 12 : c.matches('.nn-train.folded') ? 1 : 6 });
+      } else {
+        const lens = c.classList.contains('nn-lens');
+        if (lens) lensTop = r.y;
+        panels.push({ ...r, k: c === viz || c.contains(viz) || lens ? 12 : c.matches('.nn-train.folded') ? 1 : 6 });
+      }
     }
     const v = ctx.view, st = store.state;
     const focusIds = new Set();
@@ -705,7 +721,9 @@ export function install(ctx) {
       card.style.width = `${W}px`;
       const w = card.offsetWidth, hh = card.offsetHeight;
       const cx = Math.round((sw - w) / 2), top = PAD, bottom = Math.max(PAD, sh - hh - PAD), right = Math.max(PAD, sw - w - PAD);
-      for (const y of [bottom, top]) {
+      const ys = [bottom, top];
+      if (lensTop != null) { const y = Math.round(lensTop - hh - 8); if (y > top && y < bottom) ys.push(y); }
+      for (const y of ys) {
         for (const x of [cx, ...Array.from({ length: Math.ceil((right - PAD) / STEP_X) }, (_, k) => PAD + k * STEP_X), right]) {
           const box = { x, y, w, h: hh };
           // tie-breaks: full width, then the bottom, then the centre
@@ -852,7 +870,7 @@ export function install(ctx) {
   });
 
   toolBtn = ctx.addButton?.({
-    label: 'Explain', icon: '&#9655;', title: 'Walk through this net step by step (E). ← → move, Esc ends', group: 'tour',
+    label: 'Explain', icon: icon('explain', '&#9655;'), title: 'Walk through this net step by step (E). ← → move, Esc ends', group: 'tour',
     onClick: () => toggle(),
   }) || null;
 

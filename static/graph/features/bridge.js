@@ -468,6 +468,8 @@ export function install(api) {
   api.addToolbarButton({
     label: 'To board',
     title: 'Put a snapshot of this view on the current board page',
+    group: 'more',
+    icon: 'board',
     async onClick() {
       if (busy) return;
       busy = true;

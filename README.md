@@ -32,14 +32,21 @@ There is no build step and nothing to `npm install`.
 
 ![The board in the whiteboard theme: a chain-rule derivation with arrows, a boxed update rule and a sketch of the sigmoid](docs/media/board-light.png)
 
-- The **Math pen** (M) groups nearby strokes into expressions. About 700 ms after you lift the
-  pen, the expression goes to the model and comes back as KaTeX, sized to fit your handwriting.
+- The **Math pen** (M) groups nearby strokes into expressions; the reach follows the size of your
+  handwriting, and fractions, exponents and matrices stay together. When you start writing
+  somewhere else (or pause), the expression goes to the model. Its reading appears as a small
+  preview under your ink: click it or press **Enter** to replace the ink with KaTeX, **Esc** to
+  keep the ink. Writing elsewhere commits it too, unless the recognizers disagreed: then you pick
+  one of the two readings. *Settings → Convert* also offers Auto (replace in place) and Off.
 - The **Draw pen** (D) is for arrows, boxes and sketches. It is never converted.
 - Write next to typeset maths to extend it (`= 5` after `2 + 3`); the whole expression is read again.
+- Tap a typeset symbol with the Math pen for its look-alikes (2 / z / x, ∞ / α / ∝, 1 / l / |, ...).
+  A pick sticks when the expression is read again. A zig-zag over ink erases it.
 - **Select** (S) an expression to edit its LaTeX, re-recognize it, copy it, turn it back into
-  ink, delete it or send it to the 3D tab.
+  ink, delete it or send it to the 3D tab. Drag on empty board to lasso strokes, then Group,
+  Split, To math or Keep as ink.
 - Pages, undo, a laser pointer, a chalkboard and a whiteboard theme (T), and **H** to hide every
-  control while you present. **Export** saves the converted maths as Markdown.
+  control while you present. **Export** (the download icon) saves the converted maths as Markdown.
 
 ### 3D tab
 
@@ -62,7 +69,22 @@ w = a u + b v
 span(u, v)             # the plane they span, with the grid of integer combinations
 ```
 
-Nine feature modules build on the vectors, matrices and spans. Five of them add linear algebra:
+Rows can also be functions. A row that uses `x` (and `y`) without defining them draws a graph:
+
+```
+x^2 / 4                # a curve: y = f(x)
+z = x^2/6 - y^2/6      # a surface
+f(x) = x^3/6 - x       # a named function: drawn, and callable as f(2) or f'(x)
+sigmoid                # an activation on its own draws it; sigmoid' draws its derivative
+softmax                # the probability triangle, and where the grid of logits lands on it
+```
+
+<p>
+<img src="docs/media/3d-activations.png" width="49%" alt="3D tab in 2D: sigmoid, tanh, relu, gelu and the derivative of sigmoid, each row showing its formula">
+<img src="docs/media/3d-softmax.png" width="49%" alt="3D tab: softmax squashing the logit grid onto the probability triangle, with softmax((2, 1, 0.5)) landing on it">
+</p>
+
+Ten feature modules build on the language. One draws those functions. Five add linear algebra:
 linear combinations laid out tip-to-tail with projections and intersections, animated
 transformations (`transform(A, t)`), eigenlines and SVD, flows of dx/dt = Ax, row and column
 pictures, animated Gauss-Jordan elimination, the four fundamental subspaces, Gram-Schmidt, and a
@@ -82,15 +104,15 @@ The left image above is `transform(A, t)` with `eigen(A)`; the right one is
 An editable network for teaching. The canvas on the left and the matrix panel on the right show
 the same numbers: each layer is written out as `z = W a + b`, and hovering a weight anywhere
 lights it everywhere. Click a neuron, edge or layer for a card with its arithmetic and its
-gradients. The Train panel fits the net to a toy dataset while you watch. The 45 presets run
+gradients. The Train panel fits the net to a toy dataset while you watch. The 46 presets run
 from logic gates and MLPs to convolutions, an unrolled RNN and attention, including attention
-trained on three-word sentences.
+trained on three-word sentences and a tiny language model that learns to predict the next word.
 
 ![Training a 2-6-4-1 ReLU network on the circles dataset: the decision region forms, the edges change colour and the matrices update](docs/media/net-train.gif)
 
 #### Attention
 
-![Net tab: a one-block transformer after training. On the canvas, attention edges run from the value tokens to Z and the residual edges are dashed; the matrix panel shows the attention layer in three stages, S = QKᵀ/√2, A = softmax(S) and Z = AV](docs/media/net-transformer.png)
+![Net tab: a one-block transformer after training. On the canvas, attention edges run from the value tokens to Z and the residual edges are grey and dashed; the matrix panel shows the attention layer in three stages, S = QKᵀ/√2, A = softmax(S) and Z = AV](docs/media/net-transformer.png)
 
 The Attention presets build self-attention from three parts: token layers (a row of features per
 token), weights shared by every token, and an attention layer with no weights of its own. The
@@ -159,6 +181,23 @@ preset after training: head 1 has learned to read token 2 and head 2 token 3. On
 example with 3 heads, coloured by token: done right, every head holds a chunk of every token; with
 the bug, "head 1" is just the first 8 numbers, pieces of tokens 1 and 2.
 
+#### Flow view
+
+![The Flow view on the tiny language model after training, reading ". dog chases": 14 stages left to right, from the one-hot words through X = O W_E + P, Q, K and V per head, the causal scores and attention weights, A V, the concat, Z W_O and the residual, the FFN, F W_2 and the residual, to the logits and a bar per word at each position; the prediction reads cats 100%. The pointer is on A₁[3,2], so its row of scores is framed and the tip does the softmax](docs/media/net-flow.png)
+
+**Flow** (G) draws the whole forward pass in place of the canvas, left to right, as live matrices
+with their shapes: the words, the embedding plus position, Q, K and V per head, the scores, the
+softmax, A V, the concat, W_O and the residual, the FFN and its residual, the logits and, at each
+position, a bar per word for the next one. ◀ ▶ (← →) step through the stages and ▶ plays them,
+lighting one and filling its cells in. Hovering a cell frames what it was computed from and does
+the sum in a tip; clicking a stage focuses its layer in the lens. The matrix panel steps aside
+while the flow is open, since the flow shows the same matrices (dragging the divider brings it
+back). The head chips knock a head out and recompute everything after it. It follows the Train panel live. The
+**Tiny language model** preset is made for it: one-hot words, 2 causal heads, a d → 4d → d FFN and
+a softmax over 7 words at each position, trained with cross-entropy on "dog chases cats"
+sentences read after a start token. Above, after training: after ". dog chases" it gives cats
+0.998, while the first word stays a one-in-four guess among the nouns.
+
 #### 3D plots
 
 <p>
@@ -199,8 +238,8 @@ Shift+P switches plots, and the audience window follows the plot and the camera.
 The server runs on <http://127.0.0.1:8791>. If it finds Chrome or Edge (in the usual Windows
 install folders, or `chrome` on the PATH), it opens the board in a chromeless app window, which is
 easy to capture in OBS or share on a call. Otherwise it opens your default browser. The status
-chip in the bottom-right corner turns green once the model is loaded. Ctrl+C in the console stops
-the server and unloads the model.
+dot in the bottom-right corner turns green once the model is loaded (hover it for the model and
+the last timing). Ctrl+C in the console stops the server and unloads the model.
 
 **Other models.** Any Ollama model that can read images works:
 
@@ -209,7 +248,8 @@ python server.py --model qwen3-vl:4b-instruct
 ```
 
 The server checks that the model has the vision capability and pulls it if it's missing. The
-board's settings (⚙) also list your installed vision models and switch between them live.
+board's settings (the sliders icon at the right end of its toolbar) also list your installed
+vision models and switch between them live.
 
 | Option | Default | |
 |---|---|---|
@@ -223,12 +263,29 @@ board's settings (⚙) also list your installed vision models and switch between
 `start_mathboard.bat` passes its arguments through, e.g. `start_mathboard.bat --model qwen3-vl:4b-instruct`.
 If the port is already in use, Mathboard assumes it's already running and just opens the board.
 
+**A handwriting model (optional, recommended).** Uni-MuMER is Qwen3-VL fine-tuned on handwritten
+maths. On the author's own misreads it scored 29/37 against qwen3-vl's 26/37, in about 0.1 s instead
+of about 1 s, and it reads looped 2s that qwen3-vl turns into x or ∞. It runs in
+[llama.cpp](https://github.com/ggml-org/llama.cpp)'s `llama-server`. With
+`MATHBOARD_BACKEND=ensemble` both models read every expression, and a reading commits on its own only
+when they agree (18 of 18 of those were right); otherwise the board shows both to pick from. Setup,
+measurements and the API are in [docs/BOARD_BACKENDS.md](docs/BOARD_BACKENDS.md).
+
+| Option | Default | |
+|---|---|---|
+| `--backend NAME` | `qwen` (or `$MATHBOARD_BACKEND`) | `qwen`, `unimumer` or `ensemble` |
+| `--unimumer URL` | `http://127.0.0.1:8792` when needed | the llama-server running Uni-MuMER |
+| `--no-normalize` | | send crops as drawn; by default they are scaled so symbols reach the model at about 64 px |
+
 **Only want the 3D and Net tabs?** They don't use the model. Without Ollama running,
 `python server.py` still serves everything; the status chip stays red and handwriting stays as ink.
 
 ## Requirements
 
-- **Python 3.8 or newer.** The server uses only the standard library.
+- **Python 3.8 or newer.** The server uses only the standard library, plus
+  [Pillow](https://pypi.org/project/pillow/) if installed, to scale crops for the model
+  (`pip install pillow`; without it crops are sent as drawn).
+- **llama.cpp**, only for the Uni-MuMER backend ([docs/BOARD_BACKENDS.md](docs/BOARD_BACKENDS.md)).
 - **Ollama** with a vision model, for the board. A GPU is recommended: on the author's
   machine each expression takes about a second.
 - **A recent Chrome or Edge.** That's what Mathboard is developed and tested in. It needs ES
@@ -257,7 +314,11 @@ all three.
 | ← → | Previous / next page (also PageUp / PageDown) |
 | Ctrl+Z | Undo |
 | Ctrl+Y | Redo (also Ctrl+Shift+Z) |
-| Esc | Close the open panel |
+| Enter | Convert now; commit the waiting readings |
+| P | Hold: nothing converts until you release it |
+| 1 2 | Pick a reading when the recognizers disagree; pick a look-alike |
+| Delete | Delete the lasso selection |
+| Esc | Close the open panel, else drop the selection, else keep the ink of a reading |
 
 </td><td>
 
@@ -291,8 +352,9 @@ all three.
 | A | Attention panel |
 | M / Shift+M | Next / previous Attention view |
 | E | Explain |
-| ← → | Explain steps (also PageUp / PageDown); reshape steps in the 3D tensor view |
+| ← → | Explain steps (also PageUp / PageDown); reshape steps in the 3D tensor view; Flow stages |
 | D / Shift+D | 3D view / next 3D view |
+| G / Shift+G | Flow view / play its stages |
 | P / Shift+P | 3D plots panel / next plot |
 | Delete | Remove the selection |
 | Esc | End Explain, else close the cheat sheet, else deselect |
@@ -318,39 +380,68 @@ Everything below is the full manual. Each part is folded; open the one you need.
 
 | Key | |
 |---|---|
-| **M** | Math pen: grouped into expressions and converted |
+| **M** | Math pen: grouped into expressions and converted. Tap a typeset symbol for its look-alikes; a zig-zag over ink erases it |
 | **D** | Draw pen: diagrams, arrows, circling things. Never converted |
 | **E** | Eraser (also right-drag, or the pen's eraser end). Touching typeset reveals its handwriting so you can fix it |
-| **S** | Select: tap an expression to edit its LaTeX / re-recognize / copy / keep as ink / delete / send to 3D; drag to move |
+| **S** | Select: tap an expression to edit its LaTeX / re-recognize / copy / keep as ink / delete / send to 3D; drag to move; drag on empty board to lasso |
+| **Enter** | Convert now: every waiting expression on the page, and commit the readings waiting under the ink |
+| **P** | Hold (the pause icon): nothing converts until you release it or press Enter |
+| **Esc** | Close the open panel, else drop the lasso selection, else keep the ink and drop the reading under it |
+| **1**, **2** | Pick reading 1 or 2 when the recognizers disagree; in the look-alike menu, pick that look-alike |
 | **L** | Laser pointer |
 | **H** | Hide all UI (clean view for the audience) |
 | **T** | Chalkboard / whiteboard theme |
 | **N**, **←/→** | New page, previous/next page (PageUp/PageDown work too) |
 | **Ctrl+Z / Ctrl+Y** | Undo / redo (Ctrl+Shift+Z also redoes; Cmd works on a Mac). Undo is per page |
 
-- **Grouping:** strokes that overlap or sit close together (about one symbol-gap sideways, a
-  small gap vertically) form one expression. Leave a clear gap, or start a new line, for a new
-  expression. A stroke that touches two expressions merges them. Drawing brackets around matrix
-  entries merges the entries into one matrix. Tune with *Settings → Grouping reach*.
-- **Converting:** an expression is sent once the pen has been idle on it for the *Convert after*
-  delay (700 ms by default). A faint dashed outline marks expressions waiting their turn. A
-  failed recognition is retried up to three times; after that the outline turns red.
+- **Grouping:** strokes that overlap or sit close together form one expression. The reach scales
+  with your handwriting (0.9 of a symbol sideways, 0.35 vertically, measured from your last 30
+  symbols). A fraction bar gathers what is written above and below it, a small exponent or
+  subscript joins the symbol it floats next to, and a stroke that starts at or left of an
+  expression's left edge, entirely below it, starts a new line. A stroke that touches two
+  expressions merges them; brackets drawn around matrix entries merge the entries. While you
+  write, a dashed outline shows the expression the stroke will join. Tune with *Settings →
+  Grouping reach*. To fix a grouping, lasso with Select and use **Group** or **Split**.
+- **Converting:** an expression is sent as soon as you start writing somewhere else, otherwise once
+  the pen has been idle on it for the *Convert after* delay (1200 ms for a mouse, 75% of it for a
+  pen), and not while the pointer hovers near it (up to 3 s). **Enter** converts now, **Hold**
+  (P) pauses it. A faint dashed outline marks expressions waiting their turn. A failed
+  recognition is retried up to three times; after that the outline turns red. Nothing
+  recognized (NONE, an empty matrix) keeps the ink.
+- **Preview** (*Settings → Convert*, the default): the reading appears in a small chip under the
+  ink. Click it or press Enter to replace the ink with typeset, Esc to keep the ink. Writing
+  somewhere else commits it (*Commit when you write elsewhere*), except when the recognizers
+  disagreed or only one of them answered: then the chip shows both readings (1, 2) and waits for
+  you. **Auto** replaces the ink in place as soon as it is read; **Off** only reads on Enter.
 - **Adding to an expression:** write next to converted typeset (e.g. `= 5` after `2 + 3`). The
-  old typeset stays dimmed while the whole expression re-converts.
+  old typeset stays dimmed while the whole expression re-converts. The typeset is sized like your
+  handwriting, and grouping uses what you see: the typeset, not the hidden ink.
+- **Corrections stick:** a LaTeX edit is kept when you add strokes (the new reading is offered as
+  a "Use" suggestion), and a look-alike you pick stays picked when the expression is read again.
+  **Re-recognize** asks the other recognizer when the server has two, or sends a different
+  rendering.
+- **Lasso** (Select, drag on empty board): **Group** makes the selection one expression, **Split**
+  takes it out of its expressions, **To math** turns Draw-pen ink into math, **Keep as ink** makes
+  it plain ink, the bin deletes it. Drag inside the selection to move it.
 - **Select:** tap an expression to open its editor: **Apply** (Enter) your LaTeX edits,
   **Re-recognize**, **Copy**, **Send to 3D** (adds it to the 3D tab as a row, replacing a row that
-  defines the same name), **Keep as ink** (plain ink that is never converted) or **Delete**. Drag
-  to move expressions, Draw-pen strokes and pictures; drag a picture's bottom-right corner to
-  resize it.
+  defines the same name), **Keep as ink** (plain ink that is never converted) or **Delete** (the
+  bin icon). Drag to move expressions, Draw-pen strokes and pictures; drag a picture's
+  bottom-right corner to resize it.
 - **Colours:** the swatches in the toolbar set the colour of the pen you used last. Each theme has
   its own palette.
 - **Pen input:** pressure changes the line width. Once a pen has been used, touch input is ignored,
   so your palm doesn't draw.
-- **Settings (⚙):** *Model* (installed vision models, switched live), *Convert after*,
-  *Grouping reach*, *Max typeset size*, *Handwriting after conversion* (hidden or faint), *Theme*,
-  and *Erase all pages…*
+- **Pen input:** a pen or touch screen switches the timing and thresholds (a pen writes smaller
+  and waits less); see [docs/BOARD_UX.md](docs/BOARD_UX.md).
+- **Settings** (the sliders icon): *Model* (installed vision models, switched live),
+  *Recognizer* (when the server offers several: Qwen3-VL, Uni-MuMER or both), *Convert* (Auto,
+  Preview, Off), *Commit when you write elsewhere*, *Convert after*, *Grouping reach*, *Max
+  typeset size*, *Faint handwriting after conversion* (off hides it), *Theme*, and *Erase all
+  pages…*
 - **Export** downloads the converted expressions of every page as Markdown, with `$$…$$` blocks
-  in reading order (`mathboard-YYYY-MM-DD-HH-MM.md`). Draw-pen ink and pictures are left out.
+  in reading order (`mathboard-YYYY-MM-DD-HH-MM.md`), including readings still waiting under their
+  ink. Draw-pen ink and pictures are left out.
 - **Autosave:** the pages and settings are saved to the browser's local storage, so a refresh
   keeps your board. The undo history is not saved.
 
@@ -369,7 +460,24 @@ you say otherwise with `@` (see the example in the [tour](#3d-tab)).
   plus a vector is a point. `u.x` reads a component. Constants `i j k`, `pi` (or `π`) and `e`.
 - **Products and lengths:** `dot`, `cross`, `u · v`, `u × v`, `|u|` (also `norm`, `length`,
   `mag`, `abs`), `unit` (also `normalize`), `proj(u, v)`, `angle(u, v)`, `deg`, `rad`.
-- **Numbers:** `sin cos tan asin acos atan sqrt exp ln log` (base 10), `min`, `max`.
+- **Numbers:** `sin cos tan asin acos atan sqrt exp ln log` (base 10), `min`, `max`, `sinh cosh
+  erf sign floor ceil round`, `mod(a, b)`.
+- **Functions and graphs:** a row with a free `x` draws a curve (`x^2`, `y = sin(x)`, `x = y^2`), and
+  free `x` and `y` draw a surface (`z = x^2 - y^2`, `sin(x) cos(y)`). A row named `x`, `y` or `z`
+  that uses an undefined coordinate is an equation to draw rather than a definition, so several
+  `y = ...` rows can sit side by side. Once `x` is defined (`x = (1, 1, 0)`), `A x` is an ordinary
+  vector again. `f(x) = ...` defines a function other rows can call (`f(2)`, `g(t) = f(t) + 1`); with
+  one or two parameters it is drawn too, and a vector value draws a curve through space
+  (`c(t) = (cos(t), sin(t), t/4)`). Primes take derivatives: `f'(x)`, `f''(2)`. Graphs follow
+  sliders (`y = a sin(x)`), `transform(A, t)` carries them, and they are clipped to the axes box.
+- **Activations:** `sigmoid` (or `σ`), `tanh`, `relu`, `leakyrelu(x, a)` (a = 0.01 unless given),
+  `elu(x, a)`, `gelu`, `softplus`, `silu` (or `swish`), `mish`, `heaviside`. A row that is only a
+  function's name draws it and shows its formula; add `'` for the derivative (`sigmoid'` shows
+  σ(x)(1 − σ(x))), which is how the vanishing gradient of a sigmoid chain looks.
+- **Softmax:** `softmax(v)` turns three logits into probabilities (`softmax(v, T)` with a
+  temperature), and `logsumexp(v)`. A bare `softmax` row draws the probability triangle and where
+  the grid of logits lands on it. `softmax(T)` does the same at temperature `T`: make `T` a slider
+  and the grid crowds into the corners as T goes to 0. **Fit** zooms to the triangle.
 - **Shapes:** `span(u, v)`, `plane(n)`, `parallelogram(u, v)`, `parallelepiped(u, v, w)`.
 - **Matrices:** `[[1,0,0],[0,2,0],[0,0,1]]` or `[1 0 0; 0 2 0; 0 0 1]` (rows; spaces separate
   entries, `;` rows), `matrix(u, v, w)` (columns), with `A u`, `det`, `inv`, `transpose` / `A^T`,
@@ -384,8 +492,9 @@ you say otherwise with `@` (see the example in the [tour](#3d-tab)).
   (a trail keeps its last 3000 points). A slider passed as `t`, `k` or `n` to the functions below
   gets a matching range (0..1 for `transform(A, t)`, for example).
 - **Rows panel:** Enter adds a row, Backspace on an empty row deletes it, ↑/↓ move between rows.
-  The colour dot shows or hides a row, × deletes it, « folds the list away. **Fit** rescales the
-  axes to fit everything and **Reset view** resets the camera.
+  The colour dot shows or hides a row (a ring means hidden), × deletes it, ‹ folds the list away
+  and › (beside the tabs) brings it back. **Fit** rescales the axes to fit everything and
+  **Reset view** resets the camera.
 - **Saving:** the rows (with colours and slider ranges and speeds), the axis extent and the folded
   list persist in local storage. The camera angle doesn't; a reload starts at the iso view.
 
@@ -399,7 +508,7 @@ Anything animated is driven by a slider variable: type `t = 0` and press its pla
 | Topic | Functions | Try |
 |---|---|---|
 | Linear combinations | `explain(A, v)` columns tip-to-tail · `chain(u, v, …)` · `trail(expr)` tip trail · `target(b, guess[, tol])` exercise, with a toast when you hit it | `target((1,5,2), a u + b v)` |
-| Geometry | `arc` `shadow` `components` `crossview` `line(p, q)` `plane3(p, q, r)` `intersect` `distance`; right-angle marks, which the **∟ Right angles** button turns off | `shadow(u, v)` |
+| Geometry | `arc` `shadow` `components` `crossview` `line(p, q)` `plane3(p, q, r)` `intersect` `distance`; right-angle marks, which the **Right angles** button turns off | `shadow(u, v)` |
 | Transformations | `transform(A, t)` and `transform(A, B, t)` (composition, t ∈ 0..2) morph the grid, basis and unit cube (det, orientation flip) and carry every other row along; `fixed(u)` opts out. Without `t` they show the end state. Singular matrices collapse their null space | `transform([[1,1],[0,1]], t)` |
 | Eigen / SVD | `eigen(A)` eigenlines (glow when a carried vector stays on its span; complex pairs spiral) · `svdview(A[, t])` sphere → ellipsoid in stages, t ∈ 0..3 | `eigen(A)` with `transform(A, t)` |
 | Dynamics / forms | `flow(A)` particles for dx/dt = Ax · `iterate(A, v, n)` · `power(A, v, n)` · `quadric(A[, c])` | `flow([[-0.3,-2],[2,-0.3]])` |
@@ -416,8 +525,10 @@ Anything animated is driven by a slider variable: type `t = 0` and press its pla
 - **Keys** (ignored while typing): 1-4 view presets, O ortho, R auto-rotate, ←/→ or
   PageUp/PageDown steps, P snapshot, V record, H hide all UI. H is the same clean view as on the
   board, so it works in every tab.
-- **Toolbar:** view presets Iso/Top/Front/Side, Ortho, Rotate, 2D mode, **Clear trails** and
-  **∟ Right angles**.
+- **Toolbar**, in three groups. Camera: the view presets Iso/Top/Front/Side (the one the camera
+  looks along is marked), Ortho and 2D mode. Display: **Right angles**, Rotate, Steps and TeX.
+  Output, as icons at the right: the audience window, PNG and record, then a … menu with
+  **To board** and **Clear trails**.
 - **TeX:** rows you aren't editing are typeset (column vectors, arrows on vector names).
 - **PNG (P) / Rec (V):** snapshot or video of the 3D view with its labels. Recording prefers MP4
   (H.264) and falls back to WebM.
@@ -465,6 +576,7 @@ the right edge, to hide the panel; double-click again to bring it back. The firs
 | **File** → **PNG**, **To board** | Download a picture of the network, or drop it on the current board page (like the 3D tab's To board) |
 | **Weights** | Numbers on the edges (W) |
 | **Lens** | Shows or hides the [lens bar](#lens) (L). A dot on the button means the lens is dimming or hiding something |
+| **3D**, **Flow** | The net in 3D (D), or the whole forward pass as matrix tiles, stage by stage (G, [Flow view](#flow-view)); either one replaces the canvas |
 | **Train** | Shows or hides the [Train panel](#train-panel) (open by default) |
 | **Attention** | Opens or closes the [Attention panel](#attention-panel) (A) |
 | **Explain** | Starts or ends [Explain](#explain), the guided walkthrough (E) |
@@ -477,7 +589,8 @@ sheet or deselects, F fits, N opens the New net menu, H hides the UI, ? cheat sh
 step-through, B bias trick, Space play / pause training, T one training step. 1–9 follow token n
 (on nets with tokens) and 0 stops, [ / ] focus the previous / next stage, L shows or hides the
 lens bar, A opens or closes the Attention panel, M / Shift+M switch its view, and E starts or ends
-Explain; while Explain runs, ← / → (or PageUp / PageDown) step through it.
+Explain; while Explain runs, ← / → (or PageUp / PageDown) step through it. D shows the 3D view and
+G the Flow view, where ← / → step through the stages and Shift+G plays them.
 
 - **Building from Blank:** Blank is an empty input and output layer. Double-click empty space to
   add a neuron to the nearest layer. It is wired to every neuron of the neighbouring layers with
@@ -575,24 +688,29 @@ Hover any cell, header or vector entry to light it on the canvas; click it to op
 <summary>Train panel</summary>
 
 **Train** opens a floating panel. Drag it by its title bar, double-click the title bar to put it
-back, and ▾ folds it (the folded header still shows the epoch, the loss and a play button).
+back, and the chevron at the right of the header folds it (the folded header still shows the
+epoch, the loss and a play button); the ? icon beside it says how to use it.
 
 - **Data:** XOR, circles, spiral, two blobs, moons (2 inputs → 1 class), three classes (2 → 3,
   one-hot), line and sine (1 → 1, regression), a flat 3-D cloud (3 → 3, for the PCA preset),
-  four token sequences and two datasets of three-word sentences for the attention presets, with
-  **points**, **noise** and **seed**. A preset picks the dataset that suits it (and, for the word
-  presets, noise 0). If the net's inputs and outputs don't match the
-  dataset, **Adapt network** resizes the input and output layers (hidden layers are kept; a token
+  four token sequences, two datasets of three-word sentences for the attention presets and a
+  next-word dataset for the tiny language model (their **points**, **noise** and **seed** are under
+  Settings). A
+  preset picks the dataset that suits it (and, for the word presets, noise 0). If the net's
+  inputs and outputs don't match the dataset, **Adapt network** resizes the input and output
+  layers (hidden layers are kept; a token
   net changes its features per token, or says why it can't) and sets a matching output
   activation and loss; until then Play and Step are disabled.
-- **Settings:** **loss** (MSE / x-entropy), **rate**, **batch** (1 to 128, or all) and
-  **speed** (training steps per frame).
+- **Settings** (folded under the dataset, its header sums them up; click it to unfold):
+  **points**, **noise**, **seed**, **loss** (MSE / x-entropy), **rate**, **batch** (1 to 128, or
+  all) and **speed** (training steps per frame).
 - **Play** (Space) trains live, **Step** (T) does one mini-batch step, **Reset** re-draws the
-  weights from the **init** seed (biases back to 0) and **↻** picks a new seed first. A preset
+  weights from the **init** seed (biases back to 0) and the dice picks a new seed first. A preset
   that starts some shared matrices its own way (the word presets' W_V = I) keeps that on Reset. A
   training run is one undo step. If the loss blows up, training pauses.
 - **Readout:** epoch, step, the loss over the whole dataset, accuracy for classification, word
-  accuracy for the [word datasets](#attention-reference), and a loss-per-epoch chart.
+  accuracy for the [word datasets](#attention-reference) and the next-word dataset, and a
+  loss-per-epoch chart.
 - **Plot:** with 2 inputs, the data over the network's decision regions; with 1 input, the data
   and the fitted curve. **plot** can instead pick a hidden layer with exactly 2 neurons: the data
   in that layer's activation space, with the input grid bent by the net. The yellow ring is the
@@ -620,9 +738,9 @@ The Attention presets add three things to the plain `z = W a + b` layers. The fu
   and its gradient is the sum of the per-token terms, which is the step training takes. A tied
   layer reads compactly as `Q = X W_Q`; **▸ Flattened: z = W a** under it opens the same layer as
   one block-diagonal `I ⊗ W_Qᵀ` product. Biases can be shared the same way (`1 b_Qᵀ`).
-- **Fixed edges** are dashed: residual connections (`+ X` in the matrix panel) and fixed pooling
-  weights. Training and Randomize never change them, Delete leaves them alone, and their card is
-  read-only.
+- **Fixed edges** are grey and dashed (they are not parameters, so they get no weight colour):
+  residual connections (`+ X` in the matrix panel) and fixed pooling weights. Training and
+  Randomize never change them, Delete leaves them alone, and their card is read-only.
 - **Attention layers** have no weights of their own. From the Q, K, V layer before them they
   compute `Z = softmax(QKᵀ/√d_k + M) V` for each head, where `M` is the causal mask when it is on.
   The canvas draws each A_ij as an edge from value token j to output token i, with width and
@@ -657,8 +775,16 @@ The Attention presets add three things to the plain `z = W a + b` layers. The fu
   word, shown below it), and the readout adds **words**, the word accuracy over the dataset. The
   two presets train on the exact vectors (noise 0) and start with W_V = I and small W_Q and W_K;
   Reset keeps that recipe, since from a fully random start many runs settle on a wrong,
-  swapped pattern. There is no next-word task: with a squared-error loss on word vectors, the
-  positions where the grammar allows several next words would need "don't care" targets.
+  swapped pattern. These two have no next-word task: with a squared-error loss on word vectors,
+  the positions where the grammar allows several next words would need "don't care" targets.
+- **Next word.** **Next word: dog chases cats** does it the language-model way instead: the words
+  come in one-hot over a 7-word vocabulary (`.` and the six words it uses), and each position's
+  target is the next word, scored by a softmax over the vocabulary with cross-entropy, so a
+  position whose next word is open can spread its probability. The inputs are `. subject verb`
+  and the targets `subject verb object`; the verb agrees with its subject and the object is the
+  other animal in the other number (dog chases cats), so the last position must look back at the
+  subject. The first word is a guess (1/4 on each noun), so word accuracy tops out near 75%. The
+  Tiny language model preset trains on it; the [Flow view](#flow-view) shows it best.
 
 </details>
 
@@ -666,7 +792,8 @@ The Attention presets add three things to the plain `z = W a + b` layers. The fu
 <details>
 <summary>Lens</summary>
 
-The lens bar sits at the bottom left of the canvas; **Lens** or L shows or hides it. The lens sets
+The lens bar sits at the bottom left of the canvas, hidden until **Lens** or L shows it (either
+hides it again). The lens sets
 what the canvas, the matrix panel and the cards light up; the rest is dimmed (drawn faint,
 without numbers). The bar only offers the controls that apply to the current net. The rules are
 in `static/nn/focus.js`.
@@ -764,7 +891,7 @@ what its caption says, and the end puts all three back as they were.
 
 <a name="presets"></a>
 <details>
-<summary>Presets (45, in 8 groups)</summary>
+<summary>Presets (46, in 8 groups)</summary>
 
 **Basics**
 
@@ -835,6 +962,7 @@ what its caption says, and the end puts all three back as they were.
 | Previous token by rotation (hand-set) (`causal_rot`) | 3×3 → 3×2 Q, K, V → 3×2 causal attention → 3×1 | Previous token, causal (3 tokens, c + position) | Hand-set causal attention. Positions come in as (cos θ, sin θ) and W_Q turns them back by 120°, so q_i points at k_(i−1) and token i copies c_(i−1). The loss starts near 0. |
 | Two heads: max and min (`multihead`) | 3×2 → 3×2 Q, K, V → 3×2 attention, 2 heads | Max and min of x₁ (3 tokens × 2) | heads = 2 splits Q, K and V by column: head 1 uses column 1 of each, head 2 column 2, and each head has its own A. Train: one head learns to find the largest x₁, the other the smallest. |
 | Transformer block (2 tokens) (`transformer`) | 2×2 → 2×2 Q, K, V → 2×2 attention → 2×2 → 2×4 ReLU → 2×2 | ReLU(own + max token) (2 tokens × 2) | One block, all weights tied: Z = softmax(QKᵀ/√2)V, H = X + ZW_O, Y = H + ReLU(HW₁)W₂, the + X and + H being fixed residual edges. No LayerNorm: with d = 2 it sends every token to (±1, ∓1). |
+| Tiny language model: next word (train it) (`tiny_lm`) | 3×7 → 3×4 → 3×4 Q, K, V → 3×4 causal attention, 2 heads → 3×4 → 3×16 ReLU → 3×4 → 3×7 Softmax | Next word: dog chases cats (3 positions × 7 words) | Words in, a softmax over 7 words out at each position: embedding + position, 2 causal heads, W_O, a ReLU FFN. Open Flow (G) and train: after dog chases, cats wins; the first word stays a 1-in-4 guess. |
 
 **Embeddings & autoencoders**
 
@@ -871,8 +999,8 @@ that fits its shape, or offers **Adapt network**. In the Net column, `3×2` is a
   (`{ x, y, w, mode }`). The lens settings and whether the Attention panel is open are not saved.
 - **Audience window:** opened from the Net or the 3D toolbar, it follows you into the Net tab and
   mirrors the net (training included), the selection and its card, hover, the step-through, W
-  labels, the matrix toggles, the matrix panel width, the lens, the Attention panel and Explain
-  live. It fits the net to its own size. The Train panel shows read-only and follows yours open or
+  labels, the matrix toggles, the matrix panel width, the lens, the Attention panel, Explain and
+  the Flow view (its lit stage, knocked-out heads and hovered cell) live. It fits the net to its own size. The Train panel shows read-only and follows yours open or
   folded; its position and pinned cards are not mirrored. The lens bar isn't shown, but the
   canvas, the matrix panel and the cards show what the lens does. The Attention panel shows
   read-only in your view, at your panel's position and width, and the Explain card shows without
@@ -881,8 +1009,8 @@ that fits its shape, or offers **Adapt network**. In the Net column, `3×2` is a
   the matrix toolbar, the → 3D buttons, the connect dots and the lens bar go, and the divider is
   locked; cards stay up without their pin, close and "+ add" buttons (they still work), and the
   Train panel keeps its readout, chart and plot but hides its settings and buttons. The Attention
-  panel hides its close, resize, Send to 3D and scale reset, and the Explain card its buttons
-  (the keys still work). Press H again (or Alt+1/2/3) to get around.
+  panel hides its close, resize, Send to 3D and scale reset, the Explain card its buttons and the
+  Flow view's bar everything but its caption (the keys still work). Press H again (or Alt+1/2/3) to get around.
 - **Links for testing:** `index.html#nn=xor` (or another preset key, such as `mlp` or `deep`) or
   `#nn=<base64url JSON>` opens the Net tab with that net. The net and the last tab aren't saved from such a link. `#graph=` wins if both are given.
 
@@ -890,13 +1018,16 @@ that fits its shape, or offers **Adapt network**. In the Net column, `3×2` is a
 
 ## How it works
 
-**Board.** `static/app.js` groups Math-pen strokes into expressions by bounding-box proximity.
-When an expression has been idle for the *Convert after* delay and the pen is up, it is
-rasterized black-on-white (longest side at most 768 px) and POSTed to `server.py`, which forwards
-it to Ollama's `/api/chat` with a transcription prompt at temperature 0. The reply is stripped of
-code fences and math delimiters, obvious matrix misreads (a hand-drawn 1 read as a bracket) are
-fixed, and the result is rendered with KaTeX, scaled to fit the handwriting's bounding box. Every
-edit bumps the expression's version, so stale results are dropped.
+**Board.** `static/app.js` groups Math-pen strokes into expressions with the size-relative rules
+in `static/board/geom.js` (reach, fraction bars, scripts, new lines). When you move on, or an
+expression has been idle for the *Convert after* delay and the pen is up, it is rasterized
+black-on-white and POSTed to `server.py` with `symbol_px` (the median symbol height in the
+image) and the strokes, and optionally a `backend`. The server normalizes the crop and asks
+qwen3-vl in Ollama, Uni-MuMER in llama.cpp, or both ([docs/BOARD_BACKENDS.md](docs/BOARD_BACKENDS.md)).
+The reading is shown as a preview or typeset in place, rendered with KaTeX and sized like the
+handwriting; `static/board/tex.js` maps each typeset symbol back to its LaTeX token for the
+look-alike menu and keeps your picks. Every edit bumps the expression's version, so stale results
+are dropped. The interaction rules and their numbers are in [docs/BOARD_UX.md](docs/BOARD_UX.md).
 
 **Server.** `server.py` is standard-library Python. It serves the UI on 127.0.0.1, loads the model
 at startup (pulling it if missing), keeps it resident while a board is open, and logs every
@@ -916,7 +1047,8 @@ and colours. `nn.js` is the shell (layout, toolbar, keys, persistence, module lo
 mirror API that `graph/features/lecture.js` carries to the audience window). It loads `view.js`
 (the canvas), `inspector.js` (the cards), `matrix.js` (the matrix panel and step-through),
 `train.js` (datasets, training and plots), `lens.js` (the lens bar), `attnviz.js` (the Attention
-panel), `tour.js` (Explain), `view3d.js` (the 3D view) and `surf3d.js` (the 3D plots panel),
+panel), `tour.js` (Explain), `view3d.js` (the 3D view), `surf3d.js` (the 3D plots panel) and
+`flow.js` (the Flow view),
 each with its own CSS and isolated so a broken one doesn't take
 the others down. `focus.js` holds the lens's rules as pure functions (how strongly each neuron,
 edge and attention edge belongs to the lens, and what it hides), so the canvas, the matrix panel,
@@ -926,27 +1058,37 @@ step-through and the caption in the shared state, which the audience window mirr
 layers, shared weights and attention are specified in
 [docs/NN_ATTENTION.md](docs/NN_ATTENTION.md); the lens, the Attention panel, Explain and token
 names in [docs/NN_LENS.md](docs/NN_LENS.md); the 3D view in [docs/NN_3D.md](docs/NN_3D.md) and the
-3D plots in [docs/NN_3D_PLOTS.md](docs/NN_3D_PLOTS.md). Both load three.js only when first opened.
+3D plots in [docs/NN_3D_PLOTS.md](docs/NN_3D_PLOTS.md) (both load three.js only when first opened);
+the Flow view and the tiny language model in [docs/NN_FLOW.md](docs/NN_FLOW.md).
 
 ## Project layout
 
 ```
-server.py              HTTP server and Ollama bridge (standard library only)
+server.py              HTTP server, recognition backends (Ollama, llama-server) and LaTeX clean-up
 start_mathboard.bat    Windows launcher; passes its arguments to server.py
 static/
   index.html           the page with all three tabs
-  app.js, style.css    the board
+  app.js               the board
+  style.css            design tokens, shared ui-* components, the board and the 3D tab (docs/DESIGN.md)
+  icons.js             the line icons every tab uses
+  board/               the board's pure logic: geom.js (grouping, scratch-out, lasso), tex.js (tap-a-symbol, look-alikes, locks, replies)
   graph/               3D tab: lang.js, linalg.js, scene.js, grapher.js
-    features/          transform, fields, combos, systems, dual, lecture, present, bridge, drag
+    features/          plots, transform, fields, combos, systems, dual, lecture, present, bridge, drag
   nn/                  Net tab: model.js, store.js, nn.js, view.js, inspector.js, matrix.js, train.js,
-                       lens.js, focus.js, attnviz.js, tour.js, view3d.js, surf3d.js
+                       lens.js, focus.js, attnviz.js, tour.js, view3d.js, surf3d.js, flow.js
   vendor/              KaTeX 0.16.47 and three.js r186, with their licenses
 tests/                 node:test suites, plus draw_test.js (see Testing)
+tools/                 eval_board.py (replays a labelled set against a backend), test_server.py
 docs/
+  DESIGN.md            the design system: tokens, components, icons, decisions
   FEATURE_GUIDE.md     how 3D feature modules plug in, and the browser test recipe
+  BOARD_UX.md          the board's grouping, timing, preview and correction rules
+  BOARD_BACKENDS.md    the recognition backends, their measurements and the API
+  BOARD_DIAGNOSIS.md   why the board misread, measured; BOARD_RESEARCH.md surveys models and pen UX
   NN_CONTRACT.md       interfaces between the Net tab modules
   NN_ATTENTION.md      tokens, shared weights and attention in the Net tab
   NN_LENS.md           the lens, the Attention panel, Explain and token names
+  NN_FLOW.md           the Flow view, the tiny language model and its next-word dataset
   media/               the images in this README
 ```
 
@@ -956,10 +1098,14 @@ docs/
 npm test               # same as: node --test "tests/*.test.mjs"
 ```
 
-The suites cover the 3D language and numeric core, the pure logic of each 3D feature module, the
+The suites cover the board's grouping, scratch-out and lasso geometry (`tests/board_geom.test.mjs`)
+and its symbol mapping, look-alikes, locks and reply handling, checked against the vendored KaTeX
+(`tests/board_tex.test.mjs`), the 3D language and numeric core, the pure logic of each 3D feature module, the
 Net tab's model (maths, edits, presets and datasets), and in `tests/nn_focus.test.mjs` the lens
 rules (focus, token, head, the edge toggles and thresholds, cleaning and stage order) and the
-token-name rule, which Explain's captions are checked against too. They need Node 22 or newer and
+token-name rule, which Explain's captions are checked against too, and in `tests/nn_flow.test.mjs`
+the Flow view's maths (its recomputed forward pass, knocking a head out, and the stages and
+traces it builds for every preset). They need Node 22 or newer and
 nothing else. GitHub Actions runs them on every push and pull request, along with
 `python -m py_compile server.py`.
 

@@ -8,6 +8,12 @@
 // in the view or the matrix) updates text and attributes in place through cached setters. While
 // the Train panel runs, the KaTeX boxes refresh at 10 Hz (sliders and bars every frame).
 //
+// A card is quiet by default (docs/DESIGN.md, A13 to A21): the head (the name, a neuron's value,
+// the kind and the activation), a line on where it sits, the value slider of a parameter (an
+// input, a weight) and the one-line computation. Everything else sits in folded sections with a
+// summary in their head. Folding is remembered per section kind (localStorage
+// 'mathboard.nn.inspector' = { folds: { key: folded } }), and an audience window follows it.
+//
 // Token layers, shared (tied) and fixed weights and attention layers (docs/NN_ATTENTION.md) get
 // their own cards: an attention neuron shows its scores q_i . k_j, its row of A as bars and
 // z = sum_j A_ij V_jf; a tied edge is a shared parameter whose slider moves its whole group and
@@ -20,6 +26,13 @@ import { emphasis, tokenNames } from './focus.js';
 const CARD_W = 322;
 const GAP = 16;        // px between a card and its target
 const EDGE = 8;        // px kept clear of the stage border
+const UI_KEY = 'mathboard.nn.inspector';
+// Sections that start open. Every other section starts folded, until the user opens it.
+const OPEN_BY_DEFAULT = new Set();
+// The floating panels a card keeps clear of when it can (the same panels view.fit avoids).
+const PANELS = '.nn-train, .nn-attnviz, .nn-s3d, .nn-lens, .nn-tour';
+const PANEL_COST = 12;   // covering a whole panel: about three of the neurons being explained
+const ACT_NAME = { identity: 'identity', relu: 'ReLU', leaky: 'leaky ReLU', sigmoid: 'sigmoid', tanh: 'tanh', softmax: 'softmax' };
 const SPAN = 3;        // default slider half-range; grows to fit larger values
 const MAX_TERMS = 9;   // longer sums are elided with \cdots
 const FN = {
@@ -75,6 +88,34 @@ function setTex(el, src, display = false) {
   catch { el.textContent = src; }
 }
 
+// Words in the UI font with maths set in KaTeX: parts are strings (text) and { m: tex } (maths).
+// Token names are text parts, so a name holding $ or \ stays text.
+const mth = m => ({ m });
+function setRich(el, parts) {
+  const key = JSON.stringify(parts);
+  if (el._rich === key) return;
+  el._rich = key;
+  el.replaceChildren();
+  for (const p of parts) {
+    if (p == null || p === '') continue;
+    if (typeof p === 'object') {
+      const s = document.createElement('span');
+      s.className = 'nn-m';
+      setTex(s, p.m);
+      el.append(s);
+    } else el.append(String(p));
+  }
+}
+
+// A line icon from static/icons.js (docs/DESIGN.md, Icons), or null when it has not loaded.
+function icon(name, size = 14) {
+  const s = globalThis.mathboardIcons?.svg(name, { size });
+  if (!s) return null;
+  const t = document.createElement('template');
+  t.innerHTML = s;
+  return t.content.firstElementChild;
+}
+
 function texString(src) {
   const k = globalThis.katex;
   if (!k) return null;
@@ -116,6 +157,7 @@ function wrapSum(lead, parts, budget) {
 }
 
 const numText = x => (Number.isFinite(x) ? String(+x.toFixed(3)) : '');
+const um = s => String(s).replace(/-(?=[\d.])/g, '−');   // a Unicode minus, for numbers in HTML text
 function parseNum(s) {
   const t = String(s ?? '').trim().replace(/−/g, '-');
   return NUM_RE.test(t) ? +t : null;
@@ -170,8 +212,34 @@ export function install(ctx) {
   stage.append(layerEl);
 
   const cards = [];
-  const folded = new Set();   // section keys the user folded; shared by every card
   let follow = null;          // the unpinned card that shows state.sel
+
+  // Fold state per section kind ('node.grad', 'layer.act', ...): the user's choices, remembered
+  // across sessions; an unset key takes its default (OPEN_BY_DEFAULT). An audience window only
+  // reads it, and follows the presenter's changes through 'storage' events.
+  const readFolds = () => {
+    try {
+      const o = JSON.parse(localStorage.getItem(UI_KEY) || 'null');
+      return o && o.folds && typeof o.folds === 'object' ? o.folds : {};
+    } catch { return {}; }
+  };
+  let folds = readFolds();
+  const isFolded = key => (Object.prototype.hasOwnProperty.call(folds, key) ? !!folds[key] : !OPEN_BY_DEFAULT.has(key));
+  function saveFold(key, on) {
+    folds = { ...readFolds(), [key]: on };
+    if (ro) return;
+    try { localStorage.setItem(UI_KEY, JSON.stringify({ folds })); } catch { /* private mode: this session only */ }
+  }
+  window.addEventListener('storage', e => {
+    if (e.key !== UI_KEY) return;
+    folds = readFolds();
+    for (const c of cards) {
+      for (const sec of c.body.querySelectorAll('.nn-sec[data-sec]')) {
+        const on = isFolded(sec.dataset.sec);
+        if (sec.classList.contains('folded') !== on) setFolded(c, sec, on);
+      }
+    }
+  });
   let zTop = 1;
   let visible = !document.body.dataset.view || document.body.dataset.view === 'nn';
   let raf = 0;
@@ -296,6 +364,7 @@ export function install(ctx) {
   const aSym = (l, j) => (l === 0 ? `x_{${j}}` : `a^{(${l})}_{${j}}`);
   // gradients: 3 decimals, and below 0.01 two significant figures (0.0034, 3.4e-4) as the matrix panel
   const g3 = v => (!Number.isFinite(v) ? '?' : M.fmtg ? M.fmtg(v, 3).replace(/e(-?\d+)$/, '\\mathrm{e}{$1}') : fmt(v, 3));
+  const gfmt = v => (!Number.isFinite(v) ? '?' : M.fmtg ? M.fmtg(v, 3) : fmt(v, 3));   // the same, as plain text
   const aligned = lines => `\\begin{aligned} ${lines.join(' \\\\ ')} \\end{aligned}`;
   // A term "w · v" with a negative weight's minus pulled out front (it keeps its sign colour).
   const wTerm = (w, v) => {
@@ -373,15 +442,23 @@ export function install(ctx) {
   }
 
   function open(target, { pin = false } = {}) {
-    const c = { target, pinned: pin, dragged: false, x: 0, y: 0, binds: [], hov: [], dims: [], akey: '', failed: false };
+    const c = { target, pinned: pin, dragged: false, x: 0, y: 0, binds: [], hov: [], dims: [], lines: [], akey: '', failed: false, hold: false, placed: false, editing: null };
     c.title = h('span', { class: 'nn-insp-title' });
-    c.kind = h('span', { class: 'nn-insp-kind' });
-    c.pinBtn = h('button', { class: 'nn-insp-btn nn-insp-pin', title: 'Pin: keep this card open (the next selection opens another)' }, pinIcon());
-    c.closeBtn = h('button', { class: 'nn-insp-btn', title: 'Close' }, '×');
-    c.head = h('header', { class: 'nn-insp-head', title: 'Drag to move. Double-click to put it back next to its target.' },
-      c.title, c.kind, h('span', { class: 'nn-insp-sp' }), ro ? null : c.pinBtn, ro ? null : c.closeBtn);
-    c.body = h('div', { class: 'nn-insp-body' });
-    c.el = h('div', { class: 'nn-insp' + (ro ? ' ro' : '') }, c.head, c.body);
+    c.val = h('span', { class: 'nn-insp-val', hidden: true });
+    c.kind = h('span', { class: 'nn-insp-kind ui-float-meta' });
+    const act = (cls, ic, title, fallback) => {
+      const b = h('button', { class: `nn-insp-btn ${cls} ui-btn xs icon`, title, 'aria-label': title });
+      b.append(icon(ic) || fallback);
+      return b;
+    };
+    c.editBtn = act('nn-insp-edit', 'pencil', 'Rename (or double-click the name)', '✎');
+    c.pinBtn = act('nn-insp-pin', 'pin', 'Pin: keep this card open (the next selection opens another)', pinIcon());
+    c.closeBtn = act('nn-insp-close', 'close', 'Close', '×');
+    c.head = h('header', { class: 'nn-insp-head ui-float-head drag', title: 'Drag to move. Double-click to put it back next to its target.' },
+      c.title, c.val, c.kind, h('span', { class: 'nn-insp-sp ui-float-sp' }),
+      ro ? null : c.editBtn, ro ? null : c.pinBtn, ro ? null : c.closeBtn);
+    c.body = h('div', { class: 'nn-insp-body ui-float-body' });
+    c.el = h('div', { class: 'nn-insp ui-float' + (ro ? ' ro' : '') }, c.head, c.body);
     c.el.style.width = CARD_W + 'px';
     for (const ev of STOP) c.el.addEventListener(ev, e => e.stopPropagation(), { passive: true });
     c.el.addEventListener('pointerdown', () => raise(c));
@@ -393,10 +470,15 @@ export function install(ctx) {
       if (c === follow || same(c.target, store.state.sel)) store.set('sel', null);
       if (cards.includes(c)) close(c);
     });
+    c.editBtn.addEventListener('click', () => editTitle(c));
     c.head.addEventListener('pointerenter', () => { if (!ro) store.set('hover', { kind: c.target.kind, id: c.target.id }); });
     c.head.addEventListener('pointerleave', () => clearHover({ kind: c.target.kind, id: c.target.id }));
     c.head.addEventListener('dblclick', e => {
-      if (e.target.closest('button')) return;
+      if (e.target.closest('button, input')) return;
+      // on the name: rename (by position: the drag's pointer capture retargets the clicks to the head)
+      const tr = c.title.getBoundingClientRect();
+      const onTitle = e.clientX >= tr.left && e.clientX <= tr.right && e.clientY >= tr.top - 4 && e.clientY <= tr.bottom + 4;
+      if (onTitle && c.target.kind !== 'edge') { editTitle(c); return; }
       c.dragged = false; c.akey = ''; ensureLoop();
     });
     dragHandle(c);
@@ -453,6 +535,44 @@ export function install(ctx) {
     if (hoverKey(store.state.hover) === hoverKey(t)) store.set('hover', null);
   }
 
+  // Rename in place: a neuron's KaTeX label or a layer's name, in a field over the title. It
+  // updates the canvas as you type; Enter (or leaving the field) commits, Esc puts it back.
+  function editTitle(c) {
+    const t = c.target;
+    if (ro || c.editing || t.kind === 'edge' || !exists(t)) return;
+    const isLayer = t.kind === 'layer';
+    const get = () => (isLayer ? layerOf(t.id)?.name : node(t.id)?.label) ?? '';
+    const set = v => (isLayer ? M.setLayer(net(), t.id, { name: v }) : M.setNode(net(), t.id, { label: v }));
+    const before = get();
+    const inp = h('input', {
+      type: 'text', class: 'nn-insp-rename ui-field sm' + (isLayer ? '' : ' mono'), value: before,
+      spellcheck: 'false', autocomplete: 'off', placeholder: isLayer ? 'name' : 'KaTeX label',
+      'aria-label': isLayer ? 'Layer name' : 'KaTeX label', title: 'Enter to keep, Esc to cancel',
+    });
+    c.editing = inp;
+    c.head.classList.add('editing');
+    c.title.after(inp);
+    inp.focus();
+    inp.select();
+    let done = false;
+    const finish = keep => {
+      if (done) return;
+      done = true;
+      if (!keep) { if (get() !== before) { set(before); store.touch(); } }
+      else if (exists(t) && inp.value !== before) { set(inp.value); store.commit(isLayer ? 'layer name' : 'label'); }
+      inp.remove();
+      c.editing = null;
+      c.head.classList.remove('editing');
+      if (cards.includes(c)) update(c);
+    };
+    inp.addEventListener('input', () => { if (exists(t)) { set(inp.value); store.touch(); } });
+    inp.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+      else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(false); }
+    });
+    inp.addEventListener('blur', () => finish(true));
+  }
+
   // ---------------------------------------------------------------- placement
 
   function anchor(t) {
@@ -490,16 +610,18 @@ export function install(ctx) {
     setStyle(c.el, 'top', c.y + 'px');
   }
 
-  // Where a card may go. view.fit() frames the net in all the room beside the Train panel, so a
-  // card level with its target usually has to cover something. Each x along the stage is scored
-  // by what the card would hide:
+  // Where a card may go. view.fit() frames the net in the room the floating panels leave free, so
+  // a card level with its target usually has to cover something. Each spot is scored by what the
+  // card would hide:
   // - its target: never;
   // - neurons in the target's layers and their neighbours (the ones being explained): 4 each;
   //   any other neuron: 1;
   // - the rest of the net's box, where the next neuron gets added while building: up to 3;
-  // - the Train panel: up to 3; a card placed before this one: up to 2;
-  // then the nearest to the target wins a tie. So a card sits off the net when there is room,
-  // over the Train panel before over the net's middle, and otherwise over the far layers.
+  // - a floating panel (Train, Attention, 3D plots, the lens bar, Explain): up to PANEL_COST;
+  //   a card placed before this one: up to 6;
+  // plus how far it strays from level with its target, and the nearest to the target wins a tie.
+  // So a card sits off the net and the panels when there is room (beside the net, or under a
+  // folded panel), and otherwise over the far layers before over a panel.
   const overlap = (a, b) => Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x))
     * Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
 
@@ -510,8 +632,19 @@ export function install(ctx) {
     return [M.layerIndex(n, t.id)];
   }
 
-  function bestX(c, r, y, w, hh, sw) {
-    const v = ctx.view, n = net(), card = x => ({ x, y, w, h: hh });
+  // The open floating panels, in stage px (hidden and folded-away ones have no box).
+  function panelRects() {
+    const sr = stage.getBoundingClientRect(), out = [];
+    for (const el of stage.querySelectorAll(PANELS)) {
+      if (el.hidden || !el.offsetWidth || layerEl.contains(el)) continue;
+      const tr = el.getBoundingClientRect();
+      if (tr.width && tr.height) out.push({ x: tr.left - sr.left, y: tr.top - sr.top, w: tr.width, h: tr.height });
+    }
+    return out;
+  }
+
+  function bestPos(c, r, level, w, hh, sw, sh) {
+    const v = ctx.view, n = net();
     const t = c.target;
     const own = new Set(t.kind === 'node' ? [t.id] : t.kind === 'edge' ? [edge(t.id)?.from, edge(t.id)?.to]
       : M.nodesIn(n, M.layerIndex(n, t.id)).map(q => q.id));
@@ -525,47 +658,64 @@ export function install(ctx) {
     const soft = [];   // [box, full cost]
     const cr = v?.contentRect?.();
     if (cr && cr.w > 0 && cr.h > 0) soft.push([cr, 3]);
-    const sr = stage.getBoundingClientRect();
-    for (const el of stage.querySelectorAll('.nn-train, .nn-attnviz, .nn-s3d')) {
-      if (el.hidden || !el.offsetWidth) continue;
-      const tr = el.getBoundingClientRect();
-      soft.push([{ x: tr.left - sr.left, y: tr.top - sr.top, w: tr.width, h: tr.height }, 3]);
-    }
+    const panels = panelRects();
+    for (const p of panels) soft.push([p, PANEL_COST]);
     for (const o of cards) {
       if (o === c) break;
-      if (o.el.offsetWidth) soft.push([{ x: o.x, y: o.y, w: o.el.offsetWidth, h: o.el.offsetHeight }, 2]);
+      if (o.el.offsetWidth) soft.push([{ x: o.x, y: o.y, w: o.el.offsetWidth, h: o.el.offsetHeight }, 6]);
     }
     const lo = EDGE, hi = Math.max(EDGE, sw - w - EDGE), cx = r.x + r.w / 2;
     const xs = new Set([lo, hi, r.x + r.w + GAP, r.x - GAP - w]);
     for (const [b] of soft) { xs.add(b.x - GAP - w); xs.add(b.x + b.w + GAP); }
     for (let x = lo; x < hi; x += 16) xs.add(x);
+    // Level with the target first; else just under or over a panel, or against the stage's edge.
+    const top = EDGE, bot = Math.max(EDGE, sh - hh - EDGE);
+    const ys = new Set([level, top, bot]);
+    for (const p of panels) { ys.add(p.y + p.h + GAP / 2); ys.add(p.y - GAP / 2 - hh); }
+    const cost = (x, y) => {
+      const box = { x, y, w, h: hh };
+      let s = 0;
+      for (const q of nodes) if (overlap(box, q.r) > 0) s += q.cost;
+      for (const [b, full] of soft) s += (full * overlap(box, b)) / Math.max(1, Math.min(w * hh, b.w * b.h));
+      s += (2 * Math.abs(y - level)) / Math.max(1, sh);          // straying from level with the target
+      return s + Math.abs(x + w / 2 - cx) / (sw * 100);         // tie-break: nearer the target
+    };
     let best = null;
-    for (const x0 of xs) {
-      const x = Math.round(Math.max(lo, Math.min(hi, x0))), box = card(x);
-      let cost = 0;
-      for (const q of nodes) if (overlap(box, q.r) > 0) cost += q.cost;
-      for (const [b, full] of soft) cost += (full * overlap(box, b)) / Math.max(1, Math.min(w * hh, b.w * b.h));
-      cost += Math.abs(x + w / 2 - cx) / (sw * 100);   // tie-break: nearer the target
-      if (!best || cost < best.cost) best = { x, cost };
+    for (const y0 of ys) {
+      const y = Math.round(Math.max(top, Math.min(bot, y0)));
+      for (const x0 of xs) {
+        const x = Math.round(Math.max(lo, Math.min(hi, x0)));
+        const s = cost(x, y);
+        if (!best || s < best.cost) best = { x, y, cost: s };
+      }
+      if (y === Math.round(Math.max(top, Math.min(bot, level))) && best.cost < 0.5) break;   // level and nearly free: done
     }
-    return best ? best.x : lo;
+    return best || { x: lo, y: level };
   }
 
-  // Level with the target, at the x that hides the least (bestX).
+  // Next to the target, where it hides the least (bestPos). After a section folds or unfolds the
+  // card stays where it is (only pulled up to stay on the stage), so the head you clicked stays put.
   function place(c) {
     if (c.dragged) { clampTo(c, c.x, c.y); return; }
-    const r = anchor(c.target);
     const sw = stage.clientWidth, sh = stage.clientHeight;
-    const w = c.el.offsetWidth || CARD_W, hh = c.el.offsetHeight || 200;
+    const w = c.el.offsetWidth || CARD_W, hh = Math.min(c.el.offsetHeight || 200, Math.max(60, sh - 2 * EDGE));
+    if (c.hold && c.placed) {
+      c.hold = false;
+      clampTo(c, c.x, Math.min(c.y, sh - hh - EDGE));
+      return;
+    }
+    c.hold = false;
+    const r = anchor(c.target);
     let x, y;
     if (!r) {
       x = sw - w - EDGE - 18 * (cards.indexOf(c) % 6);
       y = EDGE + 40 + 18 * (cards.indexOf(c) % 6);
     } else {
-      y = Math.max(EDGE, Math.min(r.y + r.h / 2 - 22, sh - Math.min(hh, sh) - EDGE));
-      x = bestX(c, r, y, w, Math.min(hh, sh - 2 * EDGE), sw);
+      const level = Math.max(EDGE, Math.min(r.y + r.h / 2 - 22, sh - hh - EDGE));
+      ({ x, y } = bestPos(c, r, level, w, hh, sw, sh));
     }
     clampTo(c, x, y);
+    c.placed = true;
   }
 
   function dragHandle(c) {
@@ -635,9 +785,20 @@ export function install(ctx) {
     c.binds = [];
     c.hov = [];
     c.dims = [];
+    c.lines = [];
     c.failed = false;
+    c.hold = false;
     c.body.replaceChildren();
+    c.foot?.remove();
+    c.foot = null;
+    // the head's parts are reused by the next target: drop their cached content
+    for (const el of [c.title, c.val, c.kind]) { el._tex = el._text = el._rich = undefined; el.replaceChildren(); }
+    c.title.title = '';
+    c.val.hidden = true;
+    c.editBtn.hidden = c.target.kind === 'edge';
     c.el.dataset.kind = c.target.kind;
+    c.top = h('div', { class: 'nn-top' });
+    c.body.append(c.top);
     try {
       if (c.target.kind === 'node') buildNode(c, c.target.id);
       else if (c.target.kind === 'edge') buildEdge(c, c.target.id);
@@ -646,7 +807,14 @@ export function install(ctx) {
       console.error('[nn] inspector build:', err);
       c.body.append(h('div', { class: 'nn-hint err', text: 'Could not show this: ' + err.message }));
     }
-    if (ro) for (const el of c.body.querySelectorAll('input, select, button, textarea')) el.disabled = true;
+    if (!c.top.childNodes.length) c.top.remove();
+    // read-only (audience): every control is shown but inert; section heads still fold. Sliders and
+    // number boxes stay enabled out of reach (no pointer, no focus), so they keep their sign colour.
+    if (ro) {
+      for (const el of c.el.querySelectorAll('.nn-insp-body input, .nn-insp-body select, .nn-insp-body button:not(.nn-sec-h), .nn-insp-body textarea')) {
+        if (el.matches('.nn-sl input')) { el.readOnly = true; el.tabIndex = -1; el.classList.add('nn-inert'); } else el.disabled = true;
+      }
+    }
     update(c);
     c.body.scrollTop = top;
     paintHover();
@@ -754,20 +922,48 @@ export function install(ctx) {
 
   // ---------------------------------------------------------------- widgets
 
+  // A folding section (the .ui-sec recipe). Its head holds the title and, on the right, the
+  // summary while folded (set with sum(): kept current like everything else) or `sub` (a note on
+  // what the body shows) while open. Folding is remembered per key, for every card.
   function section(c, key, title, sub, ...kids) {
-    const head = h('h4', { class: 'nn-sec-h' }, h('span', { class: 'nn-fold' }), title);
+    const s = { sum: h('span', { class: 'nn-sec-sum ui-sec-sum' }) };
+    s.head = h('button', { class: 'nn-sec-h ui-sec-h', type: 'button' }, h('span', { class: 'nn-sec-t', text: title }));
     if (sub) {
-      const s = h('span', { class: 'nn-sec-sub' });
-      setTex(s, sub);
-      head.append(s);
+      const el = h('span', { class: 'nn-sec-sub' });
+      setTex(el, sub);
+      s.head.append(el);
     }
-    const body = h('div', { class: 'nn-sec-b' }, ...kids);
-    const sec = h('section', { class: 'nn-sec' + (folded.has(key) ? ' folded' : ''), 'data-sec': key }, head, body);
-    head.addEventListener('click', () => {
-      if (sec.classList.toggle('folded')) folded.add(key); else { folded.delete(key); update(c); }   // folded maths is not kept current
+    s.head.append(s.sum);
+    s.body = h('div', { class: 'nn-sec-b ui-sec-b' }, ...kids);
+    const on = isFolded(key);
+    s.sec = h('section', { class: 'nn-sec ui-sec' + (on ? ' folded' : ''), 'data-sec': key }, s.head, s.body);
+    s.head.setAttribute('aria-expanded', String(!on));
+    s.head.addEventListener('click', () => {
+      const fold = !s.sec.classList.contains('folded');
+      setFolded(c, s.sec, fold);
+      saveFold(key, fold);
     });
-    c.body.append(sec);
-    return { sec, head, body };
+    c.body.append(s.sec);
+    return s;
+  }
+  function setFolded(c, sec, on) {
+    sec.classList.toggle('folded', on);
+    sec.querySelector(':scope > .nn-sec-h')?.setAttribute('aria-expanded', String(!on));
+    // place(): the card grows or shrinks where it is (the resize re-places it within a frame or
+    // two; after that, the hold lapses so the next move of the net places it as usual)
+    c.hold = true;
+    clearTimeout(c.holdT);
+    c.holdT = setTimeout(() => { c.hold = false; }, 300);
+    if (!on) update(c);   // folded maths is not kept current
+    ensureLoop();
+  }
+  // The section's summary: fn() -> string (plain text; numbers get a Unicode minus).
+  function sum(c, s, fn) {
+    c.binds.push(() => {
+      let t = '';
+      try { t = fn() ?? ''; } catch { t = ''; }
+      setText(s.sum, um(t));
+    });
   }
 
   function hoverable(c, el, key, other = null) {
@@ -789,8 +985,8 @@ export function install(ctx) {
   function slider(c, { lab, get, set, what, hover, other, scale = () => maxW, onLabel, labelTitle }) {
     const sw = h('span', { class: 'nn-sw' });
     const name = h('span', { class: 'nn-sl-lab' + (onLabel ? ' link' : ''), title: labelTitle || null });
-    const range = h('input', { type: 'range', min: -SPAN, max: SPAN, step: '0.01' });
-    const box = h('input', { type: 'number', step: '0.01', class: 'nn-num' });
+    const range = h('input', { type: 'range', class: 'ui-range', min: -SPAN, max: SPAN, step: '0.01' });
+    const box = h('input', { type: 'number', step: '0.01', class: 'nn-num ui-field sm num' });
     const row = h('div', { class: 'nn-sl' }, sw, name, range, box);
     let span = SPAN, dragging = false, released = false, before = '';
     if (onLabel && !ro) name.addEventListener('click', onLabel);
@@ -856,10 +1052,20 @@ export function install(ctx) {
     return row;
   }
 
+  // A .ui-btn with an optional icon before (or, with after, behind) its text.
+  function ubtn(cls, text, { ic = null, after = false, title = null } = {}) {
+    const b = h('button', { class: `ui-btn ${cls}`, type: 'button', title });
+    const i = ic ? icon(ic, 14) : null;
+    if (i && !after) b.append(i);
+    if (text) b.append(h('span', { text }));
+    if (i && after) b.append(i);
+    return b;
+  }
+
   // An entry of W that has no edge: shown as a masked 0 with a connect button.
   function maskedRow(c, fromId, toId, otherId) {
     const name = h('span', { class: 'nn-sl-lab' });
-    const btn = h('button', { class: 'nn-mini', title: 'Add this edge' }, '+ connect');
+    const btn = ubtn('xs nn-mini', 'connect', { ic: 'plus', title: 'Add this edge' });
     const row = h('div', { class: 'nn-sl masked' }, h('span', { class: 'nn-sw' }), name,
       h('span', { class: 'nn-masked-txt', text: 'no edge: fixed 0' }), btn);
     hoverable(c, row, { kind: 'pair', from: fromId, to: toId }, otherId);
@@ -868,6 +1074,44 @@ export function install(ctx) {
     });
     c.binds.push(() => setTex(name, label(otherId)));
     return row;
+  }
+
+  // The one-line computation: inline maths kept on one line. fn() gives a string, or a list of
+  // them from the fullest to the shortest (terms elided); the first that fits the card with its
+  // type shrunk by at most a fifth wins. Measured only when the source changes, and again once
+  // the fonts are in and when the tab is shown.
+  const LINE_MIN = 0.8;
+  function lineBox(c, fn) {
+    const el = h('div', { class: 'nn-math nn-line' });
+    c.lines.push(el);
+    c.binds.push(() => {
+      if (!texTurn && el._tex !== undefined) return;         // training: at TEX_MS, not every frame
+      const v = fn();
+      const alts = v == null ? [] : Array.isArray(v) ? v : [v];
+      setHidden(el, !alts.length);
+      const key = alts.join('\n');
+      if (!alts.length || el._alts === key) return;
+      el._alts = key;
+      el._list = alts;
+      fitWidth(el);
+    });
+    return el;
+  }
+  function fitWidth(el) {
+    const alts = el._list || [];
+    for (let q = 0; q < alts.length; q++) {
+      setTex(el, alts[q]);
+      el.style.fontSize = '';
+      const w = el.clientWidth, sw = el.scrollWidth;
+      if (!w) break;   // not laid out (another tab): fitted again on show
+      if (sw <= w + 0.5) break;
+      const k = w / sw;
+      if (k >= LINE_MIN || q === alts.length - 1) { el.style.fontSize = `${Math.max(LINE_MIN * 100, Math.floor(1000 * k) / 10)}%`; break; }
+    }
+    if (document.fonts && document.fonts.status !== 'loaded' && !el._fontWait) {
+      el._fontWait = true;
+      document.fonts.ready.then(() => { el._fontWait = false; if (el.isConnected) fitWidth(el); });
+    }
   }
 
   function texBox(c, fn, display = false, cls = 'nn-math') {
@@ -882,27 +1126,8 @@ export function install(ctx) {
     return el;
   }
 
-  function textInput(c, { get, set, what, cls = 'nn-text', placeholder, live = true }) {
-    const inp = h('input', { type: 'text', class: cls, spellcheck: 'false', autocomplete: 'off', placeholder });
-    let before = '';
-    inp.addEventListener('focus', () => { before = inp.value; });
-    if (live) inp.addEventListener('input', () => { set(inp.value); store.touch(); });
-    inp.addEventListener('change', () => { set(inp.value); store.commit(what); });
-    inp.addEventListener('keydown', e => {
-      if (e.key === 'Enter') inp.blur();
-      else if (e.key === 'Escape') {
-        inp.value = before;
-        set(before);
-        store.touch();
-        inp.blur();
-      }
-    });
-    c.binds.push(() => setVal(inp, get() ?? ''));
-    return inp;
-  }
-
   function actSelect(c, layerId) {
-    const sel = h('select', { class: 'nn-act', title: 'Activation of the whole layer' },
+    const sel = h('select', { class: 'nn-act ui-field sm', title: 'Activation of the whole layer' },
       actNames().map(k => h('option', { value: k }, actLabel(k))));
     sel.addEventListener('change', () => {
       M.setLayer(net(), layerId, { act: sel.value });
@@ -913,7 +1138,7 @@ export function install(ctx) {
   }
 
   // Plot of an activation over z, with a dot at each (z, a) point.
-  function makePlot(W = 296, H = 80) {
+  function makePlot(W = 296, H = 64) {
     const P = 8;
     const svg = sv('svg', { class: 'nn-plot', viewBox: `0 0 ${W} ${H}`, width: W, height: H });
     const axes = sv('path', { class: 'nn-plot-axis' });
@@ -958,7 +1183,7 @@ export function install(ctx) {
           setAttr(tzl, 'y', (Y(0) - 4).toFixed(1));
           setAttr(ta, 'x', (X(0) + 5).toFixed(1));
         }
-        while (dots.childNodes.length < pts.length) dots.append(sv('circle', { r: 4 }));
+        while (dots.childNodes.length < pts.length) dots.append(sv('circle', { r: 3.5 }));
         while (dots.childNodes.length > pts.length) dots.lastChild.remove();
         pts.forEach((p, q) => {
           const d = dots.childNodes[q];
@@ -1003,50 +1228,47 @@ export function install(ctx) {
     const attn = isAttn(L);                          // no incoming edges, no bias: z = sum_j A_ij V_jf
     const tp = isTok(L) ? tokPos(L, i) : null;
     const feedsAttn = L < last && isAttn(L + 1);     // a Q / K / V neuron
+    // the head: the label, its value a (an input's value is its slider), the role and activation
+    const role = attn ? 'attention' : feedsAttn && tp?.groups ? (['query', 'key', 'value'][tp.g] || kind) : kind;
+    const valNum = h('span', { class: 'nn-insp-num' });
+    if (L > 0) c.val.append(h('span', { class: 'nn-insp-eq', text: '=' }), valNum);
+    c.val.hidden = L === 0;
     c.binds.push(() => {
       setTex(c.title, label(id));
-      const name = layerOf(layerId)?.name;
-      const k = attn && L < last ? 'attention' : kind;
-      setText(c.kind, `${k} · ${name && name.trim().toLowerCase() !== k ? name : 'layer ' + L}`);
+      setText(valNum, um(fmt(fwdNode(id)?.a)));
+      setText(c.kind, L === 0 || attn ? role : `${role} · ${ACT_NAME[actOf(L)] || actLabel(actOf(L))}`);
     });
+    c.title.title = ro ? '' : 'Double-click to edit the label';
 
-    // where it sits + label
-    const where = L === 0
-      ? `\\text{entry } ${I} \\text{ of } x = a^{(0)}` + (last > 0 && !feedsAttn ? `,\\ \\text{column } ${I} \\text{ of } W^{(1)}` : '')
-      : attn ? `\\text{entry } (${tp.t + 1}, ${tp.f + 1}) \\text{ of } Z = AV` +
-        (L < last ? `;\\ \\text{column } ${I} \\text{ of } W^{(${L + 1})}` : `;\\ \\hat y_{${I}}`)
-      : `\\text{row } ${I} \\text{ of } W^{(${L})},\\ b^{(${L})}_{${I}}` +
-        (L === last ? `;\\ \\hat y_{${I}}` : feedsAttn ? '' : `;\\ \\text{column } ${I} \\text{ of } W^{(${L + 1})}`);
-    const whereEl = h('div', { class: 'nn-where' });
-    setTex(whereEl, `${where}\\,`);   // the thin space holds \hat y's overhang (else a 2 px scrollbar)
-    // which token and which feature, on a token layer: row t, column f of X / Q / K / V / Z / H
-    let tokEl = null;
+    // where it sits: token and feature (token layers), then its row / column and the layer
     if (tp) {
       const m = grpSym(tp, tp.g) || matSym(L);
       const ah = attn ? attnAt(L, i) : null;
-      tokEl = h('div', { class: 'nn-where nn-tok' });
+      const tokEl = h('div', { class: 'nn-insp-sub nn-tok' });
       c.binds.push(() => {
-        const nm = tokNameTex(tp.t);
-        setTex(tokEl, (nm ? `${nm}\\ (\\text{token } ${tp.t + 1})` : `\\text{token } ${tp.t + 1}`) + `,\\ \\text{feature } ${tp.f + 1}` +
-          `\\quad (\\text{row } ${tp.t + 1},\\ \\text{column } ${tp.f + 1} \\text{ of } ${m})` +
-          (ah && ah.heads > 1 ? `,\\ \\text{head } ${ah.hd + 1}` : ''));
+        const nm = tokName(tp.t);
+        setRich(tokEl, [nm ? `“${nm}” (token ${tp.t + 1})` : `token ${tp.t + 1}`, `, feature ${tp.f + 1} · row ${tp.t + 1}, column ${tp.f + 1} of `,
+          mth(m), ah && ah.heads > 1 ? ` · head ${ah.hd + 1}` : '']);
       });
+      c.top.append(tokEl);
     }
-    const chip = h('button', { class: 'nn-chip', title: 'Open the layer' });
+    const where = L === 0
+      ? [`entry ${I} of `, mth('x = a^{(0)}'), ...(last > 0 && !feedsAttn ? [` · column ${I} of `, mth('W^{(1)}')] : [])]
+      : attn ? [`entry (${tp.t + 1}, ${tp.f + 1}) of `, mth('Z = AV'),
+        ...(L < last ? [` · column ${I} of `, mth(`W^{(${L + 1})}`)] : [' · ', mth(`\\hat y_{${I}}`)])]
+      : [`row ${I} of `, mth(`W^{(${L})}`), ' and ', mth(`b^{(${L})}_{${I}}`),
+        ...(L === last ? [' · ', mth(`\\hat y_{${I}}`)] : feedsAttn ? [] : [` · column ${I} of `, mth(`W^{(${L + 1})}`)])];
+    const whereEl = h('span', { class: 'nn-where' });
+    setRich(whereEl, where);
+    const chipText = h('span');
+    const chip = h('button', { class: 'nn-chip ui-chip', title: 'Open the layer' }, chipText, icon('chevron-right', 12));
     chip.addEventListener('click', () => select({ kind: 'layer', id: layerId }));
-    c.binds.push(() => setText(chip, `${layerOf(layerId)?.name || 'layer ' + L} →`));
-    const lab = textInput(c, {
-      get: () => node(id)?.label,
-      set: v => M.setNode(net(), id, { label: v }),
-      what: 'label', cls: 'nn-text nn-tex-src', placeholder: 'KaTeX label',
-    });
-    c.body.append(h('div', { class: 'nn-top' },
-      h('div', { class: 'nn-grid2' }, h('span', { class: 'nn-k', text: 'label' }), lab),
-      tokEl,
-      h('div', { class: 'nn-where-row' }, whereEl, chip)));
+    c.binds.push(() => setText(chipText, layerOf(layerId)?.name || 'layer ' + L));
+    c.top.append(h('div', { class: 'nn-insp-sub nn-where-row' }, whereEl, chip));
 
+    // an input's value is a parameter: its slider stands in for the computation
     if (L === 0) {
-      section(c, 'node.value', 'Input value', null, slider(c, {
+      c.top.append(slider(c, {
         lab: el => setTex(el, label(id)),
         get: () => node(id)?.value,
         set: v => M.setNode(net(), id, { value: v }),
@@ -1057,6 +1279,16 @@ export function install(ctx) {
 
     // incoming: the row of W in column order, then skip terms, then the bias
     const incoming = [];
+    if (L > 0 && !attn) {
+      const byFrom = new Map(net().edges.filter(e => e.to === id).map(e => [e.from, e]));
+      M.nodesIn(net(), L - 1).forEach((p, j) => { const e = byFrom.get(p.id); if (e) incoming.push({ eid: e.id, from: p.id, k: L - 1, j }); });
+      for (let k = L - 2; k >= 0; k--) {
+        M.nodesIn(net(), k).forEach((p, j) => { const e = byFrom.get(p.id); if (e) incoming.push({ eid: e.id, from: p.id, k, j }); });
+      }
+    }
+    // the one-line computation: z with this sample's numbers (the head shows a)
+    if (L > 0) c.top.append(lineBox(c, () => (attn ? attnLine(id, L, I, i) : forwardLine(id, L, I, incoming))));
+
     if (attn) buildAttnNode(c, id, L, i);
     else if (L > 0) {
       const byFrom = new Map(net().edges.filter(e => e.to === id).map(e => [e.from, e]));
@@ -1067,7 +1299,6 @@ export function install(ctx) {
         M.nodesIn(net(), k).forEach((p, j) => {
           const e = byFrom.get(p.id);
           if (e) {
-            incoming.push({ eid: e.id, from: p.id, k, j });
             list.push(weightRow(c, e.id, p.id, wText(L, k, I, j + 1)));
           } else if (k === L - 1) {
             list.push(maskedRow(c, p.id, id, p.id));
@@ -1094,14 +1325,22 @@ export function install(ctx) {
       if (bt) { brow.classList.add('tied'); brow.title = `Shared bias ${tieText(bt)}: moving it moves all ${biasGroup(bt).length} copies`; }
       rows.push(h('div', { class: 'nn-bias' }, brow));
       const s = section(c, 'node.in', 'Weights in + bias', `\\text{row } ${I} \\text{ of } W^{(${L})},\\ b^{(${L})}_{${I}}`, ...rows);
+      sum(c, s, () => `${incoming.length} ${incoming.length === 1 ? 'weight' : 'weights'} · b ${fmt(node(id)?.bias)}`);
       hoverable(c, s.head, { kind: 'row', layer: L, i });
     }
 
     // the arithmetic, then the activation with a plot marking the current z
     const math = texBox(c, () => (attn ? attnArith(id, L, I, i) : arithmetic(id, L, I, incoming)), true);
+    // folded, Forward says the step the one-line leaves out: z to a
+    const fwdSum = () => {
+      const fw = fwdNode(id), act = actOf(L);
+      if (L === 0) return `a = ${fmt(node(id)?.value)}`;
+      if (attn || act === 'identity') return `a = z = ${fmt(fw?.a)}`;
+      return `${ACT_NAME[act] || actLabel(act)}(${fmt(fw?.z)}) = ${fmt(fw?.a)}`;
+    };
     if (attn) {
-      section(c, 'node.math', 'Forward', null, math,
-        h('div', { class: 'nn-hint', text: 'An attention layer has no weights in and no bias, and its activation is the identity.' }));
+      sum(c, section(c, 'node.math', 'Forward', null, math,
+        h('div', { class: 'nn-hint', text: 'An attention layer has no weights in and no bias, and its activation is the identity.' })), fwdSum);
     } else if (L > 0) {
       const plot = makePlot();
       const def = h('div', { class: 'nn-def' });
@@ -1109,7 +1348,7 @@ export function install(ctx) {
         const act = actOf(L);
         setTex(def, actDef(act));
         const fw = fwdNode(id);
-        const pt = { z: fw?.z, a: fw?.a };
+        const pt = { z: fw?.z, a: fw?.a, hi: true };   // this sample's point
         if (isVec(act)) {
           const { f, key } = softmaxSlice(L, i);
           plot.draw(f, [pt], key);
@@ -1117,16 +1356,16 @@ export function install(ctx) {
           plot.draw(actFn(act), [pt], act);
         }
       });
-      section(c, 'node.math', 'Forward', null, math,
-        h('div', { class: 'nn-act-row' }, actSelect(c, layerId), def), plot.el);
+      sum(c, section(c, 'node.math', 'Forward', null, math,
+        h('div', { class: 'nn-act-row' }, actSelect(c, layerId), def), plot.el), fwdSum);
     } else {
-      section(c, 'node.math', 'Forward', null, math);
+      sum(c, section(c, 'node.math', 'Forward', null, math), fwdSum);
     }
 
     // target (outputs)
     if (L === last && L > 0) {
-      const tgt = h('input', { type: 'number', step: '0.1', class: 'nn-num nn-target', placeholder: 'none' });
-      const clr = h('button', { class: 'nn-mini', title: 'Clear the target' }, 'clear');
+      const tgt = h('input', { type: 'number', step: '0.1', class: 'nn-num nn-target ui-field sm num', placeholder: 'none' });
+      const clr = ubtn('xs nn-mini', 'clear', { title: 'Clear the target' });
       tgt.addEventListener('input', () => {
         const v = parseNum(tgt.value);
         if (v != null) { M.setNode(net(), id, { target: v }); store.touch(); }
@@ -1151,8 +1390,11 @@ export function install(ctx) {
         setVal(tgt, typeof y === 'number' ? numText(y) : '');
         clr.disabled = ro || typeof y !== 'number';
       });
-      section(c, 'node.target', 'Target', null,
-        h('div', { class: 'nn-target-row' }, h('span', { class: 'nn-tex-y' }, texEl(`y_{${I}}`)), tgt, clr), err);
+      sum(c, section(c, 'node.target', 'Target', null,
+        h('div', { class: 'nn-target-row' }, h('span', { class: 'nn-tex-y' }, texEl(`y_{${I}}`)), tgt, clr), err), () => {
+        const y = node(id)?.target;
+        return typeof y === 'number' ? `y ${fmt(y)}` : 'none';
+      });
     }
 
     // gradients: the chain rule with this neuron's numbers
@@ -1163,7 +1405,11 @@ export function install(ctx) {
       setHidden(gradHint, !!b && !b.note);
       setText(gradHint, b ? b.note || '' : targetsHint());
     });
-    section(c, 'node.grad', 'Gradients', null, grad, gradHint);
+    sum(c, section(c, 'node.grad', 'Gradients', null, grad, gradHint), () => {
+      const g = bwdNode(id);
+      if (!store.state.bwd || !g) return 'needs targets';
+      return L === 0 ? `∂L/∂a ${gfmt(g.da)}` : `δ ${gfmt(g.dz)}`;
+    });
 
     // outgoing: column of the next W, then skip edges. A Q / K / V neuron has no edges into the
     // attention layer: it enters through the scores or the weighted sum instead.
@@ -1197,6 +1443,8 @@ export function install(ctx) {
       }
       const s = section(c, 'node.out', feedsAttn ? 'Into attention' : 'Outgoing weights',
         feedsAttn ? null : `\\text{column } ${I} \\text{ of } W^{(${L + 1})}`, ...rows);
+      const nOut = byTo.size;
+      sum(c, s, () => (feedsAttn ? `as ${['a query', 'a key', 'a value'][tp?.groups ? tp.g : 2] || 'input'}` : `${nOut} ${nOut === 1 ? 'edge' : 'edges'}`));
       if (!feedsAttn) hoverable(c, s.head, { kind: 'col', layer: L + 1, k: L, j: i });
     }
 
@@ -1289,7 +1537,12 @@ export function install(ctx) {
       setHidden(hint, ok);
       setText(hint, ok ? '' : 'No attention values: the forward pass did not return them.');
     });
-    section(c, 'node.scores', 'Scores', `q${hs}_{${i + 1}} \\cdot k${hs}_{j}`, scores, hint);
+    sum(c, section(c, 'node.scores', 'Scores', `q${hs}_{${i + 1}} \\cdot k${hs}_{j}`, scores, hint), () => {
+      const S = attnFwd(L, hd)?.S?.[i];
+      if (!S) return '';
+      const vs = Array.from({ length: T }, (_, j) => ((causalOf(L) && j > i) || S[j] === -Infinity ? '−∞' : fmt(S[j])));
+      return T <= 4 ? vs.join(', ') : `${T} keys`;
+    });
 
     // the attention row: A_ij = softmax_j(s_ij), one bar per key token j, hover lights v_j
     const def = h('div', { class: 'nn-def' });
@@ -1329,6 +1582,16 @@ export function install(ctx) {
     const rowSec = section(c, 'node.attn', 'Attention row', attendsTex(), def, ...bars.map(b => b.row));
     const rowSub = rowSec.head.querySelector('.nn-sec-sub');
     if (rowSub) c.binds.push(() => setTex(rowSub, attendsTex()));
+    // folded: the weights by key (the largest one when there are many keys)
+    sum(c, rowSec, () => {
+      const A = attnFwd(L, hd)?.A?.[i];
+      if (!A) return '';
+      const key = j => tokName(j) || `t${j + 1}`;
+      if (T <= 3) return Array.from({ length: T }, (_, j) => `${key(j)} ${fmt(A[j])}`).join(' · ');
+      let m = 0;
+      for (let j = 1; j < T; j++) if (A[j] > A[m]) m = j;
+      return `most: ${key(m)} ${fmt(A[m])}`;
+    });
     const hh = at.heads > 1 ? hd : null;   // lit by this token's row: its Z token, its query, a heatmap row
     tokenLit(c, rowSec.head, [{ layer: L, t: i, h: hh }, { layer: L - 1, t: i, g: 0, h: hh }]);
   }
@@ -1348,6 +1611,52 @@ export function install(ctx) {
     }
     lines.push(`&= ${fmt(fw?.z)}`, `${aS} &= ${zS} = ${fmt(fw?.a)}`);
     return aligned(lines);
+  }
+
+  // The one-line computation on a card, z = (terms) = value, for lineBox: the full sum when it
+  // could fit, then the first k terms, \cdots and the last one, for the largest k likely to fit
+  // (texWidth) and two smaller ones, then the first and last alone. A few strings, however many
+  // terms (a neuron may have hundreds of inputs).
+  function lineAlts(lhs, terms, tail) {
+    const signed = terms.map((s, q) => (q && !s.startsWith('-') ? `+ ${s}` : s));
+    const line = xs => `${lhs} = ${xs.join(' ')} ${tail}`;
+    const n = signed.length;
+    const ws = signed.map(texWidth);
+    const base = texWidth(`${lhs} =`) + texWidth(tail), dots = texWidth('+ \\cdots');
+    const alts = [];
+    if (n <= 3 || base + ws.reduce((s, w) => s + w, 0) <= 1.6 * CARD_UNITS) alts.push(line(signed));
+    if (n <= 3) return alts;
+    let best = 1;
+    for (let k = 1, pre = 0; k < n - 1; k++) {
+      pre += ws[k - 1];
+      if (base + pre + dots + ws[n - 1] > 1.3 * CARD_UNITS) break;
+      best = k;
+    }
+    const cut = k => line([...signed.slice(0, k), '+ \\cdots', signed[n - 1]]);
+    for (let k = best; k >= Math.max(1, best - 2); k--) alts.push(cut(k));
+    if (best > 3) alts.push(cut(1));
+    return alts;
+  }
+
+  // z_I = w1 a1 + w2 a2 + ... + b = z, with this sample's numbers (weights in their sign colour).
+  function forwardLine(id, L, I, incoming) {
+    const n = node(id);
+    if (!n) return null;
+    const b = fmt(Number.isFinite(n.bias) ? n.bias : 0);   // the sign of the rounded value: no "- 0.00"
+    const nums = incoming.map(({ eid, from }) => wTerm(edge(eid)?.w, fmt(fwdNode(from)?.a)));
+    const zS = `z^{(${L})}_{${I}}`, z = fmt(fwdNode(id)?.z);
+    if (!nums.length) return `${zS} = b^{(${L})}_{${I}} = ${z}`;
+    return lineAlts(zS, [...nums, b.startsWith('-') ? `- ${b.slice(1)}` : b], `= ${z}`);
+  }
+
+  // z_I = sum_j A_ij V_jf with this sample's numbers.
+  function attnLine(id, L, I, k) {
+    const { T, i, hd, fh } = attnAt(L, k);
+    const F = attnFwd(L, hd), zS = `z^{(${L})}_{${I}}`, z = fmt(fwdNode(id)?.z);
+    if (!F?.A || !F?.V) return `${zS} = \\textstyle\\sum_j A_{${i + 1},j} V_{j,${fh + 1}} = ${z}`;
+    const terms = [];
+    for (let j = 0; j < T; j++) terms.push(prod(fmt(F.A[i]?.[j]), fmt(F.V[j]?.[fh])));
+    return lineAlts(zS, terms, `= ${z}`);
   }
 
   function texEl(src) {
@@ -1383,13 +1692,13 @@ export function install(ctx) {
     });
     const shown = terms.length > MAX_TERMS ? [...terms.slice(0, 4), null, ...terms.slice(-2)] : terms;
     const num = shown.map(t => (t ? wTerm(t.w, fmt(t.a)) : '\\cdots'));
-    const b = Number.isFinite(n.bias) ? n.bias : 0;
+    const b = fmt(Number.isFinite(n.bias) ? n.bias : 0);   // the sign of the rounded value: no "- 0.00"
     const z = fw?.z, a = fw?.a;
     const zS = `z^{(${L})}_{${I}}`, aS = aSym(L, I);
     const room = CARD_UNITS - Math.max(texWidth(zS), texWidth(aS));
     const lines = [
       ...wrapSum(`${zS} &= `, [...shown.map(t => (t ? t.sym : '\\cdots')), `b^{(${L})}_{${I}}`], room),
-      ...wrapSum('&= ', [...num, b < 0 ? `- ${fmt(-b)}` : fmt(b)], room),
+      ...wrapSum('&= ', [...num, b.startsWith('-') ? `- ${b.slice(1)}` : b], room),
       `&= ${fmt(z)}`,
     ];
     const act = actOf(L);
@@ -1545,7 +1854,7 @@ export function install(ctx) {
   function buildParams(c, id) {
     const list = h('div', { class: 'nn-params' });
     const empty = h('div', { class: 'nn-hint', text: 'Stash anything on this neuron: a note, a unit, a role. Numbers stay numbers; $\\tex$ renders as maths.' });
-    const add = h('button', { class: 'nn-mini nn-add', title: 'Add a key/value pair' }, '+ add');
+    const add = ubtn('xs nn-mini nn-add', 'Add', { ic: 'plus', title: 'Add a key/value pair' });
     let shown = null;
 
     const current = () => node(id)?.params || {};
@@ -1581,12 +1890,13 @@ export function install(ctx) {
       r._pre.hidden = !html;
       if (html && r._pre._src !== m[1]) { r._pre._src = m[1]; r._pre.innerHTML = html; }
       r._val.classList.toggle('num', parseNum(v) != null);
+      r._val.classList.toggle('mono', !!m);   // KaTeX source reads best in monospace
     }
 
     function row(k = '', v = '') {
-      const key = h('input', { type: 'text', class: 'nn-text nn-pk', placeholder: 'key', spellcheck: 'false', autocomplete: 'off', value: k });
-      const val = h('input', { type: 'text', class: 'nn-text nn-pv', placeholder: 'value', spellcheck: 'false', autocomplete: 'off', value: String(v) });
-      const del = h('button', { class: 'nn-insp-btn nn-pdel', title: 'Remove' }, '×');
+      const key = h('input', { type: 'text', class: 'nn-text nn-pk ui-field sm mono', placeholder: 'key', spellcheck: 'false', autocomplete: 'off', value: k, 'aria-label': 'Key' });
+      const val = h('input', { type: 'text', class: 'nn-text nn-pv ui-field sm', placeholder: 'value', spellcheck: 'false', autocomplete: 'off', value: String(v), 'aria-label': 'Value' });
+      const del = h('button', { class: 'nn-insp-btn nn-pdel ui-btn xs icon', type: 'button', title: 'Remove', 'aria-label': 'Remove' }, icon('close', 12) || '×');
       const pre = h('div', { class: 'nn-ppre', hidden: true });
       const r = h('div', { class: 'nn-prow' }, key, val, del, pre);
       Object.assign(r, { _key: key, _val: val, _pre: pre });
@@ -1634,6 +1944,7 @@ export function install(ctx) {
       const p = current();
       shown = JSON.stringify(p);
       list.replaceChildren(...Object.entries(p).map(([k, v]) => row(k, v)));
+      if (ro) for (const el of list.querySelectorAll('input, button')) el.disabled = true;   // rows redrawn after build
       syncEmpty();
     }
 
@@ -1646,6 +1957,7 @@ export function install(ctx) {
     });
     const s = section(c, 'node.params', 'Params', null, list, empty, h('div', { class: 'nn-row' }, add));
     s.sec.classList.add('nn-params-sec');
+    sum(c, s, () => { const ks = Object.keys(current()); return ks.length ? ks.join(', ') : 'none'; });
   }
 
   // ---------------------------------------------------------------- edge card
@@ -1658,54 +1970,59 @@ export function install(ctx) {
     const i = indexIn(to), j = indexIn(from);
     const Wsym = wSym(lt, lf, i + 1, j + 1);
     const zS = `z^{(${lt})}_{${i + 1}}`;
+    // the head: source -> target, each end a button that opens its neuron
+    const fromB = h('button', { class: 'nn-insp-end', type: 'button', title: 'Open the source neuron' });
+    const toB = h('button', { class: 'nn-insp-end', type: 'button', title: 'Open the target neuron' });
+    fromB.addEventListener('click', () => select({ kind: 'node', id: from }));
+    toB.addEventListener('click', () => select({ kind: 'node', id: to }));
+    hoverable(c, fromB, { kind: 'node', id: from });
+    hoverable(c, toB, { kind: 'node', id: to });
+    const arrow = h('span', { class: 'nn-insp-arrow' });
+    setTex(arrow, '\\to');
+    c.title.append(fromB, arrow, toB);
     c.binds.push(() => {
-      setTex(c.title, `{${label(from)}} \\to {${label(to)}}`);
+      setTex(fromB, label(from));
+      setTex(toB, label(to));
       setText(c.kind, fixed ? 'fixed weight' : tie ? 'shared weight' : 'weight');
     });
 
-    const fromChip = h('button', { class: 'nn-chip', title: 'Open the source neuron' });
-    const toChip = h('button', { class: 'nn-chip', title: 'Open the target neuron' });
-    fromChip.addEventListener('click', () => select({ kind: 'node', id: from }));
-    toChip.addEventListener('click', () => select({ kind: 'node', id: to }));
-    hoverable(c, fromChip, { kind: 'node', id: from });
-    hoverable(c, toChip, { kind: 'node', id: to });
-    c.binds.push(() => { setTex(fromChip, label(from)); setTex(toChip, label(to)); });
-    const whereEl = h('div', { class: 'nn-where' });
-    setTex(whereEl, `w = ${Wsym}` + `\\quad \\text{row } ${i + 1}\\ (\\text{to}),\\ \\text{column } ${j + 1}\\ (\\text{from})` +
-      (lf === lt - 1 ? '' : `\\quad \\text{skip}`));
-    const kids = [h('div', { class: 'nn-where-row' }, fromChip, h('span', { class: 'nn-arrow', text: '→' }), toChip), whereEl];
-    if (tie) {
-      // "shared parameter W_Q(1,2), used by n edges", then one chip per edge (per token)
-      const share = h('div', { class: 'nn-where nn-share' });
-      c.binds.push(() => setTex(share, `\\text{shared parameter } ${tieTex(tie)},\\ \\text{used by } ${tieGroup(tie).length} \\text{ edges}`));
-      kids.push(share, usedBy(c, eid, tie));
-    } else if (fixed) {
-      kids.push(h('div', { class: 'nn-hint', text: 'Fixed: a residual identity or pooling weight. Training, Randomize and connect never change it.' }));
-    }
-    section(c, 'edge.where', 'Edge', null, ...kids);
+    // where it sits: its entry of W (row = the receiving neuron, column = the sending one)
+    const whereEl = h('div', { class: 'nn-insp-sub nn-where' });
+    setRich(whereEl, [mth(Wsym), `, row ${i + 1} (to), column ${j + 1} (from)`, lf === lt - 1 ? '' : ' · skip']);
+    c.top.append(whereEl);
 
+    // the value: its slider, or for a fixed weight a note (its value is in the line below)
     if (fixed) {
-      section(c, 'edge.w', 'Weight', '\\text{read-only}',
-        texBox(c, () => `w = ${wTex(edge(eid)?.w)}`, false, 'nn-math nn-inline'));
+      c.top.append(h('div', { class: 'nn-hint nn-fixed-note', text: 'Fixed: a residual identity or pooling weight. Training, Randomize and connect never change it.' }));
     } else {
       const row = slider(c, {
         lab: el => setTex(el, tie ? tieTex(tie) : 'w'),
         get: () => edge(eid)?.w,
         set: v => setW(eid, v),
         what: 'weight', hover: { kind: 'edge', id: eid },
+        labelTitle: tie ? `Shared parameter ${tieText(tie)}: moving it moves all ${tieGroup(tie).length} edges` : null,
       });
       if (tie) row.classList.add('tied', 'wide');
-      section(c, 'edge.w', tie ? 'Shared parameter' : 'Weight',
-        tie ? `\\text{moves all } ${tieGroup(tie).length} \\text{ edges}` : null, row);
+      c.top.append(row);
     }
 
-    section(c, 'edge.contrib', 'Contribution', null, texBox(c, () => {
-      const w = edge(eid)?.w, a = fwdNode(from)?.a, z = fwdNode(to)?.z;
-      return aligned([
-        `w\\,{${label(from)}} &= ${wTex(w)} \\cdot ${factor(fmt(a))} = ${fmt(w * a)}`,
-        `&\\text{one term of } ${zS} = ${fmt(z)} \\text{ at } {${label(to)}}`,
-      ]);
-    }, true));
+    // the one-line computation: this weight's term, and the z it is a term of
+    const line = h('div', { class: 'nn-line-row' });
+    line.append(lineBox(c, () => {
+      const w = edge(eid)?.w, a = fwdNode(from)?.a;
+      return `w\\,{${label(from)}} = ${wTex(w)} \\cdot ${factor(fmt(a))} = ${fmt(w * a)}`;
+    }));
+    const of = h('span', { class: 'nn-line-note' });
+    c.binds.push(() => setRich(of, ['one term of ', mth(zS), ` = ${um(fmt(fwdNode(to)?.z))}`]));
+    line.append(of);
+    c.top.append(line);
+
+    if (tie) {
+      // "shared parameter W_Q(1,2), used by n edges", then one chip per edge (per token)
+      const share = h('div', { class: 'nn-where nn-share' });
+      c.binds.push(() => setRich(share, ['Shared parameter ', mth(tieTex(tie)), `, used by ${tieGroup(tie).length} edges: moving it moves them all.`]));
+      sum(c, section(c, 'edge.used', 'Used by', null, share, usedBy(c, eid, tie)), () => `${tieGroup(tie).length} edges`);
+    }
 
     // dL/dw by the chain rule (z depends on w through the term w a), then one descent step. A shared
     // parameter sums the terms of every edge that uses it; a fixed weight is never stepped.
@@ -1733,15 +2050,23 @@ export function install(ctx) {
           : tie ? `One term per edge that uses ${tieText(tie)}: training adds them up, so every copy takes the same step (η = ${eta}; training also averages over a mini-batch, this is the current sample alone).`
             : `η = ${eta}, the Train panel's rate. Training averages ∂L/∂w over a mini-batch; this step uses the current sample alone.`));
     });
-    section(c, 'edge.grad', 'Gradient', null, grad, hint);
+    sum(c, section(c, 'edge.grad', 'Gradient', null, grad, hint), () => {
+      const b = store.state.bwd;
+      if (!b) return 'needs targets';
+      const dw = tie ? b.tie?.[tie] : b.edge?.[eid];
+      return Number.isFinite(dw) ? `∂L/∂w ${gfmt(dw)}` : '';
+    });
 
+    // the foot: remove the edge (editing chrome, so H and the audience hide it)
     if (!fixed) {
-      const del = h('button', {
-        class: 'nn-mini danger',
+      const del = ubtn('sm danger nn-mini', 'Remove edge', {
+        ic: 'trash',
         title: tie ? 'Remove this one edge (its entry becomes a fixed 0; the shared parameter keeps its other edges)' : 'Remove this edge (its entry becomes a fixed 0)',
-      }, 'remove edge');
+      });
       del.addEventListener('click', () => { M.disconnect(net(), eid); store.commit('disconnect'); });
-      c.body.append(h('div', { class: 'nn-row nn-actions' }, del));
+      if (ro) del.disabled = true;
+      c.foot = h('div', { class: 'nn-actions nn-insp-foot ui-float-foot ui-chrome' }, del);
+      c.el.append(c.foot);
     }
   }
 
@@ -1753,7 +2078,7 @@ export function install(ctx) {
     const byTok = tokL > 0 && isTok(tokL);
     const wrap = h('div', { class: 'nn-used' });
     for (const e of es) {
-      const chip = h('button', { class: 'nn-chip nn-used-chip' + (e.id === eid ? ' on' : ''), title: 'Open this edge' });
+      const chip = h('button', { class: 'nn-chip nn-used-chip ui-chip' + (e.id === eid ? ' on' : ''), title: 'Open this edge' });
       const t = byTok ? tokPos(tokL, indexIn(e.to)).t : -1;
       c.binds.push(() => setTex(chip, (byTok ? `${tokNameTex(t) || `t_{${t + 1}}`}\\!:\\ ` : '') + `{${label(e.from)}} \\to {${label(e.to)}}`));
       chip.addEventListener('click', () => select({ kind: 'edge', id: e.id }));
@@ -1803,58 +2128,42 @@ export function install(ctx) {
     const nodes = () => M.nodesIn(net(), L);
     c.binds.push(() => {
       setText(c.title, layerOf(lid)?.name || `layer ${L}`);
-      setText(c.kind, `${kind} · ${L}`);
+      setText(c.kind, L === 0 || attn ? kind : `${kind} · ${ACT_NAME[actOf(L)] || actLabel(actOf(L))}`);
     });
+    c.title.title = ro ? '' : 'Double-click to rename';
 
-    const name = textInput(c, {
-      get: () => layerOf(lid)?.name,
-      set: v => M.setLayer(net(), lid, { name: v }),
-      what: 'layer name', placeholder: 'name',
-    });
-    const size = h('span', { class: 'nn-size' });
-    const minus = h('button', { class: 'nn-mini', title: 'Remove the last neuron' }, '−');
-    const plus = h('button', { class: 'nn-mini', title: 'Add a neuron, wired like its neighbours' }, '+');
-    minus.addEventListener('click', () => resize(lid, -1));
-    plus.addEventListener('click', () => resize(lid, +1));
-    // A token layer holds tokens x features neurons (per group): one more neuron would break that.
-    const sizeRow = tok
-      ? h('span', { class: 'nn-size-row', title: 'tokens × features' + (sh.groups ? ' per group' : '') }, size)
-      : h('span', { class: 'nn-size-row' }, minus, size, plus);
+    // where it sits: its matrices, then the token rows when the tokens have names (docs/NN_LENS.md)
+    const shapeEl = h('div', { class: 'nn-insp-sub nn-shape' });
     c.binds.push(() => {
-      const n = nodes().length, s = shapeOf(L);
-      setText(size, tok ? `${s.groups ? s.groups.length + ' × ' : ''}${s.tokens} × ${s.d} = ${n}` : String(n));
-      minus.disabled = ro || n <= 1;
-    });
-    const shape = texBox(c, () => {
       const m = nodes().length, s = shapeOf(L);
       if (attn) {
-        return `Z = \\operatorname{softmax}\\big(QK^{\\top} c${causalOf(L) ? ' + M' : ''}\\big)\\,V \\in \\mathbb{R}^{${s.tokens} \\times ${s.d}}`;
+        setRich(shapeEl, [mth(`Z \\in \\mathbb{R}^{${s.tokens} \\times ${s.d}}`), ` · Q, K and V from layer ${L - 1}, no weights in`]);
+        return;
       }
-      const tokTex = tok ? (s.groups ? s.groups.map(g => `{${g}}`).join(',\\ ') : matSym(L)) + ` \\in \\mathbb{R}^{${s.tokens} \\times ${s.d}}` : '';
-      // named tokens: the rows, in order (docs/NN_LENS.md)
-      const named = tok && s.tokens > 1 && Array.from({ length: s.tokens }, (_, t) => tokName(t)).some(Boolean)
-        ? `\\text{rows: } ${Array.from({ length: s.tokens }, (_, t) => tokNameTex(t) || `t_{${t + 1}}`).join(',\\ ')}` : '';
-      if (L === 0) {
-        const top = tok ? `${tokTex}\\quad (x = a^{(0)} \\in \\mathbb{R}^{${m}})` : `x = a^{(0)} \\in \\mathbb{R}^{${m}}`;
-        return named ? `\\begin{aligned} &${top} \\\\ &${named} \\end{aligned}` : top;
+      const parts = tok ? [mth((s.groups ? s.groups.map(g => `{${g}}`).join(',\\ ') : matSym(L)) + ` \\in \\mathbb{R}^{${s.tokens} \\times ${s.d}}`), ' · '] : [];
+      if (L === 0) parts.push(mth(`x = a^{(0)} \\in \\mathbb{R}^{${m}}`));
+      else {
+        const n = M.nodesIn(net(), L - 1).length, w = wiring(L);
+        parts.push(mth(`W^{(${L})} \\in \\mathbb{R}^{${m} \\times ${n}}`), ', ', mth(`b^{(${L})} \\in \\mathbb{R}^{${m}}`));
+        if (m * n - w.have) parts.push(` · ${m * n - w.have} masked`);   // no break inside "24 masked"
+        if (w.skip) parts.push(` · ${w.skip} skip`);
       }
-      const n = M.nodesIn(net(), L - 1).length;
-      const ids = new Set(nodes().map(q => q.id));
-      const prev = new Set(M.nodesIn(net(), L - 1).map(q => q.id));
-      let have = 0, skip = 0;
-      for (const e of net().edges) {
-        if (!ids.has(e.to)) continue;
-        if (prev.has(e.from)) have++; else skip++;
-      }
-      const masked = m * n - have;
-      const flat = `W^{(${L})} \\in \\mathbb{R}^{${m} \\times ${n}},\\ b^{(${L})} \\in \\mathbb{R}^{${m}}` +
-        (masked ? `\\quad ${masked} \\text{ masked}` : '') + (skip ? `\\quad ${skip} \\text{ skip}` : '');
-      return tok ? `\\begin{aligned} &${tokTex} \\\\ &${flat} \\end{aligned}` : flat;
-    }, false, 'nn-math nn-inline');
-    section(c, 'layer.main', 'Layer', null,
-      h('div', { class: 'nn-field nn-grid2' }, h('span', { class: 'nn-k', text: 'name' }), name),
-      h('div', { class: 'nn-field nn-grid2' }, h('span', { class: 'nn-k', text: 'size' }), sizeRow),
-      shape);
+      setRich(shapeEl, parts);
+    });
+    c.top.append(shapeEl);
+    if (tok && !attn && sh.tokens > 1) {
+      const rowsEl = h('div', { class: 'nn-insp-sub nn-rows' });
+      c.binds.push(() => {
+        const names = Array.from({ length: shapeOf(L).tokens }, (_, t) => tokName(t));
+        setHidden(rowsEl, !names.some(Boolean));
+        setRich(rowsEl, ['rows: ', names.map((n, t) => n || `t${t + 1}`).join(', ')]);
+      });
+      c.top.append(rowsEl);
+    }
+
+    // the one-line computation: the layer as a formula (the input layer: its vector)
+    const info = L > 0 && !attn ? sharedInfo(L) : null;
+    c.top.append(lineBox(c, () => layerLine(L, info)));
 
     if (attn) { buildAttnLayer(c, L, lid); return; }
 
@@ -1870,43 +2179,12 @@ export function install(ctx) {
           plot.draw(actFn(act), nodes().map(q => ({ ...(fwdNode(q.id) || {}), hi: hv && (hv.id === q.id) })), act);
         }
       });
-      section(c, 'layer.act', 'Activation', null, h('div', { class: 'nn-act-row' }, actSelect(c, lid), def), plot.el);
-      sharedSection(c, L);
+      sum(c, section(c, 'layer.act', 'Activation', null, h('div', { class: 'nn-act-row' }, actSelect(c, lid), def), plot.el),
+        () => ACT_NAME[actOf(L)] || actLabel(actOf(L)));
     }
 
-    // wiring (never into an attention layer: it takes no edges)
-    const acts = [];
-    const mix = t => (tok || (L > 0 && isTok(L - 1)) ? `${t}. Dense edges mix the tokens and are not shared.` : t);
-    if (L > 0) {
-      const b = h('button', { class: 'nn-mini', title: mix('Connect every neuron of the previous layer to every neuron here') }, '← connect previous');
-      b.addEventListener('click', () => dense(net().layers[L - 1].id, lid));
-      acts.push(b);
-    }
-    if (L < last && !isAttn(L + 1)) {
-      const b = h('button', { class: 'nn-mini', title: mix('Connect every neuron here to every neuron of the next layer') }, 'connect next →');
-      b.addEventListener('click', () => dense(lid, net().layers[L + 1].id));
-      acts.push(b);
-    }
-    if (L > 0) {
-      const scheme = h('select', { class: 'nn-scheme', title: 'Initialisation scheme' }, SCHEMES.map(s => h('option', { value: s }, s)));
-      scheme.value = schemeFor(L);
-      const b = h('button', { class: 'nn-mini', title: 'Re-draw the incoming weights and biases of this layer (one value per shared parameter; fixed weights stay)' }, 'randomize');
-      b.addEventListener('click', () => randomizeLayer(lid, scheme.value));
-      acts.push(h('span', { class: 'nn-rand' }, b, scheme));
-    }
-    if (acts.length) section(c, 'layer.wire', 'Wiring', null, h('div', { class: 'nn-row' }, ...acts));
-
-    // bias vector (or the input vector)
-    const vec = texBox(c, () => {
-      const vs = nodes().map(q => fmt(L === 0 ? q.value : q.bias));
-      // elide the middle until the row fits the card (each cell also carries its column gap)
-      const rowW = cells => cells.reduce((s, v) => s + texWidth(v) + 1.5, 6);
-      let shown = vs;
-      for (let keep = vs.length - 1; rowW(shown) > CARD_UNITS && keep >= 3; keep--) {
-        shown = [...vs.slice(0, keep - 1), '\\cdots', ...vs.slice(-1)];
-      }
-      return `${L === 0 ? 'x' : `b^{(${L})}`} = \\begin{bmatrix} ${shown.join(' & ')} \\end{bmatrix}^{\\top}`;
-    }, false, 'nn-math nn-inline');
+    // bias vector (or the input vector, which is the input layer's one-line)
+    const vec = L === 0 ? null : texBox(c, () => vecTex(L), false, 'nn-math nn-inline');
     const rows = nodes().map(q => slider(c, L === 0 ? {
       lab: el => setTex(el, label(q.id)),
       get: () => node(q.id)?.value,
@@ -1926,12 +2204,101 @@ export function install(ctx) {
       if (biasTie(q?.id)) r.classList.add('tied');
       if (q) dimBy(c, r, E => nodeEm(E, q.id));
     });
-    section(c, 'layer.vec', L === 0 ? 'Inputs' : 'Biases', null, vec, ...rows);
+    sum(c, section(c, 'layer.vec', L === 0 ? 'Inputs' : 'Biases', null, vec, ...rows), () => {
+      const vs = nodes().map(q => (L === 0 ? q.value : q.bias));
+      return L === 0 ? `${vs.length} ${vs.length === 1 ? 'slider' : 'sliders'}` : vs.map(v => fmt(v)).join(', ');
+    });
+
+    if (info) sharedSection(c, L, info);
+
+    // size: one more or one less neuron (a token layer holds tokens x features: its size is fixed)
+    if (!tok) {
+      const size = h('span', { class: 'nn-size' });
+      const minus = h('button', { class: 'nn-mini ui-btn xs icon soft', type: 'button', title: 'Remove the last neuron', 'aria-label': 'Remove the last neuron' }, icon('minus', 12) || '−');
+      const plus = h('button', { class: 'nn-mini ui-btn xs icon soft', type: 'button', title: 'Add a neuron, wired like its neighbours', 'aria-label': 'Add a neuron' }, icon('plus', 12) || '+');
+      minus.addEventListener('click', () => resize(lid, -1));
+      plus.addEventListener('click', () => resize(lid, +1));
+      c.binds.push(() => {
+        const n = nodes().length;
+        setText(size, String(n));
+        minus.disabled = ro || n <= 1;
+      });
+      sum(c, section(c, 'layer.main', 'Size', null, h('div', { class: 'nn-size-row' }, minus, size, plus,
+        h('span', { class: 'nn-k', text: 'neurons' }))), () => { const n = nodes().length; return `${n} ${n === 1 ? 'neuron' : 'neurons'}`; });
+    }
+
+    // wiring (never into an attention layer: it takes no edges)
+    const acts = [];
+    const mix = t => (tok || (L > 0 && isTok(L - 1)) ? `${t}. Dense edges mix the tokens and are not shared.` : t);
+    if (L > 0) {
+      const b = ubtn('sm soft nn-mini', 'Connect previous', { ic: 'chevron-left', title: mix('Connect every neuron of the previous layer to every neuron here') });
+      b.addEventListener('click', () => dense(net().layers[L - 1].id, lid));
+      acts.push(b);
+    }
+    if (L < last && !isAttn(L + 1)) {
+      const b = ubtn('sm soft nn-mini', 'Connect next', { ic: 'chevron-right', after: true, title: mix('Connect every neuron here to every neuron of the next layer') });
+      b.addEventListener('click', () => dense(lid, net().layers[L + 1].id));
+      acts.push(b);
+    }
+    if (L > 0) {
+      const scheme = h('select', { class: 'nn-scheme ui-field sm', title: 'Initialisation scheme', 'aria-label': 'Initialisation scheme' }, SCHEMES.map(s => h('option', { value: s }, s)));
+      scheme.value = schemeFor(L);
+      const b = ubtn('sm soft nn-mini', 'Randomize', { ic: 'dice', title: 'Re-draw the incoming weights and biases of this layer (one value per shared parameter; fixed weights stay)' });
+      b.addEventListener('click', () => randomizeLayer(lid, scheme.value));
+      acts.push(h('span', { class: 'nn-rand' }, b, scheme));
+    }
+    if (acts.length) {
+      sum(c, section(c, 'layer.wire', 'Wiring', null, h('div', { class: 'nn-row' }, ...acts)), () => {
+        if (L === 0) {
+          const n = L < last ? net().edges.filter(e => M.nodeLayerIndex(net(), e.from) === 0).length : 0;
+          return `${n} out`;
+        }
+        const w = wiring(L), full = nodes().length * M.nodesIn(net(), L - 1).length;
+        return `${w.have} of ${full} in${w.skip ? ` · ${w.skip} skip` : ''}`;
+      });
+    }
   }
 
-  // The shared parameters feeding layer L as small matrices (X W convention: rows = input feature,
-  // columns = output feature), and the layer as a matrix product: Q = X W_Q, H = ReLU(Z W_O + X).
-  function sharedSection(c, L) {
+  // Edges into layer L: from the previous layer (have) and from further back (skip).
+  function wiring(L) {
+    const ids = new Set(M.nodesIn(net(), L).map(q => q.id));
+    const prev = new Set(L > 0 ? M.nodesIn(net(), L - 1).map(q => q.id) : []);
+    let have = 0, skip = 0;
+    for (const e of net().edges) {
+      if (!ids.has(e.to)) continue;
+      if (prev.has(e.from)) have++; else skip++;
+    }
+    return { have, skip };
+  }
+
+  // A layer's input or bias vector, its middle elided until the row fits the card.
+  function vecTex(L) {
+    const vs = M.nodesIn(net(), L).map(q => fmt(L === 0 ? q.value : q.bias));
+    const rowW = cells => cells.reduce((s, v) => s + texWidth(v) + 1.5, 6);   // each cell also carries its column gap
+    let shown = vs;
+    for (let keep = vs.length - 1; rowW(shown) > CARD_UNITS && keep >= 3; keep--) {
+      shown = [...vs.slice(0, keep - 1), '\\cdots', ...vs.slice(-1)];
+    }
+    return `${L === 0 ? 'x' : `b^{(${L})}`} = \\begin{bmatrix} ${shown.join(' & ')} \\end{bmatrix}^{\\top}`;
+  }
+
+  // The layer's one-line: a = f(W a_prev (+ skip terms) + b), or Q = X W_Q when that is exactly
+  // what a shared layer computes (sharedInfo), or the input vector, or softmax(Q K^T c) V.
+  function layerLine(L, info) {
+    if (L === 0) return vecTex(L);
+    if (isAttn(L)) return `Z = \\operatorname{softmax}\\big(QK^{\\top} c${causalOf(L) ? ' + M' : ''}\\big)\\,V`;
+    if (info?.exact) return relTex(L, info);
+    const act = actOf(L), fn = FN[act] ?? `\\operatorname{${act}}`;
+    const ids = new Set(M.nodesIn(net(), L).map(q => q.id)), from = new Set();
+    for (const e of net().edges) if (ids.has(e.to)) from.add(M.nodeLayerIndex(net(), e.from));
+    const terms = [...from].filter(k => k < L).sort((p, q) => q - p).map(k => `W^{(${wUp(L, k)})} ${k === 0 ? 'x' : `a^{(${k})}`}`);
+    const inner = [...terms, `b^{(${L})}`].join(' + ');
+    return `${L === lastIndex() ? '\\hat y' : `a^{(${L})}`} = ${act === 'identity' ? inner : `${fn}\\big(${inner}\\big)`}`;
+  }
+
+  // The shared parameters feeding layer L (X W convention: rows = input feature, columns = output
+  // feature), and whether the layer is exactly a matrix product of them: Q = X W_Q, H = ReLU(Z W_O + X).
+  function sharedInfo(L) {
     const s = shapeOf(L), pos = new Map(M.nodesIn(net(), L).map((q, k) => [q.id, k]));
     const mats = new Map(), fixedFrom = new Set(), plainFrom = new Set();
     for (const e of net().edges) {
@@ -1950,7 +2317,7 @@ export function install(ctx) {
       }
       if (s.groups) m.groups.add(Math.floor(pos.get(e.to) / (s.tokens * s.d)));
     }
-    if (!mats.size) return;
+    if (!mats.size) return null;
     const list = [...mats.values()];
     // The layer as a product (Q = X W_Q) only when that is exactly what it computes: every shared
     // matrix tokenwise (model.tiedMatrices: the layer matrix is I ⊗ Wᵀ), every other edge a fixed
@@ -1962,20 +2329,26 @@ export function install(ctx) {
       return e.w === 1 && a.t === b.t && a.f === b.f;
     }));
     const exact = !plainFrom.size && residual && list.every(m => tw.some(t => t.name === m.name && t.tokenwise));
-    const rel = !exact ? null : texBox(c, () => {
-      const act = actOf(L), fn = FN[act] ?? `\\operatorname{${act}}`;
-      const anyB = M.nodesIn(net(), L).some(q => Number.isFinite(q.bias) && q.bias !== 0);
-      const wrap = x => (act === 'identity' ? x : `${fn}\\big(${x}\\big)`);
-      const bias = anyB ? ' + b' : '';
-      if (s.groups) {
-        return s.groups.map((g, gi) => {
-          const ms = list.filter(m => m.groups.has(gi));
-          return ms.length ? `{${g}} = ${wrap(ms.map(m => `${matSym(m.from)}\\,{${m.name}}`).join(' + ') + bias)}` : null;
-        }).filter(Boolean).join(',\\quad ');
-      }
-      const parts = [...list.map(m => `${matSym(m.from)}\\,{${m.name}}`), ...[...fixedFrom].map(k => matSym(k))];
-      return `${isTok(L) ? matSym(L) : `a^{(${L})}`} = ${wrap(parts.join(' + ') + bias)}`;
-    }, true);
+    return { s, list, fixedFrom, exact };
+  }
+
+  function relTex(L, { s, list, fixedFrom }) {
+    const act = actOf(L), fn = FN[act] ?? `\\operatorname{${act}}`;
+    const anyB = M.nodesIn(net(), L).some(q => Number.isFinite(q.bias) && q.bias !== 0);
+    const wrap = x => (act === 'identity' ? x : `${fn}\\big(${x}\\big)`);
+    const bias = anyB ? ' + b' : '';
+    if (s.groups) {
+      return s.groups.map((g, gi) => {
+        const ms = list.filter(m => m.groups.has(gi));
+        return ms.length ? `{${g}} = ${wrap(ms.map(m => `${matSym(m.from)}\\,{${m.name}}`).join(' + ') + bias)}` : null;
+      }).filter(Boolean).join(',\\quad ');
+    }
+    const parts = [...list.map(m => `${matSym(m.from)}\\,{${m.name}}`), ...[...fixedFrom].map(k => matSym(k))];
+    return `${isTok(L) ? matSym(L) : `a^{(${L})}`} = ${wrap(parts.join(' + ') + bias)}`;
+  }
+
+  // The shared matrices themselves (the relation to them is the card's one-line when it is exact).
+  function sharedSection(c, L, { s, list, exact }) {
     const cut = (n, max = 6) => (n > max ? [0, 1, 2, 3, -1, n - 1] : [...Array(n).keys()]);   // -1 = dots
     const boxes = list.map(m => texBox(c, () => {
       if (!m.rows || !m.cols) return `{${m.name}}\\ \\text{(${m.n} edges)}`;
@@ -1991,10 +2364,12 @@ export function install(ctx) {
     note.textContent = exact && T > 1
       ? `Each shared matrix is applied to every one of the ${T} tokens: in z = W a it is the block-diagonal I${sub(T)} ⊗ Wᵀ. Moving one entry moves all its copies.`
       : 'Each shared entry is used by several edges: moving it moves all its copies.';
-    section(c, 'layer.shared', 'Shared weights', null, rel, ...boxes, note);
+    sum(c, section(c, 'layer.shared', 'Shared weights', null, ...boxes, note), () => list.map(m => m.name).join(', '));
   }
   const SUBS = '₀₁₂₃₄₅₆₇₈₉';
   const sub = n => String(n).split('').map(d => SUBS[+d] || d).join('');
+  // A heatmap cell's fill: colorFor with its alpha capped at 0.72, as the matrix panel's cells.
+  const cellFill = v => colorFor(v, 1, theme()).replace(/,\s*([\d.]+)\)$/, (m, a) => `,${Math.min(0.72, +a).toFixed(3)})`);
 
   // Tokens, heads, the causal mask and the scale, then this sample's attention matrix per head.
   function buildAttnLayer(c, L, lid) {
@@ -2002,18 +2377,18 @@ export function install(ctx) {
     const divs = [];
     for (let k = 1; k <= prevD; k++) if (prevD % k === 0) divs.push(k);
     const tokEl = h('span', { class: 'nn-size' });
-    const heads = h('select', { class: 'nn-heads', title: 'Heads split d_k and d_v into equal slices, one softmax per slice' },
+    const heads = h('select', { class: 'nn-heads ui-field sm', title: 'Heads split d_k and d_v into equal slices, one softmax per slice', 'aria-label': 'Heads' },
       divs.map(k => h('option', { value: String(k) }, String(k))));
     heads.addEventListener('change', () => setAttnLayer(lid, { heads: +heads.value }, 'heads'));
-    const causal = h('input', { type: 'checkbox', class: 'nn-check', title: 'Causal mask: token i only attends to tokens j ≤ i' });
+    const causal = h('input', { type: 'checkbox', class: 'nn-check ui-switch', title: 'Causal mask: token i only attends to tokens j ≤ i' });
     causal.addEventListener('change', () => { setAttnLayer(lid, { causal: causal.checked }, 'causal'); causal.blur(); });
-    const scale = h('input', { type: 'number', step: '0.05', class: 'nn-num nn-scale', title: 'The factor c in S = Q Kᵀ c' });
+    const scale = h('input', { type: 'number', step: '0.05', class: 'nn-num nn-scale ui-field sm num', title: 'The factor c in S = Q Kᵀ c', 'aria-label': 'Scale' });
     scale.addEventListener('change', () => {
       const v = parseNum(scale.value);
       setAttnLayer(lid, { scale: v }, 'scale');
     });
     scale.addEventListener('keydown', e => { if (e.key === 'Enter') scale.blur(); });
-    const def = h('button', { class: 'nn-mini', title: 'Back to the default 1/√(d_k / heads)' }, 'default');
+    const def = ubtn('xs nn-mini', 'default', { title: 'Back to the default 1/√(d_k / heads)' });
     def.addEventListener('click', () => setAttnLayer(lid, { scale: null }, 'scale'));
     const scaleNote = h('span', { class: 'nn-k nn-scale-note' });
     c.binds.push(() => {
@@ -2025,7 +2400,7 @@ export function install(ctx) {
       def.disabled = ro || !customScale(L);
       setTex(scaleNote, customScale(L) ? '\\text{custom}' : `= 1/\\sqrt{${+dkHead(L).toFixed(3)}}`);
     });
-    // what the Layer line's c, M and heads mean
+    // what the one-line's c, M and heads mean
     const formula = texBox(c, () => {
       const H = headsOf(L), lines = [];
       if (causalOf(L)) lines.push('M_{i,j} = -\\infty \\text{ for } j > i, \\text{ else } 0');
@@ -2094,24 +2469,32 @@ export function install(ctx) {
         const a = attnFwd(L, q.hd)?.A?.[q.i]?.[q.j];
         const masked = cz && q.j > q.i;
         setText(q.cell, masked ? '–' : Number.isFinite(a) ? fmt(a) : '?');
-        setStyle(q.cell, 'background', masked || !Number.isFinite(a) ? 'transparent' : colorFor(a, 1, theme()));
+        setStyle(q.cell, 'background', masked || !Number.isFinite(a) ? '' : cellFill(a));
         const tip = `A(${q.i + 1},${q.j + 1}): how much ${tokWord(q.i)} reads ${tokWord(q.j)}`;
         if (q.cell.title !== tip) q.cell.title = tip;
       }
     });
-    section(c, 'layer.attn', 'Attention', null,
+    // the value of an attention layer: this sample's A, one map per head
+    c.top.append(maps);
+    sum(c, section(c, 'layer.attn', 'Attention', null,
       h('div', { class: 'nn-attn-grid' },
         h('span', { class: 'nn-k', text: 'tokens' }), tokEl,
         h('span', { class: 'nn-k', text: 'heads' }), heads,
-        h('span', { class: 'nn-k', text: 'causal' }), h('label', { class: 'nn-check-row' }, causal, h('span', { text: 'mask j > i' })),
+        h('span', { class: 'nn-k', text: 'causal' }), h('label', { class: 'nn-check-row ui-check-row' }, causal, h('span', { text: 'mask j > i' })),
         h('span', { class: 'nn-k', text: 'scale' }), h('span', { class: 'nn-scale-row' }, scale, scaleNote, def)),
-      formula, maps,
-      h('div', { class: 'nn-hint', text: 'A for the current sample. No weights come in and there is no bias: Q, K and V come from the previous layer.' }));
+      formula,
+      h('div', { class: 'nn-hint', text: 'A for the current sample. No weights come in and there is no bias: Q, K and V come from the previous layer.' })), () => {
+      const H = headsOf(L);
+      return `${H} ${H === 1 ? 'head' : 'heads'}${causalOf(L) ? ' · causal' : ''} · c ${fmt(scaleOf(L))}`;
+    });
 
     if (L < lastIndex()) {
-      const b = h('button', { class: 'nn-mini', title: 'Connect every neuron here to every neuron of the next layer. Dense edges mix the tokens and are not shared.' }, 'connect next →');
+      const b = ubtn('sm soft nn-mini', 'Connect next', { ic: 'chevron-right', after: true, title: 'Connect every neuron here to every neuron of the next layer. Dense edges mix the tokens and are not shared.' });
       b.addEventListener('click', () => dense(lid, net().layers[L + 1].id));
-      section(c, 'layer.wire', 'Wiring', null, h('div', { class: 'nn-row' }, b));
+      sum(c, section(c, 'layer.wire', 'Wiring', null, h('div', { class: 'nn-row' }, b)), () => {
+        const ids = new Set(M.nodesIn(net(), L).map(q => q.id));
+        return `${net().edges.filter(e => ids.has(e.from)).length} out`;
+      });
     }
   }
 
@@ -2219,7 +2602,7 @@ export function install(ctx) {
   ctx.onTheme?.(() => { for (const c of cards) update(c); });
   ctx.onShow?.(v => {
     visible = !!v;
-    if (visible) { updateAll(); for (const c of cards) c.akey = ''; ensureLoop(); }
+    if (visible) { updateAll(); for (const c of cards) { c.akey = ''; for (const el of c.lines) fitWidth(el); } ensureLoop(); }
   });
 
   const api = {

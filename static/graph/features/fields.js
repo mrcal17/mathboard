@@ -956,7 +956,8 @@ const CSS = `
 .g-label.fl-sm { font-size: 16px; }
 .g-out .fl-line { line-height: 1.55; }
 `;
-const HELP = `<p><code>flow(A)</code> x&#8242; = Ax: field, particles, eigenvector highways &middot;
+const HELP = `<h4 class="ui-overline">Dynamics and forms</h4>
+<p><code>flow(A)</code> x&#8242; = Ax: field, particles, eigenvector highways &middot;
 <code>iterate(A, v, n)</code> v, Av, A&sup2;v, &hellip; &middot; <code>power(A, v, n)</code> power method &middot;
 <code>quadric(A, c)</code> x&#7488;Ax = c (c = 1 if left out). n can be a slider.</p>`;
 

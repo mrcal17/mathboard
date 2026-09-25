@@ -67,13 +67,19 @@ Attention panel. The view's height shrinks to fit the stage below the panel's to
 
 ## The panel
 
-- **Header**: the four mode buttons, ⌂ (the default view) and × (P). Drag it to move the panel,
-  double-click it to put it back; the corner grip sets the width and the view's height.
+- **Header**: the four mode buttons (a plot that doesn't apply to the net looks disabled; its title
+  says why), a help icon (its title says how to use the panel), ⌂ (the default view) and × (P).
+  Drag it to move the panel, double-click it to put it back; the corner grip sets the width and
+  the view's height.
 - **View**: drag to orbit, right-drag (or Shift-drag) to pan, wheel to zoom (OrbitControls with
-  damping). Pointer and wheel input stay in the panel.
-- **Caption**: what is plotted, in KaTeX with live numbers, and a note line.
-- The audience window and the clean view (H) show the plot and its caption with only the active
-  mode's button: no controls row, ⌂, × or grip, and the audience can't orbit (it follows `cam`).
+  damping). Pointer and wheel input stay in the panel. The box, grid and wire colours are mixed
+  from the theme's tokens (`--bg`, `--text-1` to `--text-3`), the data colours from store.js and
+  `--hi`.
+- **Caption**: what is plotted, in KaTeX with live numbers, and a note folded to one line with a
+  "more" link when it runs longer.
+- The audience window and the clean view (H) show the plot and its caption (the note in full) with
+  only the active mode's name: no controls row, help, ⌂, × or grip, and the audience can't orbit (it
+  follows `cam`).
 
 ## Surface
 
@@ -136,8 +142,11 @@ The loss `L(θ₀ + α δ₁ + β δ₂)` over the plane through the weights θ�
   and runs `model.predict`.
 - **Height**: from the grid's minimum to min(max, min + 1.3 × (max(85th percentile, the path's
   highest loss, the current loss) − min)); anything higher is drawn flat at the top and the note
-  says where the top was cut. `log` maps log₁₀ L instead. Viridis by height, 8 contour lines on the
-  surface and faintly on the floor.
+  says where the top was cut. When the path or the ● has a lower true loss than the whole slice, the
+  floor drops under the slice's minimum in steps of a tenth of that range, so they keep their true
+  depth. `log` maps log₁₀ L instead. The colour is a sequential ramp in the data palette: the loss
+  as a magnitude, from the neutral grey (low) to positive blue (high, at most 72%, like the matrix
+  cells), so HI stays the ●'s. 8 contour lines on the surface and faintly on the floor.
 - **The path**: recorded by the presenter from the Train panel's `train` events whatever the panel
   shows (at most every 60 ms while running, and at each pause or step; 400 points, halved when
   full): the full parameter vector and its loss. Undoing training cuts it back to the current step;
@@ -145,7 +154,11 @@ The loss `L(θ₀ + α δ₁ + β δ₂)` over the plane through the weights θ�
   as a tube at its **true loss**, so where the net left the plane it floats above or sinks below the
   slice; a faint copy shows through the surface, and its shadow runs on the floor. The note gives
   the current point's loss and its distance from the plane (0 when it is on it).
-- The ● is the current weights, projected, at their true loss.
+- The ● is the current weights, projected, at their true loss. Off the plane that is not the
+  surface's height at its (α, β): an HI stem joins the surface there (a small dot) to the ●, the
+  ● and the stem show faintly through the surface when they are under it, and a short caption
+  "off the plane" sits beside the ●. The note says whether it is above or below the surface and
+  the surface's loss there (`probe().landscape.current.slice`).
 
 ## Space and simplex
 

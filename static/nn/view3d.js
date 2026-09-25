@@ -166,7 +166,7 @@ export function install(ctx) {
   let G = null, gen = 0, threeP = null;
 
   const btn = audience ? null : ctx.addButton?.({
-    label: '3D', icon: '&#11041;', group: 'view', onClick: () => toggle(),
+    label: '3D', icon: window.mathboardIcons?.svg('layers') ? 'layers' : '&#11041;', group: 'view', onClick: () => toggle(),
     title: '3D view (D): the net in depth, attention heads as slabs, or the multi-head reshape as moving cubes. Shift+D: next view',
   }) || null;
 
@@ -180,7 +180,7 @@ export function install(ctx) {
   function open(mode = lastMode) {
     if (audience) return;
     if (mode === 'heads' && !hasAttn()) mode = 'stack';
-    store.set('v3d', cleanV3d({ mode, nums: mode !== 'stack' }));
+    store.set('v3d', cleanV3d({ mode, nums: mode === 'tensor' }));
   }
   function toggle(on = !store.state.v3d) {
     if (audience) return;
@@ -191,7 +191,7 @@ export function install(ctx) {
     if (!MODES.includes(mode)) return;
     if (mode === 'heads' && !hasAttn()) { ctx.toast?.('Heads needs an attention layer: try the "Two heads" or "Transformer block" preset', 3200); return; }
     if (!cur()) open(mode);
-    else if (cur().mode !== mode) put({ mode, camera: null, step: 0, nums: mode !== 'stack' });
+    else if (cur().mode !== mode) put({ mode, camera: null, step: 0, nums: mode === 'tensor' });
   }
   function cycle(dir = 1) {
     const list = MODES.filter(m => m !== 'heads' || hasAttn()), v = cur();
@@ -286,6 +286,8 @@ export function install(ctx) {
     const FOV = 24;
     const DIRS = { stack: [0.36, 0.42, 0.84], heads: [0.34, 0.3, 1], tensor: [0.62, 0.28, 1] };
     const DIM = 0.1, NUM_MIN = 0.25, FOCUS_NODE = 0.42, FOCUS_EDGE = 0.13, FOCUS_ATT = 0.1;
+    const FIXED_A = 0.45, FIXED_R = 0.014;   // a fixed edge's opacity and radius
+    const NUM_PX = 28;                       // heads, tensor: a cell's number shows when its face is this wide on screen
     const PUB_MS = 120, STEP_MS = 1100, PLAY_MS = 2600;
     const NODE_R = 0.34, CUBE = 0.8;
 
@@ -370,19 +372,22 @@ export function install(ctx) {
       const r = /rgba?\(([^)]+)\)/.exec(String(s));
       return r ? r[1].split(',').slice(0, 3).map(x => +x) : null;
     };
+    // fixed: fixed edges (a residual, a pooling weight) are not parameters, so they are drawn in the
+    // UI's muted text colour (--text-3), never a weight colour, as on the 2D canvas.
     const PAL = {
-      dark: { node: [38, 45, 50], hi: [255, 213, 74], att: [183, 148, 255], line: [255, 255, 255], bgFall: [29, 35, 39],
-        heads: ['#b794ff', '#199e70', '#c98500', '#e0629a', '#4fb3d9', '#9ccc3d'],
+      dark: { node: [38, 45, 50], hi: [255, 213, 74], att: [183, 148, 255], line: [255, 255, 255], fixed: [147, 156, 162], bgFall: [29, 35, 39],
         toks: ['#f0a23b', '#4fb3d9', '#7bd672', '#e0629a', '#c9a0ff', '#e8d94a', '#ff8a5c', '#9fb0bd'] },
-      light: { node: [255, 255, 255], hi: [232, 168, 0], att: [116, 66, 214], line: [0, 0, 0], bgFall: [251, 251, 248],
-        heads: ['#7442d6', '#1baf7a', '#eda100', '#c2185b', '#1f86b8', '#6a9a17'],
+      light: { node: [255, 255, 255], hi: [232, 168, 0], att: [116, 66, 214], line: [0, 0, 0], fixed: [107, 112, 117], bgFall: [251, 251, 248],
         toks: ['#d9822b', '#1f86b8', '#3c9a35', '#c2185b', '#7442d6', '#a38c00', '#e0562b', '#5c6b77'] },
     };
+    // a head keeps its colour in every panel: the head tokens (style.css section 1, literal hex)
+    const HEAD_VARS = ['--att', '--head-2', '--head-3', '--head-4', '--head-5', '--head-6'];
     let P = null;
     function retheme() {
-      const th = theme(), base = PAL[th];
-      const bg = hexRGB(getComputedStyle(document.documentElement).getPropertyValue('--bg')) || base.bgFall;
-      P = { ...base, th, bg, heads: base.heads.map(hexRGB), toks: base.toks.map(hexRGB) };
+      const th = theme(), base = PAL[th], cs = getComputedStyle(document.documentElement);
+      const bg = hexRGB(cs.getPropertyValue('--bg')) || base.bgFall;
+      const heads = HEAD_VARS.map(v => hexRGB(cs.getPropertyValue(v)) || base.att);
+      P = { ...base, th, bg, heads, toks: base.toks.map(hexRGB) };
       scene.background = new THREE.Color().setRGB(bg[0] / 255, bg[1] / 255, bg[2] / 255, THREE.SRGBColorSpace);
       const lc = new THREE.Color().setRGB(...base.line.map(x => x / 255), THREE.SRGBColorSpace);
       MAT.band.color.copy(lc);
@@ -894,9 +899,11 @@ export function install(ctx) {
           const gone = hides && E.hidden.edge(e.id);
           const on = H.edges.has(e.id) || S.edges.has(e.id), tie = H.ties.has(e.id) || S.ties.has(e.id);
           const lit = A.litE.has(e.id), rel = focusOn && (H.relE.has(e.id) || lit);
-          const ev = dim ? E.edge(e.id) : 1, c = rgba(colorFor(w, maxW, P.th));
-          let op = on || tie || lit ? 1 : le(ev) * (focusOn && !rel ? FOCUS_EDGE : 1);
-          let col = mix(P.bg, c, c[3] * op), rad = 0.013 + 0.05 * Math.min(1, Math.abs(w) / maxW);
+          // a fixed edge is thin and muted (not a weight colour), at full strength only while held
+          const ev = dim ? E.edge(e.id) : 1, held = on || tie || lit;
+          const c = e.fixed ? [...P.fixed, held ? 1 : FIXED_A] : rgba(colorFor(w, maxW, P.th));
+          let op = held ? 1 : le(ev) * (focusOn && !rel ? FOCUS_EDGE : 1);
+          let col = mix(P.bg, c, c[3] * op), rad = e.fixed ? FIXED_R : 0.013 + 0.05 * Math.min(1, Math.abs(w) / maxW);
           if (on || tie || lit) { col = mix(col, P.hi, on ? 0.55 : 0.35); rad += on ? 0.03 : 0.018; }
           for (let k = 0; k < r.segs.length; k++) setRod(edgeMesh, r.first + k, r.segs[k][0], r.segs[k][1], gone ? 0 : rad);
           for (let k = 0; k < r.segs.length; k++) setCol(edgeMesh, r.first + k, col);
@@ -1079,6 +1086,30 @@ export function install(ctx) {
     };
 
     // ================================================================ cells (heads and tensor modes)
+    // A cell's number shows on a held cell (hovered, selected, stepped) always, and with the 1.2
+    // button on, on every cell the lens keeps: at full size once its face is NUM_PX wide on screen,
+    // below that without its leading 0 and shrunk to the face (7.5 px at the least), so they don't
+    // overlap. paint / draw set the label's userData { txt, nums (the button), on (held), want (not
+    // faded by the lens), no (never: a masked bar, token colours) }; declutter measures face (px)
+    // as the camera moves. showNum -> true if the visibility changed.
+    // The face's drawn width: its left and right edges (cells are axis-aligned) projected, so a face
+    // seen at an angle counts as narrower than one seen head on.
+    const faceL = V3(), faceR = V3();
+    const faceW = (p, half) => {
+      const a = proj(faceL.set(p.x - half, p.y, p.z), 0), b = proj(faceR.set(p.x + half, p.y, p.z), 0);
+      return a && b ? Math.hypot(b.x - a.x, b.y - a.y) : 0;
+    };
+    function showNum(o) {
+      const d = o.userData, vis = !d.no && (!!d.on || (!!d.nums && !!d.want));
+      const small = vis && !d.on && d.face != null && d.face < NUM_PX;
+      const txt = small ? String(d.txt ?? '').replace(/^(−?)0\./, '$1.') : String(d.txt ?? '');
+      if (o.element.__t !== txt) { o.element.__t = txt; o.element.textContent = txt; }
+      const fs = small ? `${clamp(Math.round(23 * d.face / 22) / 2, 7.5, 11.5)}px` : '';
+      if (o.element.__fs !== fs) { o.element.__fs = fs; o.element.style.fontSize = fs; }
+      if (o.visible === vis) return false;
+      o.visible = vis;
+      return true;
+    }
     // Value cubes in x-y planes (rows = tokens top to bottom), with a HI halo behind lit ones.
     function cellSet(C, n) {
       const mesh = C.inst(GEO.box, MAT.shade, n), halo = C.inst(GEO.frame, MAT.halo, n, 2);
@@ -1183,7 +1214,7 @@ export function install(ctx) {
         const z = zOf(h), n = h + 1, ty = yS(h) + T / 2 + 0.2;
         for (const k of ['Q', 'K', 'A', 'V', 'Z']) lab(name(k, n), V3(X[k], ty, z));
         const o = lab(`head ${n}`, V3(x0 - 0.25, yS(h), z), 'nn3d-headlab', 1, 0.5);
-        o.element.style.color = `rgb(${P.heads[h % P.heads.length].join(',')})`;
+        o.element.style.color = `var(${HEAD_VARS[h % HEAD_VARS.length]})`;   // follows the theme
         if (h === 0) {
           lab('→', V3((X.K + X.A) / 2 - (T - dh) / 4, yS(0), z), 'nn3d-op', 0.5, 0.5);
           lab('·', V3((X.A + X.V) / 2 + (T - dh) / 4, yS(0), z), 'nn3d-op', 0.5, 0.5);
@@ -1221,9 +1252,8 @@ export function install(ctx) {
           if (on) lit.push(c.p);
           const o = numLabs[i];
           if (o) {
-            o.visible = !!v3?.nums && (on || e >= NUM_MIN);
-            const s = num(vv);
-            if (o.element.__t !== s) { o.element.__t = s; o.element.textContent = s; }
+            Object.assign(o.userData, { txt: num(vv), nums: !!v3?.nums, on, want: e >= NUM_MIN, no: false });
+            showNum(o);
             o.element.style.opacity = op < 0.99 ? String(Math.max(0.35, op)) : '';
           }
         });
@@ -1243,9 +1273,8 @@ export function install(ctx) {
           const o = barLabs[i];
           if (o) {
             o.position.set(b.p.x, b.p.y, b.p.z - CUBE / 2 + depth + 0.02);
-            o.visible = !!v3?.nums && !b.masked && (on || e >= NUM_MIN);
-            const s = num(A0);
-            if (o.element.__t !== s) { o.element.__t = s; o.element.textContent = s; }
+            Object.assign(o.userData, { txt: num(A0), nums: !!v3?.nums, on, want: e >= NUM_MIN, no: b.masked });
+            showNum(o);
           }
         });
         flushInst(barMesh);
@@ -1281,11 +1310,19 @@ export function install(ctx) {
         V3(secX - 3.2, yS(0), zOf(0)), V3(0, yA + T / 2 + 1.1, zMid), V3(X.Zc, yC - T / 2 - 1.1, zMid), V3(X.Zc, top(yC) + 1.8, zMid),
         V3(x0 - 2.2, yS(H - 1), zOf(H - 1)), V3(0, yS(H - 1) - T / 2 - 0.6, zOf(H - 1))];
       const sc = Math.abs(a.scale - 1 / Math.sqrt(dh)) < 1e-9 ? (dh === 1 ? '' : `/\\sqrt{${dh}}`) : `\\cdot ${M.fmt(a.scale, 2)}`;
+      function declutter() {
+        let changed = false;
+        for (const o of [...numLabs, ...barLabs]) {
+          o.userData.face = faceW(o.position, CUBE / 2);
+          changed = showNum(o) || changed;
+        }
+        return changed;
+      }
       const cap = `<b>${H > 1 ? `${H} heads, each on ${dh} of the ${d} columns` : `1 head on all ${d} columns: set heads to split them`}</b>`
         + `<span class="nn3d-tex">${katexHtml(`Z_h = \\operatorname{softmax}\\big(Q_h K_h^{\\top}${sc}${a.causal ? ' + M' : ''}\\big)\\, V_h`)}</span>`
         + `<span class="nn3d-tex">${katexHtml(`Z = [\\,Z_1${H > 2 ? ' \\cdots' : ''}${H > 1 ? ` \\; Z_{${H}}` : ''}\\,]${wo ? ` \\;\\to\\; Z${wo.name}` : ''}`)}</span>`;
       return {
-        ...C, paint, pick, points, dir: DIRS.heads, fov: 18, layer: l, caption: cap, heads: H, d,
+        ...C, paint, pick, points, declutter, dir: DIRS.heads, fov: 18, layer: l, caption: cap, heads: H, d,
         nodePos: id => cells.find(c => c.node === id && (c.kind === 'Qf' || c.kind === 'Kf' || c.kind === 'Vf' || c.kind === 'Zc' || c.kind === 'out'))?.p || cells.find(c => c.node === id)?.p || null,
         nodeR: CUBE / 2,
         click(spec) {
@@ -1399,7 +1436,7 @@ export function install(ctx) {
       const blockLabs = [0, 1, 2].map(() => ({ name: C.label('nn3d-name side', '', V3(), 1, 0.5), shape: C.label('nn3d-shape', '', V3(), 0.5, 0) }));
       const headLabs = Array.from({ length: H }, (_, h) => {
         const o = C.label('nn3d-headlab top', H > 3 ? String(h + 1) : `head ${h + 1}`, V3(), 0.5, 1);
-        o.element.style.color = `rgb(${P.heads[h % P.heads.length].join(',')})`;
+        o.element.style.color = `var(${HEAD_VARS[h % HEAD_VARS.length]})`;   // follows the theme
         return o;
       });
 
@@ -1474,21 +1511,23 @@ export function install(ctx) {
           plates: keys.plates.map(ks => ks[stepI]),
         };
       }
+      let peekI = -1;   // the cube under the mouse: framed, and its number shown
+      // Numbers only on the step's matrices (the cubes it shows, not the ones shrinking away): on a
+      // held or hovered cube, and with the 1.2 button on, on all of them (showNum sizes them).
       function draw(state, hl) {
-        const vv = cur(), showNums = !!vv?.nums && vv?.color !== 'token';
+        const vv = cur(), byTok = vv?.color === 'token';   // token colours: no numbers
         state.cubes.forEach((k, i) => {
           setBox(mesh, i, k.p, CUBE * k.s);
           setCol(mesh, i, hl.has(i) ? mix(k.rgb, P.hi, 0.35) : k.rgb);
           const o = nums[i];
           if (o) {
             o.position.set(k.p.x, k.p.y, k.p.z + (CUBE / 2) * k.s);
-            o.visible = showNums && k.s > 0.7;
-            const s = num(k.val);
-            if (o.element.__t !== s) { o.element.__t = s; o.element.textContent = s; }
+            Object.assign(o.userData, { txt: num(k.val), nums: !!vv?.nums, on: hl.has(i) || i === peekI, want: true, no: byTok || k.s <= 0.7, s: k.s });
+            showNum(o);
           }
         });
         flushInst(mesh);
-        const lit = state.cubes.map((k, i) => (hl.has(i) && k.s > 0.5 ? k.p : null)).filter(Boolean);
+        const lit = state.cubes.map((k, i) => ((hl.has(i) || i === peekI) && k.s > 0.5 ? k.p : null)).filter(Boolean);
         halo.count = lit.length;
         lit.forEach((p, i) => setBox(halo, i, tp.set(p.x, p.y, p.z + CUBE / 2 + 0.01), CUBE, CUBE, 1));
         flushInst(halo);
@@ -1599,6 +1638,29 @@ export function install(ctx) {
         if (e0 >= 1 + stag) { anim = null; now = Tt; draw(now, hlSet); placeLabels(shown); }
         return true;
       }
+      // Any source: the front-most shown cube under (px, py) (null: the mouse left). True if it changed.
+      function peek(px, py, proj) {
+        let best = -1, bz = Infinity;
+        if (px != null && now) {
+          now.cubes.forEach((k, i) => {
+            if (k.s < 0.5) return;
+            const q = proj(tp.set(k.p.x, k.p.y, k.p.z + (CUBE / 2) * k.s), (CUBE / 2) * k.s);
+            if (q && Math.abs(q.x - px) <= q.r && Math.abs(q.y - py) <= q.r && q.z < bz) { best = i; bz = q.z; }
+          });
+        }
+        if (best === peekI) return false;
+        peekI = best;
+        if (now) draw(now, hlSet);
+        return true;
+      }
+      function declutter() {
+        let changed = false;
+        for (const o of nums) {
+          o.userData.face = faceW(o.position, (CUBE / 2) * (o.userData.s ?? 1));
+          changed = showNum(o) || changed;
+        }
+        return changed;
+      }
       function pick(px, py, proj) {
         if (!useNet || !now) return null;
         let best = null;
@@ -1627,7 +1689,8 @@ export function install(ctx) {
           note += useNet ? ` It matches the attention layer’s Z (largest difference ${num(cmp)}).` : '';
         }
         const legend = `T = ${T} tokens · d = ${d} · h = ${H} head${H > 1 ? 's' : ''} · d/h = ${dh}${useNet ? '' : ' · example numbers'}`;
-        return { title: `${shown + 1} / ${nSteps} · ${tx.title}`, code: `${code}${' '.repeat(Math.max(2, 32 - code.length))}# ${tx.shape}`, note, legend };
+        return { title: `${shown + 1} / ${nSteps} · ${tx.title}`, count: `${shown + 1} / ${nSteps}`, name: tx.title,
+          code: `${code}${' '.repeat(Math.max(2, 32 - code.length))}# ${tx.shape}`, note, legend };
       }
       compute();
       frames();
@@ -1646,7 +1709,7 @@ export function install(ctx) {
         return pts;
       };
       return {
-        ...C, paint, frame, pick, points, dir: DIRS.tensor, fov: 15,
+        ...C, paint, frame, pick, peek, points, declutter, dir: DIRS.tensor, fov: 15,
         tensor: { steps, go, get shown() { return shown; }, caption, src, useNet, H, T, d, hasNet: l >= 0, animating: () => !!anim },
         setColor() { if (now) { const t = target(shown, cur()?.color); if (anim) anim.to = t; else { now = t; draw(now, hlSet); } } },
         nodePos: id => {
@@ -1871,47 +1934,66 @@ export function install(ctx) {
       const key = JSON.stringify([v.mode, v.step, v.src, v.h, v.bug, v.color, v.nums, v.layer, list, content?.heads, content?.d, T?.src, T?.shown, playing, !!content?.empty]);
       if (!force && key === barKey) return;
       barKey = key;
-      const b = (act, label, title, on = false, dis = false) => `<button type="button" data-act="${act}" title="${esc(title)}"${on ? ' class="on"' : ''}${dis ? ' disabled' : ''}>${label}</button>`;
-      const seg = (inner, cls = '') => `<span class="nn3d-seg ${cls}">${inner}</span>`;
+      // The shared components: a segment s() of a .ui-seg, a .ui-btn.sm b() (a toggle when on is
+      // given), an icon button ib() (a glyph stands in if the icons did not load).
+      const ico = name => window.mathboardIcons?.svg(name, { size: 14 }) || '';
+      const btn = (cls, act, label, title, on = false, dis = false) =>
+        `<button type="button"${cls || on ? ` class="${cls}${on ? `${cls ? ' ' : ''}on` : ''}"` : ''} data-act="${act}" title="${esc(title)}"${dis ? ' disabled' : ''}>${label}</button>`;
+      const s = (act, label, title, on, dis) => btn('', act, label, title, on, dis);
+      const b = (act, label, title, on, dis) => btn('ui-btn sm', act, label, title, on, dis);
+      const ib = (act, icon, glyph, title, on, dis, cls = '') => btn(`ui-btn sm icon${cls}`, act, ico(icon) || glyph, title, on, dis);
+      const seg = (inner, cls = '') => `<span class="ui-seg${cls}">${inner}</span>`;
       let html = `<div class="nn3d-ctls nn3d-ctl"><div class="nn3d-row"><span class="nn3d-title">3D</span>${seg(
-        b('mode:stack', 'Stack', 'Every layer as a sheet of neurons, the sheets in depth', v.mode === 'stack')
-        + b('mode:heads', 'Heads', list.length ? 'One attention layer, a slab per head' : 'Needs an attention layer', v.mode === 'heads', !list.length)
-        + b('mode:tensor', 'Tensor', 'The multi-head reshape and transpose, as moving cubes', v.mode === 'tensor'))}`;
+        s('mode:stack', 'Stack', 'Every layer as a sheet of neurons, the sheets in depth', v.mode === 'stack')
+        + s('mode:heads', 'Heads', list.length ? 'One attention layer, a slab per head' : 'Needs an attention layer', v.mode === 'heads', !list.length)
+        + s('mode:tensor', 'Tensor', 'The multi-head reshape and transpose, as moving cubes', v.mode === 'tensor'))}`;
       if (v.mode !== 'stack' && list.length > 1) {
         const at = list.find(i => net.layers[i].id === v.layer) ?? list[0];
-        html += `<select data-act="layer" title="Attention layer">${list.map(i => `<option value="${esc(net.layers[i].id)}"${i === at ? ' selected' : ''}>${esc(net.layers[i].name || `layer ${i}`)}</option>`).join('')}</select>`;
+        html += `<select class="ui-field sm" data-act="layer" title="Attention layer">${list.map(i => `<option value="${esc(net.layers[i].id)}"${i === at ? ' selected' : ''}>${esc(net.layers[i].name || `layer ${i}`)}</option>`).join('')}</select>`;
       }
-      html += b('nums', '1.2', 'Numbers on the neurons and cells', v.nums);
-      html += b('fit', '&#10227;', 'Reset the view (F frames it)');
-      html += b('close', '&times;', 'Back to the 2D canvas (D)');
+      html += '<span class="nn3d-sp"></span>';
+      html += b('nums', '1.2', 'Numbers on the neurons and cells (off: only on the one under the mouse or lit)', v.nums);
+      html += ib('fit', 'home', '&#10227;', 'Reset the view (F frames it)');
+      html += ib('close', 'close', '&times;', 'Back to the 2D canvas (D)');
       html += '</div>';
       if (v.mode === 'heads' && content?.heads) {
         const dv = divisors(content.d);
-        html += `<div class="nn3d-row"><span class="nn3d-lab2">heads</span>${seg(dv.map(k => b(`heads:${k}`, String(k), `Split d = ${content.d} into ${k} head${k > 1 ? 's' : ''} of ${content.d / k} (edits the attention layer; Ctrl+Z undoes)`, content.heads === k)).join(''))}</div>`;
+        html += `<div class="nn3d-row"><span class="nn3d-lab2">Heads</span>${seg(dv.map(k => s(`heads:${k}`, String(k), `Split d = ${content.d} into ${k} head${k > 1 ? 's' : ''} of ${content.d / k} (edits the attention layer; Ctrl+Z undoes)`, content.heads === k)).join(''), ' sm steps')}</div>`;
       }
       if (v.mode === 'tensor' && T) {
         const n = T.steps.length;
-        html += `<div class="nn3d-row">${seg(b('prev', '&#9664;', 'Previous step (←)', false, T.shown === 0) + b('play', playing ? '&#10073;&#10073;' : '&#9654;', playing ? 'Pause' : 'Play the steps', playing) + b('next', '&#9654;&#9654;', 'Next step (→)', false, T.shown >= n - 1))}`
-          + seg(T.steps.map((s, i) => b(`step:${i}`, String(i + 1), TENSOR_TEXT[s.key].title, i === T.shown)).join(''), 'steps')
+        html += `<div class="nn3d-row"><span class="nn3d-pair">${ib('prev', 'chevron-left', '&#9664;', 'Previous step (←)', false, T.shown === 0)
+          + ib('play', playing ? 'pause' : 'play', playing ? '&#10073;&#10073;' : '&#9654;', playing ? 'Pause' : 'Play the steps', false, false, ' soft')
+          + ib('next', 'chevron-right', '&#9654;', 'Next step (→)', false, T.shown >= n - 1)}</span>`
+          + seg(T.steps.map((st, i) => s(`step:${i}`, String(i + 1), TENSOR_TEXT[st.key].title, i === T.shown)).join(''), ' sm steps')
           + '</div><div class="nn3d-row">'
-          + seg(b('src:net', 'net', T.hasNet ? 'This net’s Q, K and V' : 'Needs an attention layer', T.src === 'net' && T.useNet, !T.hasNet) + b('src:example', `${EXAMPLE.T}×${EXAMPLE.d}`, 'A 4 × 6 example', !T.useNet));
-        if (!T.useNet) html += `<span class="nn3d-lab2">h</span>${seg(divisors(EXAMPLE.d).map(k => b(`h:${k}`, String(k), `${k} head${k > 1 ? 's' : ''} of ${EXAMPLE.d / k}`, v.h === k)).join(''))}`;
-        html += seg(b('color:value', 'values', 'Colour the cubes by value', v.color === 'value') + b('color:token', 'tokens', 'Colour the cubes by the token they came from', v.color === 'token'))
-          + b('bug', 'the bug', T.H > 1 ? 'Show the common mistake: view(h, T, d/h) without the transpose' : 'With one head the view and the transpose agree: pick 2+ heads to see the bug', v.bug, T.H === 1 && !v.bug) + '</div>';
+          + seg(s('src:net', 'Net', T.hasNet ? 'This net’s Q, K and V' : 'Needs an attention layer', T.src === 'net' && T.useNet, !T.hasNet) + s('src:example', `${EXAMPLE.T}×${EXAMPLE.d}`, 'A 4 × 6 example', !T.useNet), ' sm');
+        if (!T.useNet) html += `<span class="nn3d-lab2">h</span>${seg(divisors(EXAMPLE.d).map(k => s(`h:${k}`, String(k), `${k} head${k > 1 ? 's' : ''} of ${EXAMPLE.d / k}`, v.h === k)).join(''), ' sm steps')}`;
+        html += seg(s('color:value', 'Values', 'Colour the cubes by value', v.color === 'value') + s('color:token', 'Tokens', 'Colour the cubes by the token they came from', v.color === 'token'), ' sm')
+          + b('bug', 'The bug', T.H > 1 ? 'Show the common mistake: view(h, T, d/h) without the transpose' : 'With one head the view and the transpose agree: pick 2+ heads to see the bug', v.bug, T.H === 1 && !v.bug) + '</div>';
       }
       html += '</div>';
       let cap = '';
       if (v.mode === 'tensor' && T) {
-        const c = T.caption();
-        cap = `<div class="nn3d-cap"><b>${esc(c.title)}</b><code>${esc(c.code)}</code><span>${esc(c.note)}</span><em>${esc(c.legend)}</em></div>`;
+        const c = T.caption(), name = c.name.charAt(0).toUpperCase() + c.name.slice(1);
+        cap = `<div class="nn3d-cap"><div class="nn3d-cap-h"><span class="nn3d-count">${esc(c.count)}</span><b>${esc(name)}</b></div>`
+          + `<code>${esc(c.code)}</code>${c.note ? `<span>${esc(c.note)}</span>` : ''}<em>${esc(c.legend)}</em></div>`;
       } else if (v.mode === 'heads' && content?.caption) cap = `<div class="nn3d-cap heads">${content.caption}</div>`;
       bar.innerHTML = html + cap;
       bar.classList.toggle('wide', v.mode !== 'stack');
       placeBar();
     }
-    // The bar sits at the bottom right, above the lens bar when that one reaches under it.
+    // The bar sits at the bottom right (or along the bottom), above the lens bar when that one
+    // reaches under it, and ends left of a floating panel on the right that reaches down to it
+    // (a tall Train panel at 1280), while that leaves it 360 px.
     function placeBar() {
-      bar.style.bottom = '';
+      bar.style.bottom = bar.style.right = '';
+      const s = root.getBoundingClientRect();
+      for (const c of stage.querySelectorAll(':scope > .nn-train, :scope > .nn-attnviz, :scope > .nn-s3d')) {
+        if (c.hidden || !c.offsetWidth) continue;
+        const r = c.getBoundingClientRect(), a = bar.getBoundingClientRect(), right = Math.round(s.right - r.left + 8);
+        if (r.left > s.left + s.width / 2 && r.bottom > a.top - 8 && r.left < a.right + 8 && s.width - right - 10 >= 360) bar.style.right = `${right}px`;
+      }
       const lens = stage.querySelector(':scope > .nn-lens');
       if (!lens || lens.hidden || !lens.offsetWidth) return;
       const a = bar.getBoundingClientRect(), b = lens.getBoundingClientRect();
@@ -1990,7 +2072,9 @@ export function install(ctx) {
     let myHover = null, hoverKey = '', down = null;
     function hoverAt(e) {
       if (audience || !content?.pick) return;
-      const r = rect(), spec = e ? content.pick(e.clientX - r.left, e.clientY - r.top, proj) : null;
+      const r = rect(), x = e ? e.clientX - r.left : null, y = e ? e.clientY - r.top : null;
+      if (content.peek?.(x, y, proj)) needRender = true;
+      const spec = e ? content.pick(x, y, proj) : null;
       const clean = spec ? Object.fromEntries(Object.entries(spec).filter(([k]) => !['cell', 'att', 'node'].includes(k))) : null;
       const key = clean ? JSON.stringify(clean) : '';
       if (key === hoverKey) return;
@@ -2039,7 +2123,7 @@ export function install(ctx) {
     }
 
     // ================================================================ loop
-    let raf = 0, visible = document.body.dataset.view === 'nn', alive = true, lastT = 0, declT = -1e9;
+    let raf = 0, visible = document.body.dataset.view === 'nn', alive = true, lastT = 0, declT = -1e9, declDue = false;
     function loop(t) {
       raf = 0;
       if (!alive || !visible) return;
@@ -2068,7 +2152,14 @@ export function install(ctx) {
         needRender = false;
         renderer.render(scene, camera);
         labelR.render(scene, camera);
-        if (content?.declutter && t - declT > 150) { declT = t; try { content.declutter(); } catch { /* labels gone */ } }
+        declDue = true;
+      }
+      // Labels are measured after a render: at most every 150 ms, and once more after the last one.
+      // A declutter that shows or hides a label asks for a render (CSS2D applies visibility there).
+      if (declDue && content?.declutter && t - declT > 150) {
+        declT = t;
+        declDue = false;
+        try { if (content.declutter()) needRender = true; } catch { /* labels gone */ }
       }
       if (!audience && camDirty && !flight && (t - lastPubT > PUB_MS || !moving)) publish();
       raf = requestAnimationFrame(loop);

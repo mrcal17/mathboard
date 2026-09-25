@@ -12,100 +12,149 @@
 <div id="typeset"></div>
 <canvas id="ink"></canvas>
 <canvas id="fx"></canvas>
+<div id="previews" class="ui-chrome"></div>
 
 <div id="toolbar">
   <div class="group" id="tools">
-    <button data-tool="math" title="Math pen: converts to LaTeX (M)"><b>&Sigma;</b> Math</button>
-    <button data-tool="draw" title="Draw pen: stays as ink (D)">&#9998; Draw</button>
-    <button data-tool="erase" title="Eraser (E). Also: right-drag, or the pen's eraser end">&#9003; Erase</button>
-    <button data-tool="select" title="Select (S): tap an expression to edit, drag to move">&#11034; Select</button>
-    <button data-tool="laser" title="Laser pointer (L)">&#9673; Laser</button>
+    <button class="ui-btn" data-tool="math" title="Math pen: converts to LaTeX (M)"><span data-icon="sigma"></span><span class="tb-lbl">Math</span></button>
+    <button class="ui-btn" data-tool="draw" title="Draw pen: stays as ink (D)"><span data-icon="draw"></span><span class="tb-lbl">Draw</span></button>
+    <button class="ui-btn" data-tool="erase" title="Eraser (E). Also: right-drag, or the pen's eraser end"><span data-icon="eraser"></span><span class="tb-lbl">Erase</span></button>
+    <button class="ui-btn" data-tool="select" title="Select (S): tap an expression to edit, drag to move"><span data-icon="pointer"></span><span class="tb-lbl">Select</span></button>
+    <button class="ui-btn" data-tool="laser" title="Laser pointer (L)"><span data-icon="laser"></span><span class="tb-lbl">Laser</span></button>
   </div>
   <div class="group" id="swatches"></div>
   <div class="group">
-    <button id="undo" title="Undo (Ctrl+Z)">&#8630;</button>
-    <button id="redo" title="Redo (Ctrl+Y)">&#8631;</button>
+    <button id="hold" class="ui-btn icon" title="Hold (P): nothing converts while you write a large expression. Enter converts now"><span data-icon="pause"></span></button>
+    <button id="convert" class="ui-btn icon" title="Convert now (Enter)"><span data-icon="sparkle"></span></button>
   </div>
   <div class="group">
-    <button id="prev" title="Previous page (&larr;)">&lsaquo;</button>
+    <button id="undo" class="ui-btn icon" title="Undo (Ctrl+Z)"><span data-icon="undo"></span></button>
+    <button id="redo" class="ui-btn icon" title="Redo (Ctrl+Y)"><span data-icon="redo"></span></button>
+  </div>
+  <div class="group">
+    <button id="prev" class="ui-btn icon" title="Previous page (&larr;)"><span data-icon="chevron-left"></span></button>
     <span id="pageno">1 / 1</span>
-    <button id="next" title="Next page (&rarr;)">&rsaquo;</button>
-    <button id="addpage" title="New page (N)">+</button>
+    <button id="next" class="ui-btn icon" title="Next page (&rarr;)"><span data-icon="chevron-right"></span></button>
+    <button id="addpage" class="ui-btn icon" title="New page (N)"><span data-icon="plus"></span></button>
   </div>
   <div class="group">
-    <button id="clear" title="Clear this page (undoable)">Clear</button>
-    <button id="export" title="Download all pages as Markdown + LaTeX">Export</button>
-    <button id="gear" title="Settings">&#9881;</button>
+    <button id="clear" class="ui-btn icon danger" title="Clear this page (Ctrl+Z brings it back)"><span data-icon="trash"></span></button>
+    <button id="export" class="ui-btn icon" title="Export: download all pages as Markdown + LaTeX"><span data-icon="download"></span></button>
+    <button id="gear" class="ui-btn icon" title="Settings"><span data-icon="settings"></span></button>
   </div>
 </div>
 
-<div id="status"><span class="dot"></span><span id="status-text">connecting&hellip;</span></div>
+<div id="status"><span class="dot"></span><span id="status-text">Connecting&hellip;</span></div>
+
+<div id="lasso-bar" class="ui-chrome" hidden>
+  <span id="lasso-n"></span>
+  <button class="ui-btn sm" data-act="group" title="Make the selected math one expression and read it now">Group</button>
+  <button class="ui-btn sm" data-act="split" title="Take the selected strokes out of their expressions into their own">Split</button>
+  <button class="ui-btn sm" data-act="math" title="Turn the selected Draw-pen ink into math and read it">To math</button>
+  <button class="ui-btn sm" data-act="ink" title="Plain ink that is never converted">Keep as ink</button>
+  <button class="ui-btn sm icon danger" data-act="delete" title="Delete (Delete key; Ctrl+Z brings it back)"><span data-icon="trash"></span></button>
+</div>
+
+<div id="alts" class="ui-menu ui-chrome" hidden>
+  <div id="alts-head" class="ui-overline ui-menu-head">Look-alikes</div>
+  <div id="alts-row"></div>
+  <hr class="ui-menu-sep">
+  <button id="alts-edit" class="ui-menu-item"><span data-icon="board"></span>Edit LaTeX</button>
+</div>
 
 <div id="editor" class="panel" hidden>
-  <textarea id="ed-src" rows="3" spellcheck="false" placeholder="LaTeX"></textarea>
+  <textarea id="ed-src" class="ui-field" rows="2" spellcheck="false" placeholder="LaTeX"></textarea>
   <div id="ed-preview"></div>
   <div class="row">
-    <button id="ed-apply" class="primary" title="Enter">Apply</button>
-    <button id="ed-rerun">Re-recognize</button>
-    <button id="ed-copy">Copy</button>
-    <button id="ed-ink" title="Turn this back into plain ink that is never converted">Keep as ink</button>
-    <button id="ed-del">Delete</button>
+    <button id="ed-apply" class="ui-btn sm primary" title="Apply (Enter). Shift+Enter starts a new line">Apply</button>
+    <button id="ed-rerun" class="ui-btn sm soft" title="Send the handwriting to the model again">Re-recognize</button>
+    <button id="ed-copy" class="ui-btn sm soft" title="Copy the LaTeX">Copy</button>
+    <span class="sp"></span>
+    <button id="ed-ink" class="ui-btn sm" title="Turn this back into plain ink that is never converted">Keep as ink</button>
+    <button id="ed-del" class="ui-btn sm icon danger" title="Delete (Ctrl+Z brings it back)"><span data-icon="trash"></span></button>
   </div>
 </div>
 
 <div id="settings" class="panel" hidden>
-  <h3>Settings</h3>
-  <label>Model <select id="set-model"></select></label>
-  <label>Convert after <input type="range" id="set-delay" min="250" max="2500" step="50"><output for="set-delay"></output></label>
-  <label>Grouping reach <input type="range" id="set-reach" min="0.5" max="2.5" step="0.1"><output for="set-reach"></output></label>
-  <label>Max typeset size <input type="range" id="set-font" min="20" max="120" step="2"><output for="set-font"></output></label>
-  <label>Handwriting after conversion
-    <select id="set-ink"><option value="hide">Hidden</option><option value="faint">Faint</option></select>
+  <div class="set-head">
+    <h3>Settings</h3>
+    <button id="set-close" class="ui-btn sm icon" title="Close (Esc)"><span data-icon="close"></span></button>
+  </div>
+  <label>Model <select id="set-model" class="ui-field"></select></label>
+  <label id="set-backend-row" hidden title="Which recognizer reads your handwriting. Both: commits on its own only when the two agree">Recognizer <select id="set-backend" class="ui-field"></select><span id="set-backend-note" class="ui-caption"></span></label>
+  <div class="set-row">Convert
+    <div id="set-mode" class="ui-seg sm">
+      <button data-mode="auto" title="Auto: the typeset replaces your ink as soon as it is read">Auto</button>
+      <button data-mode="preview" title="Preview: the ink stays and the reading waits under it. Click it or press Enter to commit, Esc to keep the ink">Preview</button>
+      <button data-mode="off" title="Off: expressions are grouped but only read when you press Enter">Off</button>
+    </div>
+  </div>
+  <label class="set-inline" title="Preview: starting to write somewhere else commits the readings you left, unless the recognizers disagreed">Commit when you write elsewhere
+    <input type="checkbox" class="ui-switch" id="set-move">
   </label>
-  <label>Theme
-    <select id="set-theme"><option value="dark">Chalkboard</option><option value="light">Whiteboard</option></select>
+  <label title="Mouse idle before an expression converts. A pen waits 75% of it. Writing elsewhere converts at once">Convert after <input type="range" class="ui-range" id="set-delay" min="250" max="2500" step="50"><output for="set-delay"></output></label>
+  <label title="How far a stroke may sit from an expression and still join it, relative to your handwriting size">Grouping reach <input type="range" class="ui-range" id="set-reach" min="0.5" max="2.5" step="0.1"><output for="set-reach"></output></label>
+  <label>Max typeset size <input type="range" class="ui-range" id="set-font" min="20" max="160" step="2"><output for="set-font"></output></label>
+  <label class="set-inline" title="Off: the handwriting under converted math is hidden">Faint handwriting after conversion
+    <input type="checkbox" class="ui-switch" id="set-ink">
   </label>
-  <div class="row"><button id="set-wipe">Erase all pages&hellip;</button></div>
-  <p class="hint">
-    <b>M</b> math &middot; <b>D</b> draw &middot; <b>E</b> erase &middot; <b>S</b> select &middot; <b>L</b> laser<br>
-    <b>H</b> hide UI &middot; <b>T</b> theme &middot; <b>N</b> new page &middot; <b>&larr; &rarr;</b> pages &middot; <b>Ctrl+Z / Ctrl+Y</b> undo / redo<br>
-    Leave a gap between separate expressions; strokes that touch or sit close together are read as one.
-  </p>
+  <label class="set-inline">Theme
+    <select id="set-theme" class="ui-field"><option value="dark">Chalkboard</option><option value="light">Whiteboard</option></select>
+  </label>
+  <div class="row"><button id="set-wipe" class="ui-btn sm danger"><span data-icon="trash"></span>Erase all pages&hellip;</button></div>
+  <div class="set-foot ui-caption">
+    <div class="set-keys">
+      <kbd>M</kbd><span>math pen</span><kbd>H</kbd><span>hide the UI</span>
+      <kbd>D</kbd><span>draw pen</span><kbd>T</kbd><span>theme</span>
+      <kbd>E</kbd><span>eraser</span><kbd>N</kbd><span>new page</span>
+      <kbd>S</kbd><span>select</span><span class="k"><kbd>&larr;</kbd><kbd>&rarr;</kbd></span><span>pages</span>
+      <kbd>L</kbd><span>laser</span><span class="k"><kbd>Ctrl</kbd><kbd>Z</kbd>/<kbd>Y</kbd></span><span>undo, redo</span>
+      <kbd>Enter</kbd><span>convert now</span><kbd>P</kbd><span>hold</span>
+      <kbd>Esc</kbd><span>keep the ink</span><span class="k"><kbd>1</kbd><kbd>2</kbd></span><span>pick a reading</span>
+    </div>
+    <p class="hint">Leave a gap between separate expressions; strokes that touch or sit close together are read as one. Writing somewhere else converts what you left. Select: drag on empty board to lasso, tap a typeset symbol for look-alikes. A zig-zag over ink erases it.</p>
+  </div>
 </div>
 
 <nav id="tabs">
-  <button data-view="board" class="on" title="Handwriting board (Alt+1)">&#9998; Board</button>
-  <button data-view="graph" title="3D vector grapher (Alt+2)">&#11041; 3D</button>
-  <button data-view="nn" title="Neural-network visualizer (Alt+3)">&#8757; Net</button>
+  <button data-view="board" class="on" title="Handwriting board (Alt+1)"><span data-icon="board"></span>Board</button>
+  <button data-view="graph" title="3D vector grapher (Alt+2)"><span data-icon="cube"></span>3D</button>
+  <button data-view="nn" title="Neural-network visualizer (Alt+3)"><span data-icon="net"></span>Net</button>
 </nav>
 
 <section id="graph" hidden>
   <aside id="g-panel">
     <header>
-      <button id="g-add" title="New expression">+ Add</button>
-      <button id="g-fit" title="Rescale axes and zoom to fit everything">Fit</button>
-      <button id="g-reset" title="Reset the camera">Reset view</button>
-      <button id="g-help-btn" title="Syntax">?</button>
+      <button id="g-add" class="ui-btn sm soft" title="New expression (Enter in a row adds one below it)"><span data-icon="plus"></span>Add</button>
+      <button id="g-fit" class="ui-btn sm" title="Rescale axes and zoom to fit everything"><span data-icon="fit"></span>Fit</button>
+      <button id="g-reset" class="ui-btn sm" title="Reset the camera"><span data-icon="home"></span>Reset view</button>
       <span class="spacer"></span>
-      <button id="g-collapse" title="Hide the expression list">&laquo;</button>
+      <button id="g-help-btn" class="ui-btn sm icon" title="Syntax and keys"><span data-icon="help"></span></button>
+      <button id="g-collapse" class="ui-btn sm icon" title="Hide the expression list"><span data-icon="chevron-left"></span></button>
     </header>
     <div id="g-tools" hidden></div>
     <div id="g-help" hidden>
+      <h4 class="ui-overline">Vectors</h4>
       <p><code>u = (1, 2, 3)</code> vector, drawn from the origin</p>
       <p><code>v @ u</code> draw v starting at u (tip-to-tail); <code>@ (1,0,0)</code> any start point</p>
       <p><code>a = 2</code> makes a slider &middot; <code>a u + b v</code> implicit multiplication</p>
       <p><code>dot(u,v)</code> <code>cross(u,v)</code> <code>u &middot; v</code> <code>u &times; v</code> <code>|u|</code> <code>unit(u)</code> <code>proj(u,v)</code> <code>angle(u,v)</code> <code>deg(x)</code> <code>u.x</code></p>
+      <p><code>i j k</code> basis vectors &middot; <code>pi</code> &middot; <code># comment</code></p>
+      <h4 class="ui-overline">Shapes</h4>
       <p><code>span(u, v)</code> line / plane with the grid of integer combinations &middot; <code>plane(n)</code></p>
       <p><code>parallelogram(u,v)</code> <code>parallelepiped(u,v,w)</code> <code>point(1,2,3)</code></p>
+      <h4 class="ui-overline">Matrices</h4>
       <p><code>[1 2 3]</code> row &middot; <code>[1 2; 3 4]</code> matrix &middot; <code>u^T</code> transpose &middot; <code>u^T v</code>, <code>u^T A u</code> numbers</p>
       <p><code>A = [[1,0,0],[0,2,0],[0,0,1]]</code> rows &middot; <code>matrix(u,v,w)</code> columns &middot; <code>A u</code> <code>det(A)</code> <code>inv(A)</code> <code>transpose(A)</code></p>
-      <p><code>i j k</code> basis vectors &middot; <code>pi</code> &middot; <code># comment</code></p>
-      <p>Mouse: left-drag rotate, right-drag pan, wheel zoom. Enter adds a row.</p>
+      <div id="g-help-keys">
+        <h4 class="ui-overline">Mouse and keys</h4>
+        <p>Left-drag rotate, right-drag pan, wheel zoom. <kbd>Enter</kbd> adds a row.</p>
+      </div>
     </div>
     <ol id="g-rows"></ol>
   </aside>
   <div id="g-view"></div>
-  <button id="g-expand" title="Show the expression list" hidden>&raquo;</button>
+  <button id="g-expand" class="ui-btn icon" title="Show the expression list" hidden><span data-icon="chevron-right"></span></button>
 </section>
 
 <section id="nn" hidden>
@@ -119,7 +168,10 @@
 
 <div id="toast" hidden></div>
 
+<script src="icons.js"></script>
 <script src="vendor/katex/katex.min.js"></script>
+<script src="board/geom.js"></script>
+<script src="board/tex.js"></script>
 <script src="app.js"></script>
 <script type="importmap">
   { "imports": { "three": "./vendor/three/three.module.js", "three/addons/": "./vendor/three/addons/" } }

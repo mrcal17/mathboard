@@ -24,11 +24,14 @@ Object.assign(UNI, { 'ϑ': '\\vartheta', 'ϕ': '\\phi', 'ϖ': '\\varpi', 'ϵ': '
 const CONST_TEX = { pi: '\\pi', 'π': '\\pi', e: 'e', i: '\\hat{\\imath}', j: '\\hat{\\jmath}', k: '\\hat{k}' };
 const CONST_KIND = { pi: 'num', 'π': 'num', e: 'num', i: 'vec', j: 'vec', k: 'vec' };
 const NORMS = new Set(['norm', 'length', 'mag']);
-const FN_NAME = { asin: 'arcsin', acos: 'arccos', atan: 'arctan' };
+const FN_NAME = { asin: 'arcsin', acos: 'arccos', atan: 'arctan', σ: '\\sigma' };
 const FN_KIND = {
   dot: 'num', angle: 'num', det: 'num', deg: 'num', rad: 'num', sin: 'num', cos: 'num', tan: 'num', asin: 'num',
   acos: 'num', atan: 'num', sqrt: 'num', exp: 'num', ln: 'num', log: 'num', min: 'num', max: 'num',
   norm: 'num', length: 'num', mag: 'num', abs: 'num',
+  sinh: 'num', cosh: 'num', tanh: 'num', sigmoid: 'num', σ: 'num', relu: 'num', leakyrelu: 'num', leaky_relu: 'num',
+  elu: 'num', gelu: 'num', softplus: 'num', silu: 'num', swish: 'num', mish: 'num', erf: 'num', heaviside: 'num',
+  sign: 'num', floor: 'num', ceil: 'num', round: 'num', mod: 'num', logsumexp: 'num', softmax: 'vec',
   cross: 'vec', unit: 'vec', normalize: 'vec', proj: 'vec',
   inv: 'mat', transpose: 'mat', matrix: 'mat', point: 'point', span: 'span', plane: 'plane',
 };
@@ -110,8 +113,8 @@ function tex(n, c) {
     }
     case 'name': {
       if (isConst(n.name, c)) return { s: CONST_TEX[n.name], l: ATOM };
-      const w = isWordy(nameParts(n.name).base);
-      return { s: nameLatex(n.name, c.kinds.get(n.name) === 'vec'), l: ATOM, wl: w, wr: w };
+      const w = isWordy(nameParts(n.name).base), d = "'".repeat(n.d ?? 0); // sigmoid' on its own
+      return { s: nameLatex(n.name, c.kinds.get(n.name) === 'vec') + d, l: ATOM, wl: w, wr: w };
     }
     case 'vec': {
       const items = n.items.map(x => tex(x, c).s);
@@ -208,8 +211,10 @@ function callTex(n, c) {
     }
     return { s: `\\begin{bmatrix}${all().join(' & ')}\\end{bmatrix}`, l: ATOM };
   }
+  const d = "'".repeat(n.d ?? 0); // f'(x), sigmoid''(x)
+  if (n.user) return { s: `${nameLatex(name, false)}${d}${paren(all().join(', '))}`, l: ATOM };
   const fn = FN_NAME[name] ?? name.replace(/_/g, '\\_');
-  return { s: `\\operatorname{${fn}}${paren(all().join(', '))}`, l: ATOM };
+  return { s: `\\operatorname{${fn}}${d}${paren(all().join(', '))}`, l: ATOM };
 }
 
 function context(opts = {}, self = null) {
@@ -233,7 +238,8 @@ export function rowLatex(src, opts = {}) {
   const c = context(opts, st.name);
   c.calls = new Set([...(ci < 0 ? text : text.slice(0, ci)).matchAll(NAME_CALL)].map(m => m[1]));
   let lhs = '';
-  if (st.name) lhs = `${nameLatex(st.name, (c.kinds.get(st.name) ?? inferKind(st.body, c)) === 'vec')} = `;
+  if (st.params) lhs = `${nameLatex(st.name, false)}${paren(st.params.map(q => nameLatex(q, false)).join(', '))} = `; // f(x) = ...
+  else if (st.name) lhs = `${nameLatex(st.name, (c.kinds.get(st.name) ?? inferKind(st.body, c)) === 'vec')} = `;
   return { tex: lhs + tex(st.body, c).s, at: st.at ? tex(st.at, { ...c, inline: true }).s : '', note };
 }
 
@@ -504,20 +510,21 @@ const CSS = `
   position: absolute; width: 1px; height: 1px; padding: 0; opacity: 0; pointer-events: none;
 }
 .pp-tex .katex { font-size: 1.08em; }
-.pp-at { margin-left: 0.7em; color: var(--ui-muted); font-size: 0.72em; }
+.pp-at { margin-left: 0.7em; color: var(--text-3); font-size: 0.72em; }
 .pp-at .katex { font-size: 1.15em; }
-.pp-note { margin-left: 0.8em; color: var(--ui-muted); font: italic 13px system-ui, "Segoe UI", sans-serif; }
+.pp-note { margin-left: 0.8em; color: var(--text-3); font: var(--fs-md) var(--font-ui); }
 .pp-math:empty + .pp-at, .pp-math:empty + .pp-at + .pp-note, .pp-math:empty + .pp-note { margin-left: 0; }
-#g-tools button.pp-recording { color: #ff4d4d; border-color: #ff4d4d; }
+#g-tools .ui-btn.pp-recording, #g-tools .ui-btn.pp-recording:hover { color: var(--danger); background: var(--danger-soft); }
 .pp-rec {
-  position: absolute; top: 14px; right: 14px; z-index: 4; pointer-events: none;
-  display: flex; align-items: center; gap: 7px; padding: 4px 11px 4px 9px; border-radius: 999px;
-  background: rgba(0, 0, 0, 0.62); color: #fff; font: 600 13px/1.2 system-ui, "Segoe UI", sans-serif;
-  font-variant-numeric: tabular-nums; letter-spacing: 0.04em;
+  position: absolute; top: 12px; right: 12px; z-index: 4; pointer-events: none;
+  display: flex; align-items: center; gap: 7px; height: 30px; padding: 0 13px 0 11px; border-radius: var(--r-pill);
+  background: var(--float); color: var(--text-1); border: 1px solid var(--float-line); box-shadow: var(--shadow-2);
+  font: var(--fw-strong) var(--fs-sm)/1 var(--font-ui); font-variant-numeric: tabular-nums; letter-spacing: 0.04em;
 }
 .pp-rec[hidden] { display: none; }
-.pp-rec i { width: 10px; height: 10px; border-radius: 50%; background: #ff3b30; animation: pp-blink 1s steps(2, start) infinite; }
-@keyframes pp-blink { to { visibility: hidden; } }
+.pp-rec i { width: 8px; height: 8px; border-radius: 50%; background: var(--danger); animation: pp-pulse 1.2s var(--ease) infinite; }
+.pp-rec span { font-weight: var(--fw-medium); color: var(--text-2); letter-spacing: 0; }
+@keyframes pp-pulse { 50% { opacity: 0.25; } }
 `;
 
 const esc = s => s.replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[ch]);
@@ -598,7 +605,7 @@ export function install(api) {
   api.addRowDecorator(decorate);
 
   const prettyBtn = api.addToolbarButton({
-    label: 'TeX', title: 'Typeset rows while they are not being edited',
+    label: 'TeX', title: 'Typeset rows while they are not being edited', group: 'display',
     onClick: () => {
       pretty = !pretty;
       try { localStorage.setItem(PRETTY_KEY, pretty ? '1' : '0'); } catch { /* private mode */ }
@@ -638,8 +645,9 @@ export function install(api) {
   }
 
   // ---------------------------------------------------------------- recording
-  api.addToolbarButton({ label: 'PNG', title: 'Download a PNG of the 3D view (P)', onClick: () => snapshot() });
-  const recBtn = api.addToolbarButton({ label: '&#9679; Rec', title: 'Record the 3D view to a video file (V)', onClick: () => toggleRecording() });
+  api.addToolbarButton({ label: 'PNG', title: 'Download a PNG of the 3D view (P)', onClick: () => snapshot(), group: 'output', icon: 'image' });
+  const REC_TITLE = 'Record the 3D view to a video file (V)';
+  const recBtn = api.addToolbarButton({ label: 'Rec', title: REC_TITLE, onClick: () => toggleRecording(), group: 'output', icon: 'record' });
   const badge = document.createElement('div');
   badge.className = 'pp-rec';
   badge.hidden = true;
@@ -650,7 +658,9 @@ export function install(api) {
   let rec = null;
   const paintRec = () => {
     const on = !!rec?.recorder;
-    recBtn.innerHTML = on ? '&#9632; Stop' : '&#9679; Rec';
+    recBtn.innerHTML = api.icon?.(on ? 'stop' : 'record') || (on ? '&#9632; Stop' : '&#9679; Rec');
+    recBtn.title = on ? 'Stop recording and save the video (V)' : REC_TITLE;
+    recBtn.setAttribute('aria-label', on ? 'Stop' : 'Rec');
     recBtn.classList.toggle('pp-recording', on);
     badge.hidden = !on;
   };

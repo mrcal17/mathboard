@@ -3,119 +3,114 @@
    Attention panels, the lens bar, the cards and the Explain card still float over it. */
 
 .nn3d {
-  --n3-hi: #ffd54a;
-  --n3-att: #b794ff;
-  --n3-head: rgba(40, 47, 53, 0.92);
-  --n3-head-line: rgba(255, 255, 255, 0.14);
-  --n3-muted: #a4adb2;
+  --n3-hi: var(--hi);
+  --n3-att: var(--att);
+  --n3-muted: var(--text-3);
+  --n3-halo: 0 0 3px var(--bg);
   position: absolute; inset: 0; z-index: 4; overflow: hidden;
   background: var(--bg);
-}
-[data-theme="light"] .nn3d {
-  --n3-hi: #e8a800;
-  --n3-att: #7442d6;
-  --n3-head: rgba(255, 255, 255, 0.95);
-  --n3-head-line: rgba(0, 0, 0, 0.14);
-  --n3-muted: #5c6368;
 }
 .nn3d-gl { position: absolute; inset: 0; }
 .nn3d-gl canvas { display: block; touch-action: none; outline: none; cursor: grab; }
 .nn3d-gl canvas:active { cursor: grabbing; }
 .nn3d.ro .nn3d-gl canvas { cursor: default; }
-.nn3d-labels { position: absolute; left: 0; top: 0; pointer-events: none; }
+.nn3d-labels { position: absolute; z-index: 1; left: 0; top: 0; pointer-events: none; }   /* a stacking context: CSS2D's per-label z-index stays under the bar */
 
 /* ---------------------------------------------------------------- labels (CSS2D) */
+/* Text in text colours with one halo, as on the 2D canvas; colour only where it names data (the
+   attention A, a head). */
 .nn3d-lab {
-  color: var(--fg); white-space: nowrap; line-height: 1.15; pointer-events: none;
-  font: 13px system-ui, "Segoe UI", sans-serif;
-  text-shadow: 0 0 2px var(--bg), 0 0 4px var(--bg), 0 0 7px var(--bg);
+  color: var(--text-1); white-space: nowrap; line-height: 1.15; pointer-events: none;
+  font: 13px var(--font-ui);
+  text-shadow: var(--n3-halo);
 }
 .nn3d-lab sub { font-size: 0.72em; vertical-align: -0.28em; line-height: 0; }
 .nn3d-lab sup { font-size: 0.72em; line-height: 0; }
-/* a layer's header, as on the canvas */
+/* a layer's header, as on the canvas: plain text; a pill only while the layer is hovered or
+   selected (a HI ring) or is the lens's focus (a neutral ring) */
 .nn3d-head {
-  margin-bottom: 6px; padding: 3px 10px 4px; text-align: center; text-shadow: none;
-  background: var(--n3-head); border: 1px solid var(--n3-head-line); border-radius: 9px;
+  margin-bottom: 6px; padding: 3px 10px 4px; text-align: center;
+  border-radius: var(--r-md); transition: background-color var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease);
 }
-.nn3d-head b { display: block; font-size: 14.5px; font-weight: 650; }
-.nn3d-head span { display: block; font-size: 12px; color: var(--n3-muted); }
-.nn3d-head.foc { border-color: var(--fg); box-shadow: inset 0 0 0 1px var(--fg); }
-.nn3d-head.hov { border-color: var(--n3-hi); box-shadow: inset 0 0 0 1px var(--n3-hi); }
-.nn3d-grp { font: italic 19px "KaTeX_Math", "Times New Roman", serif; padding-bottom: 3px; }
-.nn3d-tok { font: italic 15px "KaTeX_Math", "Times New Roman", serif; color: var(--n3-muted); padding-right: 4px; }
-.nn3d-val { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; padding-top: 1px; }
-.nn3d-al { font-size: 13px; font-weight: 700; color: var(--n3-att); font-variant-numeric: tabular-nums; }
+.nn3d-head b { display: block; font-size: 14px; font-weight: var(--fw-strong); color: var(--text-1); }
+.nn3d-head span { display: block; margin-top: 1px; font-size: 12px; color: var(--text-3); }
+.nn3d-head.foc { background: var(--float); box-shadow: inset 0 0 0 1px var(--text-3); text-shadow: none; }
+.nn3d-head.hov { background: var(--float); box-shadow: inset 0 0 0 1.5px var(--n3-hi); text-shadow: none; }
+.nn3d-grp { font: italic 17px var(--font-math); color: var(--text-3); padding-bottom: 3px; }
+.nn3d-grp.att { color: var(--n3-att); font-size: 16px; }
+.nn3d-tok { font: italic 14px var(--font-math); color: var(--text-3); padding-right: 4px; }
+.nn3d-tok.name { font: var(--fw-medium) 12.5px var(--font-ui); color: var(--text-2); }
+.nn3d-val { font-size: 12.5px; font-weight: var(--fw-medium); color: var(--text-2); font-variant-numeric: tabular-nums; padding-top: 1px; }
+.nn3d-al { font-size: 12px; font-weight: var(--fw-strong); color: var(--text-1); font-variant-numeric: tabular-nums; }
+/* the hovered (else selected) neuron's label and value: the tooltip recipe */
 .nn3d-tip {
-  margin: 0 0 4px 12px; padding: 2px 8px; font-size: 14px; text-shadow: none;
-  background: var(--ui-bg); color: var(--ui-fg); border: 1px solid var(--n3-hi); border-radius: 8px;
+  margin: 0 0 6px 12px; padding: 3px 8px; border-radius: var(--r-sm);
+  background: var(--tip-bg); color: var(--tip-fg); box-shadow: var(--shadow-2); text-shadow: none;
+  font-size: 13px; line-height: 1.35;
 }
-.nn3d-tip > span { margin-left: 5px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.nn3d-tip > span { margin-left: 5px; font-weight: var(--fw-strong); font-variant-numeric: tabular-nums; }
 /* heads and tensor modes */
-.nn3d-name { font: italic 19px "KaTeX_Math", "Times New Roman", serif; padding-bottom: 5px; }
-.nn3d-name.side { padding: 0 6px 0 0; font-size: 21px; }
-.nn3d-name.tex { font-style: normal; font-size: 15px; }
+.nn3d-name { font: italic 18px var(--font-math); padding-bottom: 5px; }
+.nn3d-name.side { padding: 0 6px 0 0; font-size: 20px; }
+.nn3d-name.tex { font-style: normal; font-size: 14px; }
 .nn3d-name.att { color: var(--n3-att); font-size: 16px; }
 .nn3d-name.att i, .nn3d-name.att sub, .nn3d-name.att sup { font-family: inherit; }
-.nn3d-shape { font: 13.5px Consolas, "Cascadia Mono", monospace; color: var(--n3-muted); padding-top: 5px; }
-.nn3d-headlab { font-size: 13px; font-weight: 650; padding-right: 8px; }
-.nn3d-sec { font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--n3-muted); padding-bottom: 6px; }
-.nn3d-num { font-size: 11.5px; font-weight: 650; font-variant-numeric: tabular-nums; }
-.nn3d-num.att { color: var(--n3-att); }
+.nn3d-name .op { font-style: normal; margin: 0 1px; }
+.nn3d-shape { font: 12px var(--font-mono); color: var(--text-3); padding-top: 5px; }
+.nn3d-headlab { font-size: 12.5px; font-weight: var(--fw-strong); padding-right: 8px; }
+.nn3d-headlab.top { padding: 0 0 3px; font-size: 12px; }
+.nn3d-sec { font-size: 12px; font-weight: var(--fw-medium); color: var(--text-3); padding-bottom: 6px; }
+.nn3d-num { font-size: 11.5px; font-weight: var(--fw-strong); color: var(--text-1); font-variant-numeric: tabular-nums; }
+.nn3d-op { font: 18px "KaTeX_Main", "Times New Roman", serif; color: var(--text-3); }
+.nn3d-head.compact span { display: none; }
+.nn3d-head.up { margin-bottom: 40px; }
 
 /* ---------------------------------------------------------------- the bar */
+/* The floating panel recipe: a row of controls (the mode as a segmented control, then the view's
+   own actions), and in heads and tensor a strip along the bottom with the caption beside them. */
 .nn3d-bar {
   position: absolute; z-index: 3; right: 10px; bottom: 10px; max-width: calc(100% - 20px);
-  display: flex; flex-direction: column; gap: 5px; padding: 5px 7px 6px;
-  background: var(--ui-bg); color: var(--ui-fg);
-  border: 1px solid var(--ui-line); border-radius: 12px;
-  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.25);
-  font-size: 12.5px; line-height: 1.25;
+  display: flex; flex-direction: column; gap: 8px; padding: 6px;
+  background: var(--float); color: var(--text-1);
+  border: 1px solid var(--float-line); border-radius: var(--r-lg); box-shadow: var(--shadow-2);
+  font-size: var(--fs-md); line-height: var(--lh);
 }
-/* heads and tensor: a strip along the bottom, the controls left of the caption */
-.nn3d-bar.wide { left: 10px; flex-direction: row; flex-wrap: wrap; align-items: flex-start; gap: 6px 14px; }
-.nn3d-ctls { display: flex; flex-direction: column; gap: 5px; flex: none; }
-.nn3d-bar.wide .nn3d-cap { flex: 1 1 320px; min-width: 0; }
-.nn3d-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 5px; }
-.nn3d-title { font-weight: 650; margin: 0 3px 0 3px; }
-.nn3d-lab2 { color: var(--ui-muted); margin-left: 2px; }
-.nn3d-seg { display: inline-flex; border: 1px solid var(--ui-line); border-radius: 7px; overflow: hidden; }
-.nn3d-seg button { border: 0; border-radius: 0; padding: 3px 8px; font-size: 12px; }
-.nn3d-seg button + button { border-left: 1px solid var(--ui-line); }
-.nn3d-seg button.on { background: var(--accent); color: #fff; }
-.nn3d-seg.steps button { min-width: 24px; padding: 3px 6px; font-variant-numeric: tabular-nums; }
-.nn3d-row > button { padding: 3px 8px; font-size: 12px; border: 1px solid var(--ui-line); }
-.nn3d-bar button:disabled { opacity: 0.35; cursor: default; background: transparent; }
-.nn3d-bar select {
-  font: inherit; font-size: 12px; color: var(--ui-fg); max-width: 140px; padding: 2px 4px;
-  background: rgba(127, 127, 127, 0.12); border: 1px solid var(--ui-line); border-radius: 6px;
-}
-.nn3d-bar select option { background: var(--ui-bg); color: var(--ui-fg); }
-.nn3d-cap { display: flex; flex-direction: column; gap: 4px; padding: 2px 3px 1px; }
-.nn3d-cap b { font-size: 14px; font-weight: 650; }
+.nn3d-bar.wide { left: 10px; flex-direction: row; flex-wrap: wrap; align-items: flex-start; gap: 8px 20px; padding: 8px 10px 8px 8px; }
+.nn3d-ctls { display: flex; flex-direction: column; gap: 6px; flex: none; }
+.nn3d-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.nn3d-title { margin: 0 4px 0 6px; font-size: var(--fs-md); font-weight: var(--fw-strong); color: var(--text-1); }
+.nn3d-lab2 { margin: 0 -2px 0 6px; font-size: var(--fs-sm); color: var(--text-3); }
+.nn3d-row .ui-seg.steps > button { min-width: 22px; padding: 0 6px; font-variant-numeric: tabular-nums; }
+.nn3d-row .ui-btn.sm:not(.icon) { font-variant-numeric: tabular-nums; }
+.nn3d-row .ui-btn.icon { color: var(--text-3); }
+.nn3d-row .ui-btn.icon:hover, .nn3d-row .ui-btn.icon.on { color: var(--text-1); }
+.nn3d-row .nn3d-sp { flex: 1; min-width: 4px; }
+.nn3d-row .nn3d-pair { display: inline-flex; gap: 2px; }
+.nn3d-bar select { max-width: 150px; }
+.nn3d-bar select option { background: var(--float); color: var(--text-1); }
+.nn3d-cap { display: flex; flex-direction: column; gap: 6px; padding: 2px 0 0; }
+.nn3d-bar.wide .nn3d-cap { flex: 1 1 300px; min-width: 0; }   /* beside the controls down to a 767 px stage (1280 with the matrix panel) */
+.nn3d-cap-h { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.nn3d-cap b { font-size: var(--fs-lg); font-weight: var(--fw-strong); color: var(--text-1); }
+.nn3d-cap .nn3d-count { flex: none; font-size: var(--fs-sm); color: var(--text-3); font-variant-numeric: tabular-nums; }
 .nn3d-cap code {
   align-self: flex-start; max-width: 100%;
-  font: 13px Consolas, "Cascadia Mono", monospace; white-space: pre; overflow-x: auto;
-  padding: 3px 7px; border-radius: 6px; background: rgba(127, 127, 127, 0.13);
+  font: 12.5px/1.4 var(--font-mono); color: var(--text-1); white-space: pre; overflow-x: auto;
+  padding: 4px 8px; border-radius: var(--r-sm); background: var(--well);
 }
-.nn3d-cap > span { color: var(--ui-muted); line-height: 1.35; white-space: normal; }
-.nn3d-cap em { font-style: normal; font-size: 11.5px; color: var(--ui-muted); }
-.nn3d-cap > .nn3d-tex { color: var(--ui-fg); font-size: 14px; line-height: 1.5; white-space: nowrap; }
+.nn3d-cap > span { font-size: 12.5px; color: var(--text-2); line-height: 1.45; white-space: normal; }
+.nn3d-cap em { font-style: normal; font-size: var(--fs-sm); color: var(--text-3); font-variant-numeric: tabular-nums; }
+.nn3d-cap > .nn3d-tex { color: var(--text-1); font-size: 14px; line-height: 1.5; white-space: nowrap; }
 .nn3d-cap.heads { gap: 2px; }
+.nn3d-cap.heads b { margin-bottom: 2px; }
 
 .nn3d-msg {
   position: absolute; left: 50%; top: 45%; transform: translate(-50%, -50%);
-  max-width: 460px; text-align: center; color: var(--ui-muted); font-size: 15px; line-height: 1.4;
+  max-width: 460px; text-align: center; color: var(--text-3); font-size: 15px; line-height: 1.45;
 }
 .nn3d-msg[hidden] { display: none; }
 
 /* the audience window and the clean view (H): the bar keeps only its caption */
 .nn3d.ro .nn3d-ctl, body.clean #nn .nn3d-ctl { display: none; }
 .nn3d.ro .nn3d-bar:not(:has(.nn3d-cap)), body.clean #nn .nn3d-bar:not(:has(.nn3d-cap)) { display: none; }
-.nn3d-tok.name { font: 600 12.5px system-ui, "Segoe UI", sans-serif; color: var(--fg); }
-.nn3d-grp.att { color: var(--n3-att); font-size: 17px; }
-.nn3d-op { font: 20px "KaTeX_Main", "Times New Roman", serif; color: var(--n3-muted); }
-.nn3d-headlab.top { padding: 0 0 3px; font-size: 12px; }
-.nn3d-name .op { font-style: normal; margin: 0 1px; }
-.nn3d-head.compact span { display: none; }
-.nn3d-head.up { margin-bottom: 40px; }
-.nn3d.ro .nn3d-bar.wide, body.clean #nn .nn3d-bar.wide { left: auto; max-width: min(620px, calc(100% - 20px)); }
+.nn3d.ro .nn3d-bar.wide, body.clean #nn .nn3d-bar.wide { left: auto; max-width: min(620px, calc(100% - 20px)); padding: 10px 14px; }

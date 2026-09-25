@@ -321,21 +321,22 @@ const CSS = `
 #graph.dual-on > #g-view { margin-right: 50%; }
 .dual-pane {
   position: relative; min-width: 0; min-height: 0; overflow: hidden;
-  margin-left: 50%; border-left: 1px solid var(--ui-line);
+  margin-left: 50%; border-left: 1px solid var(--line-2);
 }
 .dual-pane canvas { display: block; }
 .dual-head {
   position: absolute; z-index: 900; top: 12px; left: 50%; transform: translateX(-50%);
   max-width: calc(100% - 24px); overflow: hidden; pointer-events: none;
-  padding: 5px 12px 6px; border-radius: 10px; text-align: center; white-space: nowrap;
-  background: var(--ui-bg); color: var(--ui-fg); border: 1px solid var(--ui-line);
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18); font-size: 13px; line-height: 1.55;
+  padding: 6px 14px 7px; border-radius: var(--r-lg); text-align: center; white-space: nowrap;
+  background: var(--float); color: var(--text-1); border: 1px solid var(--float-line);
+  box-shadow: var(--shadow-2); font-size: var(--fs-md); line-height: 1.55;
 }
 .dual-head[hidden] { display: none; }
-.dual-head .dual-title { font-size: 16px; }
-.dual-head .dual-note { color: var(--ui-muted); font-size: 12px; }
+.dual-head .dual-title { font-size: var(--fs-xl); }
+.dual-head .dual-note { color: var(--text-3); font-size: var(--fs-sm); }
 `;
-const HELP = '<p><code>map(A)</code> split view: domain | codomain of a 2×2 to 3×3 matrix, with its kernel (red) and image</p>';
+const HELP = '<h4 class="ui-overline">Split view</h4>' +
+  '<p><code>map(A)</code> split view: domain | codomain of a 2×2 to 3×3 matrix, with its kernel (red) and image</p>';
 
 export async function install(api) {
   const S = await import('../scene.js');
@@ -371,6 +372,7 @@ function splitView(api, S) {
   const btn = api.addToolbarButton({
     label: 'Link cameras',
     title: 'Rotate the domain and codomain views together',
+    group: 'camera',
     onClick: () => {
       link = !link;
       lastDir = null;
@@ -382,11 +384,10 @@ function splitView(api, S) {
 
   const linked = () => link && side && dims?.m === 3 && dims?.n === 3;
 
-  function paintButton() {
+  function paintButton() { // a toolbar group with nothing shown folds away (style.css section 6)
     btn.hidden = !(side && dims?.m === 3 && dims?.n === 3);
     btn.classList.toggle('on', link);
-    const tools = btn.parentElement;
-    if (tools) tools.hidden = [...tools.children].every(b => b.hidden);
+    if (btn.nextElementSibling) btn.parentElement.appendChild(btn); // after the view presets, Ortho and 2D
   }
 
   // Camera direction (unit, target -> camera) as an array, and setting it at the same distance.

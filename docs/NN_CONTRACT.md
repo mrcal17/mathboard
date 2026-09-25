@@ -28,6 +28,7 @@ Modules talk through the store, `ctx` and the handles listed below.
 | `tour.js`, `tour.css` | Explain, the guided walkthrough and its caption card; owns `state.tour` (docs/NN_LENS.md) |
 | `view3d.js`, `view3d.css` | the 3D net view over `#nn-stage` (stack, heads, tensor); owns `state.v3d` (docs/NN_3D.md) |
 | `surf3d.js`, `surf3d.css` | the floating 3D plots panel (surface, landscape, space, simplex); owns `state.s3d` (docs/NN_3D_PLOTS.md) |
+| `flow.js`, `flow.css` (tests: `tests/nn_flow.test.mjs`) | the Flow view over `#nn-stage`: the whole forward pass as matrix tiles, stage by stage; owns `state.flow` (docs/NN_FLOW.md) |
 
 ## Network JSON (`model.js`)
 
@@ -49,6 +50,9 @@ The optional fields (all absent in older nets, which load unchanged):
 - `edge.tie` (string or null): edges with the same tie share one weight. `edge.fixed` (bool): never
   trained, randomized or re-weighted. `node.tie` (string or null): nodes with the same tie share one
   bias (not on the input layer or an attention layer).
+- `meta.vocab` (string[]): names the one-hot slots of a token input and a softmax output of that
+  width; `meta.flow` (true): the net opens in the Flow view when it loads (docs/NN_FLOW.md).
+  `normalize` keeps them, as any unknown meta field.
 
 A valid net always has at least 2 layers. `emptyNet()` is an empty Input and an empty Output layer.
 
@@ -118,7 +122,8 @@ adapt or play frame.
 - Changing `dataset`, `n`, `noise` or `seed` resets `seen`, `steps`, `hist` and `every`.
 - The loss choice stays in `meta.loss`.
 - The panel's own UI state is not in the net: localStorage `mathboard.nn.train` =
-  `{ open, fold, x, y }` (`x`/`y` null = the default top-right spot). The audience window never
+  `{ open, fold, settings, x, y }` (`settings`: the Settings section, which holds the
+  hyperparameters, is unfolded; it starts folded. `x`/`y` null = the default top-right spot). The audience window never
   writes it; it follows the presenter's `open` and `fold` through `storage` events and keeps the
   default spot.
 
@@ -159,7 +164,10 @@ PRESETS         // { key: { label, group, note, dataset: DATASETS key | null, lr
                 //     attention (3 tokens x 2 -> tied QKV -> Z, seq_max, lr 0.3), causal (seq_prev, lr 0.3), causal_rot
                 //     (hand-set solution of causal's task: W_Q turns the positions back 120°; seq_prev), multihead
                 //     (2 heads, seq_minmax, lr 1), transformer (2 tokens: QKV, Z, H = X + Z W_O, ReLU FFN d -> 2d,
-                //     Y = H + FFN; seq_addmax, lr 0.3). The 3-token presets
+                //     Y = H + FFN; seq_addmax, lr 0.3), tiny_lm (the tiny language model: one-hot words -> X = O W_E + P
+                //     -> Q, K, V -> 2 causal heads -> H = X + Z W_O -> ReLU FFN d -> 4d -> Y = H + F W_2 -> softmax over 7
+                //     words per position, xent; nl_next, lr 0.1, noise 0; sets meta.vocab and meta.flow; 174 nodes, the one
+                //     preset over the menu's 40, docs/NN_FLOW.md). The 3-token presets
                 //     lay X and Q, K, V out as tokens x d grids (a row per token, a column per feature, groups stacked,
                 //     X between the Q and K blocks), so they fit a 1600 x 900 window at 0.63 to 0.73 zoom; later layers are columns
                 //   Embeddings & autoencoders: autoencoder, embedding (one-hot lookup), pca_ae (linear, on cloud)
@@ -256,6 +264,11 @@ DATASETS        // { key: { label, inputs, outputs, kind: 'class' | 'reg' | 'seq
                 //       Targets: the noun, the verb, the noun (the reflexive outputs the noun it refers to)
                 //     nl_agree: "dog chases cats": subject, verb agreeing with it, an object of the other number
                 //       (16 sentences). Targets: the subject, the subject (the verb outputs its subject), the object
+                //   nl_next (kind 'seq', 3 tokens x 7 -> 3 x 7, xent): the next word, one-hot over '.', dog, cat, dogs,
+                //     cats, chases, chase. Inputs '. subject verb', targets 'subject verb object' (the verb agrees, the
+                //     object is the other animal in the other number: 4 sentences). vocab: { word: slot }; decode names
+                //     each token by its most likely word; make() returns words and targetWords; noise on the inputs only
+                //     (docs/NN_FLOW.md)
 WORDS           // frozen { word: [x, y] }: dog (1.2, 0.6), cat (0.6, 0.6), itself (0, 0.6), sees (-0.6, 0.6),
                 //   chases (-1.2, 0.6), and the plurals dogs, cats, themselves, see, chase at y = -0.6.
                 //   x is the kind of word (nouns right, verbs left), y the number
@@ -356,7 +369,8 @@ store.load(net | json, { history = true })   // swap in a whole net (normalized)
 - matrix.js highlights row i of W, b_i and (z_i, a_i) for fwd, or the backward row for bwd, plus
   the input vector (on an attention layer: the token's row of Q, S, A or Z, by phase). It shows
   the step's arithmetic in a box under layer l, and its toolbar reads `forward · layer l · row i/n`
-  (`forward · layer l · token i/n · scores`, and so on, on an attention layer).
+  (`forward · layer l · token i/n · scores`, and so on, on an attention layer). When the toolbar
+  has no room for that readout, or is hidden (H, the audience window), it is the step box's title.
 
 **Performance**
 - `net` / `values` can fire every animation frame while training.
@@ -382,6 +396,10 @@ store.load(net | json, { history = true })   // swap in a whole net (normalized)
 - Other scales: matrix σ'(z) cells use max 1 and W_eff / b_eff their own max; inspector
   input-value sliders use the activations scale. The inspector's `solid(v)` is the full-strength sign colour
   (weights in its KaTeX, slider accents).
+- Matrix panel cells take `colorFor` with its alpha eased above 0.5 to at most 0.72, so their
+  digits are always the text colour; a value that reads as zero has no fill, and a fixed edge's
+  cell none either (fixed edges are neutral, as on the canvas). Attention weights A_ij are filled
+  with `--att` at alpha `0.07 + 0.93·A` (eased the same way), as the canvas heatmap.
 - train.js takes the POS / NEG RGB from `colorFor(±1, 1, theme)` and blends onto `--bg`. Output
   field: one output is coloured by the sign of `(out - mid) / half` (mid and half from the
   dataset's target range), alpha `0.05 + 0.62·|v|`; K outputs by the argmax class (class 0 NEG,
@@ -419,11 +437,15 @@ store.load(net | json, { history = true })   // swap in a whole net (normalized)
 ctx = {
   store, model, el: { root, bar, stage, matrix },
   addButton({ label, title, onClick, group = 'modules', icon }) -> <button>,   // into #nn-bar (see Toolbar below);
-                          //   label and icon are HTML, the icon goes before the label
+                          //   label is HTML; icon (before the label) is a static/icons.js name, an <svg>
+                          //   string or glyph HTML (a known label, e.g. Train, gets its line icon instead of a
+                          //   glyph); no label makes an icon-only button, its title also its aria-label
   toast(msg, ms?), theme() -> 'dark' | 'light', onTheme(fn(theme)) -> off, onShow(fn(visible)) -> off,
   active(e?) -> bool,     // Net tab visible, not the audience window, and e (if given) is not typing into a text
                           //   input, textarea, select or contenteditable (range / checkbox / radio / button inputs don't count)
   audience: bool,         // read-only mirror window: render only, never edit or persist
+  matrixAway(on),         // hide the matrix panel for a while (the Flow view shows the matrices itself); false
+                          //   brings back the user's state. Not saved; the divider (drag, double-click) ends it
   graph,                  // getter: window.mathboardGraph or null (3D tab API: rows, rowByName, addRow, setRowSource,
                           //   removeRow, setRows, setView, toast, audience: { open(), isOpen } from lecture.js, ...)
   view,                   // set by view.js during its install (see below)
@@ -431,6 +453,7 @@ ctx = {
   matrix,                 // set by matrix.js (test / debug handle)
   train,                  // set by train.js: its test handle (below)
   attnviz, tour,          // set by attnviz.js and tour.js: docs/NN_LENS.md
+  view3d, flow,           // set by view3d.js (docs/NN_3D.md) and flow.js (docs/NN_FLOW.md)
 }
 ctx.view = {
   svg, worldToScreen(x, y) -> { x, y },    // world -> px relative to #nn-stage
@@ -459,13 +482,16 @@ ctx.matrix = { step(±1), toggle(key), opt, render(), update(), reveal(layer, pa
 
 - Toolbar: three rounded clusters in the board toolbar's style, level with the Board / 3D / Net
   tabs, each made of divider-separated sections (`BAR` in nn.js). **build**: `new` (New net),
-  `net` (+ Layer, Layout, Fit, Randomize), `edit` (↶ ↷). **show**: `view` (Weights, lens.js's Lens,
-  view3d's 3D), `panels` (the groups `train`, `attnviz` and `surf3d`: Train, Attention, 3D plots),
+  `net` (+ Layer, Layout, Fit, Randomize), `edit` (Undo, Redo: icons). **show**: `view` (Weights, lens.js's Lens,
+  view3d's 3D, flow's Flow), `panels` (the groups `train`, `attnviz` and `surf3d`: Train, Attention, 3D plots),
   `tour` (Explain). **tail**, at the right end: `file` (the File menu), `tail` (**Audience** and `?`,
   the cheat sheet: the keys below and the toolbar buttons). A group joins the section of the same
   name (or `panels`, as above) whatever the install order; any other group gets a section of its
-  own at the end of show, in the order first used. Short of room the bar drops the icons
-  (`.nn-compact`), then some padding (`.nn-tight`), and only then wraps (below about 1100 px).
+  own at the end of show, in the order first used. Buttons carry static/icons.js line icons (`?`,
+  Undo and Redo are icon-only). Short of room the bar first tightens its spacing (`.nn-snug`, icons
+  kept: 1600 px wide fits), then drops the icons (`.nn-compact`; icon-only buttons and + Layer's
+  plus stay), then some padding (`.nn-tight`: 1280 px fits), and only then wraps (below about
+  1260 px).
   Audience calls `window.mathboardGraph.audience.open()` (set by `graph/features/lecture.js`), the
   same window the 3D tab's Audience button opens; it is lit while that window is open
   (`audience.isOpen`, checked every second while the tab is shown). Toolbar buttons never take
@@ -478,6 +504,9 @@ ctx.matrix = { step(±1), toggle(key), opt, render(), update(), reveal(layer, pa
   tooltip). Typing filters, ↑ ↓ (or Tab) move, ← → change column while the field is empty, Enter
   opens the preset (Ctrl+Z goes back), and while it is open no other shortcut sees a key. File holds
   Export, Import, PNG and To board (↑ ↓ Enter; any other key closes it and goes on as usual).
+- `ctx.toast` in this tab is centred over the stage, not the window, and lifted above the lens bar
+  and the 3D view's bar when they are under it (nn.js sets `--nn-toast-*` on body; the rule is
+  `body[data-view="nn"] #toast` in nn.css).
 - train.js sets `ctx.train` (its test handle, below). Its named exports are
   `readSettings(net, model)`, `netShape`, `defaultDataset`, `forwardMany(net, model, X, n, from, M)`,
   `datasetLoss(P, Y, n, K, loss, outAct, segments = 1)`, `wordAccuracy(P, targetWords, n, K, ds)` and
@@ -514,6 +543,7 @@ ctx.matrix = { step(±1), toggle(key), opt, render(), update(), reveal(layer, pa
 | tour | E: Explain; while it runs → / PageDown, ← / PageUp, Esc (caught first) |
 | view3d | D: 3D view, Shift+D: next view, ← / → in the tensor view (Explain catches them first) |
 | surf3d | P: 3D plots panel, Shift+P: next plot |
+| flow | G: Flow view, Shift+G: play its stages, ← / → its stages while it is on (Explain catches them first) |
 
 Details for the last three: docs/NN_LENS.md.
 
@@ -532,8 +562,8 @@ H toggles `body.clean`, the same clean view as the board and the 3D tab, and in 
 matches what the audience window shows. It hides the toolbar, the cheat sheet, the matrix
 panel's toolbar (and its → 3D buttons), the view's connect handle and the empty-net hint, and
 freezes the splitter. Inspector cards and the Train panel stay as demo content without their
-chrome: cards lose the pin, close and param-delete buttons, "+ add" and the drag cursor (they
-still work); the Train panel keeps its readout, loss chart, warning text and plots and hides its
+chrome: cards lose the rename, pin, close and param-delete buttons, "+ add", the Remove edge
+foot (`.ui-chrome`) and the drag cursor (they still work); the Train panel keeps its readout, loss chart, warning text and plots and hides its
 settings and buttons (as `.nn-train.ro`). These rules live in `nn.css`, under `body.clean #nn`.
 The lens bar hides; the attention panel and the Explain card stay without their chrome
 (docs/NN_LENS.md; rules in `lens.css`, `attnviz.css`, `tour.css`).
@@ -544,17 +574,18 @@ The lens bar hides; the attention panel and the Explain card stay without their 
 nn.js publishes `window.mathboardNet = { store, ctx, audience, ready, mirrorState(), applyMirror(m),
 onMirror(fn) -> off }`. `ready` turns true, and `window` gets the `mathboard:nn-ready` event, once
 every module has installed.
-- `mirrorState()` -> `{ net, sel, hover, anim, split, matrixHidden, lens, viz, tour, matrix, weights }`, where
+- `mirrorState()` -> `{ net, sel, hover, anim, split, matrixHidden, lens, viz, tour, v3d, s3d, flow, matrix, weights }`
+  (`matrixHidden` as shown, `matrixAway` included), where
   `matrix` is a copy of `ctx.matrix.opt` (or null, `expand` included) and `weights` the W labels
   toggle. `hover` carries token hovers too, so the audience sees the token and attention row the
   presenter points at.
-- `onMirror(fn)` fires on the store's `net`, `layout`, `sel`, `hover`, `anim`, `lens`, `viz` and `tour` events, when
+- `onMirror(fn)` fires on the store's `net`, `layout`, `sel`, `hover`, `anim`, `lens`, `viz`, `tour`, `v3d`, `s3d` and `flow` events, when
   the split changes, and one frame after any click in the toolbar or the matrix panel or a key
   up in the tab (the matrix toggles and W have no store event).
 - `applyMirror(m)` does nothing outside an audience window. It loads `m.net` with
   `{ history: false }` when its JSON changed, copies `m.matrix` into `ctx.matrix.opt` and
   re-renders the panel when a toggle differs, sets W, sets `sel` / `hover` / `anim` / `lens` /
-  `viz` / `tour` when they differ, and applies the split.
+  `viz` / `tour` / `v3d` / `s3d` / `flow` when they differ, and applies the split.
 - `graph/features/lecture.js` carries it over its BroadcastChannel. The presenter posts
   `{ nn: mirrorState() }` at most once per frame, leaving out `net` when it hasn't changed, and
   also sends a full snapshot (including `view` and the net) every second. The audience switches
@@ -565,13 +596,16 @@ every module has installed.
   instead (both windows share an origin): the audience's read-only Train panel follows the
   presenter's `open` and `fold` from `mathboard.nn.train` (its spot stays the default), and its
   attention panel the presenter's spot, width and mode from `mathboard.nn.attnviz`, both through
-  `storage` events.
+  `storage` events. Its cards fold and unfold their sections with the presenter's
+  (`mathboard.nn.inspector`), through the same events.
 
 **Persistence and test preload**
 - localStorage `mathboard.nn` = `{ v: 1, net, split, matrixHidden }`, owned by the shell, written
   500 ms after a `net` or `layout` event and on `pagehide`. `mathboard.nn.train` belongs to
   train.js (see `meta.train`), `mathboard.nn.lens` to lens.js and `mathboard.nn.attnviz` to
-  attnviz.js (docs/NN_LENS.md).
+  attnviz.js (docs/NN_LENS.md). `mathboard.nn.inspector` = `{ folds: { <section key>: folded } }`
+  belongs to inspector.js: the sections the user folded or opened, per kind (`node.grad`,
+  `layer.act`, ...). A key that is not there takes its default (folded).
 - `index.html#nn=<preset key>`, `#nn=<base64url JSON>` or `#nn=<URI-encoded JSON>` opens the Net
   tab with that net (presets built with seed 1) and never saves. Use this for Playwright tests.
 - Audience windows (`?audience`) never save.

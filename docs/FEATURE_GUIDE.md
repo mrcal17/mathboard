@@ -33,7 +33,7 @@ export function install(api) { /* hooks, buttons, keyboard, ... */ }
 
 Language functions/types should be registered at module top level or in `install` (both run
 before the first evaluation). Features load in this order and failures are isolated:
-`transform, fields, combos, systems, dual, lecture, present, bridge, drag`.
+`plots, transform, fields, combos, systems, dual, lecture, present, bridge, drag`.
 
 ### Language (`lang.js`)
 - Values: numbers; `{type:'vec', v:[x,y,z]}`, `{type:'point', v}`, `{type:'mat', m: rows}`,
@@ -43,7 +43,15 @@ before the first evaluation). Features load in this order and failures are isola
   `kind` checks every argument; omit it and check yourself for mixed arguments. Throw `Error`
   with a short human message on bad input; it is shown under the row.
 - `registerType(type, { describe: 'a transformation', format(v) -> text, latex(v) -> KaTeX for the
-  row readout, drawable: false for readout-only values, numbers(v) -> number[] (NaN/inf check) })`.
+  row readout (shown after "= "), readout(v) -> {latex} or {text} shown as is, drawable: false for
+  readout-only values (or a function of the value), numbers(v) -> number[] (NaN/inf check) })`.
+- **Graphs.** A row that uses `x`, `y` or `z` without defining them evaluates to
+  `{type: 'graph', mode: 'curve' | 'surface' | 'param', ins, dep, at(env)}` (`y = x^2` has
+  `ins: ['x']`, `dep: 'y'`; `at({x: 2})` is 4). `f(x) = ...` rows are graphs with `callable`,
+  `params` and `call(args)`; a bare `softmax` is `{type: 'softmaxmap', T}`. Rows are compiled once
+  into closures, so sampling `at` thousands of times per frame is cheap. `features/plots.js` draws
+  both kinds; `transform.js` carries them by adding the matrix as `item.M`. `parseLine(line, userFns)`
+  takes the set of `f(x) = ...` names so `f(2)` parses as a call (without it, as `f * 2`).
 - A row is `[name =] expr [@ origin]`. `@` only moves where the value is drawn (`res.origin`).
 - A literal number row (`t = 0.5`) becomes a slider with a play button (ping-pong over its range;
   users can edit min/max). **Use slider variables for animation parameters and steps**, e.g.
@@ -79,9 +87,36 @@ Scene instance (via `api.scene` / `api.onSceneReady`): `getPose()`, `setPose(pos
 `setRows(list)`, `recompute()`, `rowByName(name)`, `getState()` / `setState(state, {cameraMs})`,
 `onRecompute(fn(results, rows))`, `addItemsHook(fn(items, {rows, results}) -> items)` (runs in
 feature order), `addRowDecorator(fn(row, result, el))`, `onSceneReady(fn(scene))`,
-`onViewChange(fn(view))`, `addToolbarButton({label, title, onClick})` (row of buttons under the
-list header), `addOverlay(el)` (absolute inside the 3D view), `addStyles(css)`, `setView`,
-`setCollapsed`, `toast(msg)`, `panelEl`, `viewEl`.
+`onViewChange(fn(view))`, `addToolbarButton({label, title, onClick, group, icon, seg})` (see below),
+`addOverlay(el)` (absolute inside the 3D view), `addStyles(css)`, `setView`, `setCollapsed`,
+`toast(msg)`, `icon(name)` (an SVG string from `static/icons.js`, `''` for an unknown name),
+`panelEl`, `viewEl`.
+
+**Toolbar buttons.** `addToolbarButton` returns the `<button>`: toggle it with `.on`, hide it with
+`hidden` (a group with nothing shown folds away), and keep a key in its `title`. Pick a `group` by
+meaning:
+
+| group | for | looks like |
+|---|---|---|
+| `'camera'` | view presets, projection, linking views | its own line, first |
+| `'display'` | what is drawn, and panels that open in the sidebar | text toggles (`.ui-btn.sm`) |
+| `'output'` | exports and windows (PNG, recording, audience) | icon buttons at the right: give an `icon` |
+| `'more'` | rarer actions | a row of the `...` menu after the output icons: the label, the icon and the title as a second line |
+| any other name | anything else (the default is `'other'`) | its own group after these |
+
+`icon` is a name from `static/icons.js` (docs/DESIGN.md, Icons); outside `'output'` it goes before
+the label. `seg: 'name'` puts buttons of one group into one segmented track (`.ui-seg`), which
+leads its group: mark the current choice with `.on`, as lecture.js does for Iso / Top / Front /
+Side. For example:
+
+```js
+const b = api.addToolbarButton({ label: 'Trails', title: 'Show trails (T)', group: 'display', onClick: toggle });
+api.addToolbarButton({ label: 'SVG', title: 'Download an SVG', group: 'more', icon: 'download', onClick: save });
+```
+
+**Help.** Append a section to `#g-help` that starts with its own head,
+`<h4 class="ui-overline">Your feature</h4>`, followed by `<p>` lines with `<code>` for syntax.
+Mouse and key hints go in `#g-help-keys` (with `<kbd>`), which stays last.
 
 Keyboard: the board's shortcuts are off while the 3D tab is shown. Ignore keys typed into inputs
 (`e.target.closest('input, textarea, select')`), and only act when `api.view === 'graph'`.
@@ -172,7 +207,8 @@ created, test results, and any shared-API gaps or known limitations. Keep it sho
 
 | Feature | Names |
 |---|---|
-| core (lang.js) | dot cross norm length mag unit normalize proj angle deg rad sin cos tan asin acos atan sqrt abs exp ln log min max det inv transpose matrix point span plane parallelogram parallelepiped |
+| core (lang.js) | dot cross norm length mag unit normalize proj angle deg rad sin cos tan asin acos atan sqrt abs exp ln log min max det inv transpose matrix point span plane parallelogram parallelepiped sinh cosh tanh sigmoid σ relu leakyrelu leaky_relu elu gelu softplus silu swish mish erf heaviside sign floor ceil round mod softmax logsumexp |
+| core coordinates | x y z are free in a row that doesn't define them (the row becomes a graph) |
 | combos | explain chain trail target arc shadow components crossview line plane3 intersect distance |
 | transform | transform eigen svdview fixed |
 | fields | flow iterate power quadric |

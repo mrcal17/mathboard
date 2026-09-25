@@ -94,17 +94,20 @@ export function moveComponents(v, o, tip, axes, threshold, step, limit = Infinit
 const CSS = `
 #g-view canvas.g-drag-hover { cursor: grab; }
 html.g-dragging, html.g-dragging * { cursor: grabbing !important; user-select: none; }
-.g-drag-readout { position: absolute; z-index: 6; pointer-events: none; padding: 3px 8px 3px 6px;
-  border-left: 3px solid var(--c, var(--accent)); border-radius: 4px; background: var(--ui-bg); color: var(--ui-fg);
-  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.25); font: 12px/1.4 ui-monospace, Consolas, monospace; white-space: nowrap; }
-.g-drag-readout[hidden] { display: none; }
-.g-drag-readout small { display: block; color: var(--ui-muted); font-size: 11px; }
+.g-drag-readout { z-index: 6; }  /* a .ui-tip; the swatch is the row colour */
+.g-drag-readout::before {
+  content: ''; display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%;
+  background: var(--c, currentColor);
+}
+.g-drag-readout small { padding-left: 14px; }
 `;
 
 export async function install(api) {
   if (api.params.has('audience')) return; // the audience window only mirrors the presenter
   const { THREE, GEO } = await import('../scene.js');
   api.addStyles(CSS);
+  document.querySelector('#g-help-keys > p')?.insertAdjacentHTML('afterend',
+    '<p>Drag a vector&rsquo;s tip or a point to move it: <kbd>Shift</kbd> drags along z, <kbd>Alt</kbd> turns snapping off.</p>');
   api.onSceneReady(scene => setup(api, scene, THREE, GEO));
 }
 
@@ -116,7 +119,7 @@ function setup(api, scene, THREE, GEO) {
   halo.renderOrder = 5;
   scene.scene.add(halo);
   const readout = document.createElement('div');
-  readout.className = 'g-drag-readout';
+  readout.className = 'g-drag-readout ui-tip';
   readout.hidden = true;
   api.addOverlay(readout);
   const raycaster = new THREE.Raycaster(), ndc = new THREE.Vector2();

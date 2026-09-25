@@ -126,7 +126,10 @@ test('unknown functions look like calls; tall arguments get growing brackets', (
   assert.equal(tex('f(x)', {}), 'f(x)');
   assert.equal(tex('myFunc(A, t)'), '\\mathrm{myFunc}(A, t)');
   assert.equal(tex('g_2(u, 3)'), 'g_{2}(\\vec{u}, 3)');
-  assert.equal(tex('y = sinh(t) + 1', {}), 'y = \\mathrm{sinh}(t) + 1');
+  assert.equal(tex('y = sinh(t) + 1', {}), 'y = \\operatorname{sinh}(t) + 1'); // built in since functions were added
+  assert.equal(tex('y = myfn(t) + 1', {}), 'y = \\mathrm{myfn}(t) + 1');
+  assert.equal(tex('f(x) = x^3 - x', {}), 'f(x) = x^{3} - x');
+  assert.equal(tex("sigmoid'(x)", {}), "\\operatorname{sigmoid}'(x)");
   assert.equal(tex('a (u + v)'), 'a(\\vec{u} + \\vec{v})'); // a is a row: still a product
   assert.equal(tex('det([[1, 0], [0, 1]])'), '\\operatorname{det}\\mathopen{}\\left(\\begin{bmatrix}1 & 0 \\\\ 0 & 1\\end{bmatrix}\\right)');
   assert.equal(tex('span(u, (1, 0, 0))'), '\\operatorname{span}\\mathopen{}\\left\\{\\vec{u}, \\begin{pmatrix}1 \\\\ 0 \\\\ 0\\end{pmatrix}\\right\\}');

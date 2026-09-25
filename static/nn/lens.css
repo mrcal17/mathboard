@@ -1,46 +1,62 @@
 /* Net tab: the lens bar (static/nn/lens.js), floating at the bottom left of #nn-stage. view.js
-   fits the net above it. Hidden in the clean view (H) and never built in the audience window. */
+   fits the net above it. Hidden until L or the Lens button shows it, hidden in the clean view (H)
+   and never built in the audience window. One row, a .ui-float (docs/DESIGN.md C13, C14): groups
+   are spaced, not ruled; lens.js moves the thresholds into a "more" menu when the row is short of
+   room, and adds .wrap only when even that doesn't fit. */
 
 .nn-lens {
   position: absolute; z-index: 7; left: 10px; bottom: 10px;
-  max-width: calc(100% - 20px);
-  display: flex; flex-wrap: wrap; align-items: center; gap: 3px 0;
-  padding: 4px 6px; border-radius: 12px;
-  background: var(--ui-bg); color: var(--ui-fg);
-  border: 1px solid var(--ui-line);
-  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.25);
-  font-size: 12.5px; line-height: 1.2;
+  max-width: calc(100% - 20px); min-height: 40px;
+  flex-direction: row; flex-wrap: nowrap; align-items: center; gap: var(--sp-8) var(--sp-12);
+  padding: var(--sp-4) var(--sp-6) var(--sp-4) var(--sp-12);
+  font-size: var(--fs-sm); line-height: var(--lh-tight); white-space: nowrap;
 }
+.nn-lens.wrap { flex-wrap: wrap; padding-top: var(--sp-6); padding-bottom: var(--sp-6); }
 .nn-lens[hidden], body.clean .nn-lens { display: none; }
 
-.nl-title {
-  padding: 0 5px 0 3px; font-weight: 650; letter-spacing: 0.02em; color: var(--ui-muted);
+/* the title, with a HI dot at its shoulder while the lens is on (in the gap, so nothing shifts) */
+.nl-title { position: relative; flex: none; margin-right: var(--sp-4); font-size: var(--fs-md); font-weight: var(--fw-strong); color: var(--text-1); }
+.nl-title::after {
+  content: ''; position: absolute; top: 0; right: -10px; width: 6px; height: 6px; border-radius: 50%;
+  background: transparent; transition: background-color var(--dur-2) var(--ease);
 }
-.nn-lens.active .nl-title { color: var(--accent); }
-.nl-grp { display: flex; align-items: center; gap: 1px; padding: 0 5px; }
-.nl-grp + .nl-grp, .nl-title + .nl-grp, .nl-grp + .nl-clear { border-left: 1px solid var(--ui-line); }
-.nl-lab { color: var(--ui-muted); margin-right: 4px; white-space: nowrap; }
+.nn-lens.active .nl-title::after { background: var(--hi); }
 
-.nn-lens button { padding: 2px 6px; font-size: 12.5px; border-radius: 7px; min-width: 24px; }
-.nn-lens button sub { font-size: 0.75em; line-height: 0; }
-.nn-lens .nl-clear { margin-left: 5px; }
-.nn-lens .nl-clear:disabled { opacity: 0.35; cursor: default; background: transparent; }
+.nl-grp { display: flex; align-items: center; gap: var(--sp-4); flex: none; }
+.nl-lab { margin-right: var(--sp-2); color: var(--text-3); }
 
-.nl-focus {
-  font: inherit; color: var(--ui-fg); cursor: pointer; width: 10.5em; text-overflow: ellipsis;
-  background: rgba(127, 127, 127, 0.12); border: 1px solid var(--ui-line); border-radius: 7px; padding: 2px 3px;
+/* Focus (and Token past five tokens): a small select, .on (the toggle's look) while it is set */
+.nn-lens .nl-focus { width: 138px; text-overflow: ellipsis; }
+.nn-lens .nl-tok { width: 96px; text-overflow: ellipsis; }
+.nn-lens select option { background: var(--float); color: var(--text-1); }
+
+.nn-lens .ui-chip sub { font-size: 0.75em; line-height: 0; }
+.nn-lens .ui-chip .ui-sw { width: 7px; height: 7px; }
+
+/* thresholds: a label, a 72 px range, the readout (a fixed width, so the track doesn't move) */
+.nl-thrs { display: flex; align-items: center; gap: var(--sp-12); flex: none; }
+.nl-thr .ui-range { width: 72px; }
+.nl-thr output { min-width: 2.6em; color: var(--text-2); font-variant-numeric: tabular-nums; }
+
+/* the "more" menu: the thresholds when the row is short of room; it opens above the bar */
+.nl-more { position: relative; display: flex; flex: none; }
+.nl-more[hidden], .nl-pop[hidden] { display: none; }
+.nl-more-btn { position: relative; color: var(--text-3); }
+.nl-more-btn:hover, .nl-more-btn.on { color: var(--text-1); }
+.nl-more-btn.nl-set::after {   /* a threshold is set in there */
+  content: ''; position: absolute; top: 3px; right: 3px; width: 5px; height: 5px; border-radius: 50%; background: var(--hi);
 }
-.nl-focus.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, transparent); }
-.nl-focus option { background: var(--bg); color: var(--fg); }
+.nl-pop { position: absolute; left: -6px; bottom: calc(100% + 12px); z-index: 1; min-width: 0; padding: var(--sp-8) var(--sp-12); }
+.nl-pop .nl-thrs { flex-direction: column; align-items: stretch; gap: var(--sp-8); }
+.nl-pop .nl-thr { justify-content: space-between; gap: var(--sp-8); }
+.nl-pop .nl-thr .ui-range { width: 120px; }
 
-.nl-thr { display: inline-flex; align-items: center; margin: 0 6px 0 2px; color: var(--ui-muted); }
-.nl-thr input[type="range"] { width: 60px; margin: 0 3px 0 3px; accent-color: var(--accent); cursor: pointer; }
-.nl-thr input[type="range"]:disabled { opacity: 0.35; cursor: default; }
-.nl-thr output { min-width: 2.3em; font-variant-numeric: tabular-nums; }
-.nl-grp > .nl-lab + .nl-lab { margin-left: 2px; color: var(--ui-fg); }   /* |w| or A without a toggle */
+.nn-lens .nl-clear { flex: none; }
 
-/* the toolbar's Lens button: a dot while the lens is doing something */
+/* the toolbar's Lens button: a HI dot in its corner whenever the lens is on, the bar shown or not
+   (a corner badge, so the toolbar doesn't reflow) */
+#nn-bar button.nl-act { position: relative; }
 #nn-bar button.nl-act::after {
-  content: ''; display: inline-block; width: 6px; height: 6px; margin: 0 0 1px 5px;
-  border-radius: 50%; background: var(--accent); vertical-align: middle;
+  content: ''; position: absolute; top: 4px; right: 4px; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--hi); box-shadow: 0 0 0 2px var(--float); pointer-events: none;
 }

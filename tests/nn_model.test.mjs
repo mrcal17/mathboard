@@ -385,7 +385,8 @@ describe('PRESETS: every preset in the menu', () => {
       valid(net);
       assert.deepEqual(p.build(1), net, 'same seed, same net');
       assert.deepEqual(M.normalize(M.clone(net)), net, 'normalize is a no-op on a preset');
-      assert.ok(net.nodes.length <= 40, `${net.nodes.length} nodes`);
+      // The tiny language model is made for the Flow view (docs/NN_FLOW.md), which draws it as matrices.
+      assert.ok(net.nodes.length <= (k === 'tiny_lm' ? 180 : 40), `${net.nodes.length} nodes`);
       assert.ok(net.layers.every(l => l.name.trim()), 'layer names');
       assert.ok(net.nodes.every(n => n.label.trim()), 'labels');
       for (let i = 0; i < net.nodes.length; i++) {
@@ -2629,5 +2630,131 @@ describe('train.js readouts agree with the model', async () => {
     const xor = M.PRESETS.xor.build(1);
     const h = M.predict(xor, [[0.4, -0.3]], { layer: 1 })[0];
     near(T.forwardMany(xor, M, new Float64Array(h), 1, 1)[2][0], M.predict(xor, [[0.4, -0.3]])[0][0], 1e-12);
+  });
+});
+
+// ---------------------------------------------------------------- the tiny language model
+
+describe('the tiny language model (nl_next, tiny_lm; docs/NN_FLOW.md)', () => {
+  const ds = M.DATASETS.nl_next, VOCAB = ['.', 'dog', 'cat', 'dogs', 'cats', 'chases', 'chase'];
+  const rows = x => [0, 1, 2].map(t => x.slice(t * 7, t * 7 + 7));
+  const hot = row => {
+    const k = row.indexOf(1);
+    assert.ok(k >= 0 && row.every((v, i) => v === (i === k ? 1 : 0)), `one-hot: ${row}`);
+    return VOCAB[k];
+  };
+
+  test('nl_next: a start token and two words in, the next word at each position out', () => {
+    assert.deepEqual([ds.kind, ds.tokens, ds.inputs, ds.outputs], ['seq', 3, 21, 21]);
+    assert.deepEqual(Object.keys(ds.vocab), VOCAB);
+    assert.deepEqual(Object.values(ds.vocab), [0, 1, 2, 3, 4, 5, 6], 'each word\'s one-hot slot');
+    assert.ok(VOCAB.slice(1).every(w => M.WORDS[w]), 'the words come from WORDS');
+    const D = ds.make(200, 3, 0), seen = new Set();
+    D.X.forEach((x, s) => {
+      const w = rows(x).map(hot), y = rows(D.Y[s]).map(hot);
+      assert.deepEqual(w, D.words[s]);
+      assert.deepEqual(y, D.targetWords[s]);
+      assert.equal(w[0], '.');
+      assert.deepEqual(w.slice(1), y.slice(0, 2), 'each position\'s target is the next input');
+      const [subj, verb, obj] = y;
+      assert.ok(['dog', 'cat', 'dogs', 'cats'].includes(subj));
+      assert.equal(verb, M.WORDS[subj][1] > 0 ? 'chases' : 'chase', 'the verb agrees with its subject');
+      assert.notEqual(obj.replace(/s$/, ''), subj.replace(/s$/, ''), 'the object is the other animal');
+      assert.notEqual(M.WORDS[obj][1], M.WORDS[subj][1], 'in the other number');
+      assert.deepEqual(ds.decode(D.Y[s]), y, 'decode names the most likely word');
+      seen.add(y.join(' '));
+    });
+    assert.deepEqual([...seen].sort(), ['cat chases dogs', 'cats chase dog', 'dog chases cats', 'dogs chase cat']);
+    assert.deepEqual(ds.make(50, 3, 0), ds.make(50, 3, 0), 'deterministic');
+    const noisy = ds.make(50, 3, 0.2), clean = ds.make(50, 3, 0);
+    assert.deepEqual(noisy.words, clean.words, 'noise keeps the sentences');
+    assert.deepEqual(noisy.Y, clean.Y, 'noise only on the inputs: the targets stay one-hot');
+    assert.notDeepEqual(noisy.X, clean.X);
+    assert.deepEqual(ds.decode([NaN, ...new Array(20).fill(0)]), [null, '.', '.']);
+  });
+
+  test('tiny_lm: embedding + position, 2 causal heads, W_O, a d -> 4d -> d FFN, a softmax per position', () => {
+    const net = M.PRESETS.tiny_lm.build(1);
+    assert.equal(net.meta.loss, 'xent');
+    assert.deepEqual(net.meta.vocab, VOCAB);
+    assert.equal(net.meta.flow, true);
+    assert.deepEqual(net.meta.train, { init: { W_Q: 'small', W_K: 'small', W_O: 'small', W_2: 'small' }, dataset: 'nl_next', lr: 0.1, noise: 0 });
+    assert.deepEqual(net.meta.tokenNames, ['.', 'dogs', 'chase'], 'the first sentence names the tokens');
+    assert.deepEqual(net.layers.map((_, l) => { const s = M.tokenShape(net, l); return [s.tokens, s.d, s.groups]; }),
+      [[3, 7, null], [3, 4, null], [3, 4, ['Q', 'K', 'V']], [3, 4, null], [3, 4, null], [3, 16, null], [3, 4, null], [3, 7, null]]);
+    assert.deepEqual(net.layers.map(l => l.act), ['identity', 'identity', 'identity', 'identity', 'identity', 'relu', 'identity', 'softmax']);
+    assert.deepEqual(M.attnSpec(net, 3), { l: 3, tokens: 3, d: 4, heads: 2, dh: 2, scale: 1 / Math.sqrt(2), causal: true });
+    const mats = l => M.tiedMatrices(net, l).map(m => [m.name, m.W.length, m.W[0].length, m.k, m.tokenwise]);
+    assert.deepEqual(mats(1), [['W_E', 7, 4, 0, true]]);
+    assert.deepEqual(mats(2), [['W_Q', 4, 4, 1, true], ['W_K', 4, 4, 1, true], ['W_V', 4, 4, 1, true]]);
+    assert.deepEqual(mats(4), [['W_O', 4, 4, 3, true]]);
+    assert.deepEqual(mats(5), [['W_1', 4, 16, 4, true]]);
+    assert.deepEqual(mats(6), [['W_2', 16, 4, 5, true]]);
+    assert.deepEqual(mats(7), [['W_U', 4, 7, 6, true]]);
+    // the two residuals: fixed identity edges X -> H and H -> Y, slot for slot
+    const fixed = net.edges.filter(e => e.fixed);
+    assert.equal(fixed.length, 24);
+    for (const e of fixed) {
+      const a = M.tokenPos(net, e.from), b = M.tokenPos(net, e.to);
+      assert.equal(e.w, 1);
+      assert.deepEqual([a.token, a.feature], [b.token, b.feature]);
+      assert.ok((a.l === 1 && b.l === 4) || (a.l === 4 && b.l === 6), `${a.l} -> ${b.l}`);
+    }
+    // P: the embedding layer's biases are its own per position and feature; the others are shared per feature
+    assert.ok(M.nodesIn(net, 1).every(n => !n.tie));
+    for (const l of [2, 4, 5, 6, 7]) assert.ok(M.nodesIn(net, l).every(n => n.tie), `layer ${l} ties its biases`);
+    // the Train panel's Reset (He, as the net has a ReLU, and meta.train.init) with init seed 1 gives the preset back
+    const reset = M.clone(net);
+    M.randomize(reset, { seed: 5 });
+    M.randomize(reset, { seed: 1, scheme: 'he', init: reset.meta.train.init });
+    assert.deepEqual(reset, net);
+  });
+
+  test('tiny_lm: every gradient against finite differences (cross-entropy over the words at each position)', () => {
+    // P, every bias and every matrix non-zero (one draw per tie group, so the ties hold), and no
+    // ReLU of the FFN on its kink, where a finite difference would be meaningless
+    const net = M.PRESETS.tiny_lm.build(2);
+    let seed = 5;
+    for (;; seed++) {
+      M.randomize(net, { seed, scheme: 'xavier', biases: 'small' });
+      const z = M.forward(net).z[5];
+      if (z.every(v => Math.abs(v) > 1e-3) && z.some(v => v > 0)) break;
+    }
+    const y = targets(net), { fwd, bwd } = gradCheckShared(net, y, 'xent');
+    const p = fwd.a[7];
+    const want = [0, 1, 2].reduce((s, t) => s - Math.log(p[t * 7 + y.slice(t * 7, t * 7 + 7).indexOf(1)]), 0) / 3;
+    near(bwd.loss, want, 1e-12, 'the mean over the positions of -log p(next word)');
+    bwd.dZ[7].forEach((dz, i) => near(dz, (p[i] - y[i]) / 3, 1e-12, `dL/dlogit ${i}`));
+  });
+
+  test('tiny_lm learns the grammar: the verb from the subject, the object through attention', () => {
+    const net = M.PRESETS.tiny_lm.build(1), D = ds.make(200, 1, 0), r = M.rng(8);
+    for (let s = 0; s < 800; s++) {
+      const B = Array.from({ length: 10 }, () => Math.floor(r() * D.X.length));
+      M.trainStep(net, { X: B.map(i => D.X[i]), Y: B.map(i => D.Y[i]) }, { lr: 0.1 });
+    }
+    for (const subj of ['dog', 'cat', 'dogs', 'cats']) {
+      const i = D.words.findIndex(w => w[1] === subj), p = M.predict(net, [D.X[i]])[0], want = D.targetWords[i];
+      assert.deepEqual(ds.decode(p).slice(1), want.slice(1), subj);
+      assert.ok(p[7 + VOCAB.indexOf(want[1])] > 0.9, `${subj}: the verb`);
+      assert.ok(p[14 + VOCAB.indexOf(want[2])] > 0.9, `${subj}: the object`);
+      for (const k of [1, 2, 3, 4]) assert.ok(p[k] > 0.1 && p[k] < 0.5, `${subj}: the first word stays a guess among the nouns`);
+    }
+  });
+
+  test('Adapt onto nl_next: a softmax per position and cross-entropy, as the preset has', async () => {
+    const T = await import('../static/nn/train.js');
+    const lm = M.PRESETS.tiny_lm.build(1), want = M.clone(lm);
+    T.adaptNet(lm, M, ds, { seed: 1 });
+    assert.deepEqual(lm, want, 'the preset already fits: Adapt keeps it as it is');
+    T.adaptNet(lm, M, M.DATASETS.nl_agree, { seed: 1 });
+    assert.deepEqual([lm.layers[7].act, lm.meta.loss], ['identity', 'mse']);
+    for (const net of [lm, M.PRESETS.xor.build(1), M.PRESETS.causal.build(1)]) {
+      assert.match(T.adaptNet(net, M, ds, { seed: 1 }), /3×7 tokens: softmax output, cross-entropy loss/);
+      const out = net.layers[net.layers.length - 1];
+      assert.deepEqual([out.act, out.tokens, net.meta.loss], ['softmax', 3, 'xent']);
+      const p = M.predict(net, ds.make(1, 1, 0).X)[0];
+      for (let t = 0; t < 3; t++) near(p.slice(t * 7, t * 7 + 7).reduce((s, v) => s + v, 0), 1, 1e-12, `position ${t}`);
+    }
   });
 });

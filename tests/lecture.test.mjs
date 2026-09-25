@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ease, sliderOf, sameShape, planTransition, samePose, stepTarget, normalizeSteps } from '../static/graph/features/lecture.js';
+import { ease, sliderOf, sameShape, planTransition, samePose, presetOf, stepTarget, normalizeSteps } from '../static/graph/features/lecture.js';
 
 const R = (src, color = '#e05a4f', extra = {}) => ({ src, color, ...extra });
 
@@ -104,4 +104,16 @@ test('normalizeSteps rejects garbage and drops bad cameras', () => {
 test('normalizeSteps round-trips its own output', () => {
   const once = normalizeSteps([{ title: 't', rows: [R('a = 1')], camera: { position: [1, 2, 3], target: [0, 0, 1], zoom: 1, ortho: false, extent: 6 }, collapsed: false, flat: true, spin: false }]);
   assert.deepEqual(normalizeSteps(JSON.parse(JSON.stringify({ steps: once }))), once);
+});
+
+test('presetOf names the view preset a camera looks along, ignoring distance and panning', () => {
+  const views = { iso: [10, 5, 6], top: [0, -1e-3, 1], front: [1, 0, 0], side: [0, -1, 0] };
+  assert.equal(presetOf({ position: [20, 10, 12], target: [0, 0, 0] }, views), 'iso');
+  assert.equal(presetOf({ position: [3, 2, 9], target: [3, 2.009, 0] }, views), 'top');
+  assert.equal(presetOf({ position: [5, 1, 1], target: [0, 1, 1] }, views), 'front');
+  assert.equal(presetOf({ position: [0, -7, 0] }, views), 'side');
+  assert.equal(presetOf({ position: [10, 5.3, 6], target: [0, 0, 0] }, views), null);
+  assert.equal(presetOf({ position: [0, 0, 0], target: [0, 0, 0] }, views), null);
+  assert.equal(presetOf(null, views), null);
+  assert.equal(presetOf({ position: [1, 0, 0] }, null), null);
 });

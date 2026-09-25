@@ -30,6 +30,10 @@ const HIST_MAX = 400;
 const EXTRA = ['#3ec27a', '#b07cff', '#ff6fa8', '#2ec4c4', '#c9a227'];   // classes 3+ (0/1 use NEG/POS)
 const BOUNDED = { sigmoid: [0, 1], softmax: [0, 1], tanh: [-1, 1] };
 const UI_KEY = 'mathboard.nn.train';
+// How to use it: the head's help icon (the plot's caption line keeps to readouts).
+const HELP = 'Space plays or pauses, T takes one step. Click a point in the plot to load it as the current '
+  + 'sample; with a sequence dataset, hover a cell for its value and use ‹ › to load the samples. '
+  + 'Settings holds the data size, noise, loss, rate, batch and speed.';
 
 // ---------------------------------------------------------------- pure helpers
 
@@ -223,6 +227,9 @@ export function datasetLoss(P, Y, n, K, loss, outAct, segments = 1) {
 
 // Word datasets (model.WORDS) name every output token by its nearest word: ds.decode(row) -> words.
 const isWords = ds => !!ds && typeof ds.decode === 'function' && !!ds.vocab;
+// A word a word dataset uses: a WORDS entry, or a slot of a dataset's vocab (nl_next's start token '.').
+const isVocabWord = (w, model) => Object.hasOwn(model.WORDS || {}, w)
+  || Object.values(model.DATASETS || {}).some(v => v.vocab && Object.hasOwn(v.vocab, w));
 
 // The share of output tokens whose nearest word (ds.decode) is the target word. P: n x K outputs
 // (flat), targetWords: per sample, one word per token.
@@ -417,6 +424,8 @@ const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const round4 = v => +v.toPrecision(4);
 const fmtLoss = v => (Number.isNaN(v) ? 'NaN' : !Number.isFinite(v) ? '∞' : v === 0 ? '0' : v < 0.001 ? v.toExponential(2) : v.toFixed(4));
+// A line icon from static/icons.js (docs/DESIGN.md, Icons), else the glyph it replaced.
+const icon = (name, alt = '') => globalThis.mathboardIcons?.svg(name) || alt;
 const hash3 = (a, b, c) => ((Math.imul(a | 0, 73856093) ^ Math.imul(b | 0, 19349663) ^ Math.imul(c | 0, 83492791)) >>> 0) || 1;
 
 let probe = null;
@@ -453,7 +462,8 @@ export function install(ctx) {
   const stage = ctx.el.stage;   // train.css is linked by the shell
   if (getComputedStyle(stage).position === 'static') stage.style.position = 'relative';
 
-  const ui = { open: true, fold: false, x: null, y: null };
+  // settings: the Settings section (the hyperparameters) is unfolded; it starts folded
+  const ui = { open: true, fold: false, settings: false, x: null, y: null };
   const savedUi = () => { try { return JSON.parse(localStorage.getItem(UI_KEY)) || {}; } catch { return {}; } };
   if (!ro) Object.assign(ui, savedUi());
   else {
@@ -468,55 +478,66 @@ export function install(ctx) {
   }
   const saveUi = () => { if (!ro) try { localStorage.setItem(UI_KEY, JSON.stringify(ui)); } catch { /* ignore */ } };
 
+  // The .ui-float recipe (docs/DESIGN.md C1 to C5). By default the body shows the dataset, the
+  // actions, the readout, the loss chart and the plot; the hyperparameters fold into Settings, whose
+  // head sums them up. nn.css's clean view and .ro keep the readout, the chart, the warning and the
+  // plots (and hide .nt-grid, .nt-ctl, .nt-hint, .nt-go-mini, .nt-warn button; .ui-chrome goes too).
   const panel = document.createElement('div');
-  panel.className = 'nn-train' + (ro ? ' ro' : '');
+  panel.className = 'nn-train ui-float' + (ro ? ' ro' : '');
   panel.innerHTML = `
-    <header class="nt-head">
-      <button class="nt-fold" data-act="fold" title="Collapse / expand">&#9662;</button>
-      <b class="nt-title">Train</b>
-      <span class="nt-mini"></span>
-      <button class="nt-go nt-go-mini" data-act="play" title="Play / pause training (Space)">&#9654;</button>
+    <header class="nt-head ui-float-head drag">
+      <b class="nt-title ui-float-title" title="Drag to move; double-click to put it back">Train</b>
+      <span class="nt-mini ui-float-meta"></span>
+      <span class="ui-float-sp"></span>
+      <button type="button" class="nt-help ui-help ui-btn sm icon ui-chrome" tabindex="-1" aria-label="How to use it" title="${esc(HELP)}">${icon('help', '?')}</button>
+      <button type="button" class="nt-go nt-go-mini ui-btn sm icon" data-act="play" title="Play / pause training (Space)">${icon('play', '&#9654;')}</button>
+      <button type="button" class="nt-fold ui-btn sm icon" data-act="fold" title="Fold to the header" aria-expanded="true">${icon('chevron-up', '&#9652;')}</button>
     </header>
-    <div class="nt-body">
-      <div class="nt-grid nt-g3">
-        <label class="nt-span3">data <select data-k="dataset"></select></label>
-        <label>points <input type="number" data-k="n" min="4" max="5000" step="10"></label>
-        <label>noise <input type="number" data-k="noise" min="0" max="10" step="0.05"></label>
-        <label>seed <input type="number" data-k="seed" step="1"></label>
-      </div>
-      <div class="nt-warn" hidden><span></span><button data-act="adapt" title="Resize the input and output layers to fit the dataset; hidden layers are kept. A token net keeps its structure: it changes the features per token, or says why it can't">Adapt network</button></div>
-      <div class="nt-grid nt-g4">
-        <label>loss <select data-k="loss"><option value="mse">MSE</option><option value="xent">x-entropy</option></select></label>
-        <label>rate <select data-k="lr"></select></label>
-        <label>batch <select data-k="batch"></select></label>
-        <label title="Maximum training steps per animation frame">speed <select data-k="speed"></select></label>
-      </div>
-      <div class="nt-hint" hidden></div>
+    <div class="nt-body ui-float-body">
+      <div class="nt-grid nt-data"><select class="ui-field" data-k="dataset" title="Dataset" aria-label="Dataset"></select></div>
+      <div class="nt-warn ui-callout warn" hidden><span></span><button type="button" class="ui-btn sm soft" data-act="adapt" title="Resize the input and output layers to fit the dataset; hidden layers are kept. A token net keeps its structure: it changes the features per token, or says why it can't">Adapt network</button></div>
+      <section class="nt-set ui-sec ui-chrome folded">
+        <button type="button" class="ui-sec-h" data-act="settings" aria-expanded="false">Settings<span class="ui-sec-sum"></span></button>
+        <div class="ui-sec-b">
+          <div class="nt-grid nt-g3">
+            <label>points <input class="ui-field num" type="number" data-k="n" min="4" max="5000" step="10"></label>
+            <label>noise <input class="ui-field num" type="number" data-k="noise" min="0" max="10" step="0.05"></label>
+            <label>seed <input class="ui-field num" type="number" data-k="seed" step="1"></label>
+          </div>
+          <div class="nt-grid nt-g4">
+            <label>loss <select class="ui-field" data-k="loss"><option value="mse">MSE</option><option value="xent">x-entropy</option></select></label>
+            <label>rate <select class="ui-field" data-k="lr"></select></label>
+            <label>batch <select class="ui-field" data-k="batch"></select></label>
+            <label title="Maximum training steps per animation frame">speed <select class="ui-field" data-k="speed"></select></label>
+          </div>
+        </div>
+      </section>
+      <div class="nt-hint ui-caption" hidden></div>
       <div class="nt-ctl">
-        <button class="nt-go" data-act="play" title="Play / pause training (Space)">&#9654; Play</button>
-        <button data-act="step" title="One mini-batch gradient step (T)">Step</button>
-        <button data-act="reset" title="Re-randomize the weights from the init seed (a preset that starts some shared matrices its own way, such as W_V = I, keeps that)">Reset</button>
-        <label title="Seed for Reset">init <input type="number" data-k="initSeed" step="1"></label>
-        <button data-act="dice" title="New random init seed, then reset">&#8635;</button>
+        <button type="button" class="nt-go ui-btn sm primary" data-act="play" title="Play / pause training (Space)">${icon('play', '&#9654;')}<span>Play</span></button>
+        <button type="button" class="ui-btn sm soft" data-act="step" title="One mini-batch gradient step (T)">Step</button>
+        <button type="button" class="ui-btn sm" data-act="reset" title="Re-randomize the weights from the init seed (a preset that starts some shared matrices its own way, such as W_V = I, keeps that)">Reset</button>
+        <label class="nt-init" title="Seed for Reset">init <input class="ui-field sm num" type="number" data-k="initSeed" step="1"></label>
+        <button type="button" class="ui-btn sm icon" data-act="dice" title="New random init seed, then reset">${icon('dice', '&#8635;')}</button>
       </div>
       <div class="nt-read">
-        <span>epoch <b data-r="epoch">0</b></span>
-        <span>step <b data-r="steps">0</b></span>
-        <span>loss <b data-r="loss">&ndash;</b></span>
-        <span data-r="accw" hidden><span data-r="accl">acc</span> <b data-r="acc"></b></span>
+        <span class="ui-stat"><b data-r="epoch">0</b><span>epoch</span></span>
+        <span class="ui-stat"><b data-r="steps">0</b><span>step</span></span>
+        <span class="ui-stat"><b data-r="loss">&ndash;</b><span>loss</span></span>
+        <span class="ui-stat" data-r="accw" hidden><b data-r="acc"></b><span data-r="accl">acc</span></span>
       </div>
       <canvas class="nt-chart"></canvas>
       <div class="nt-grid nt-g2b">
-        <label>plot <select data-k="space"></select></label>
-        <label class="nt-check" title="Each neuron's activation over the input domain, drawn inside its node"><input type="checkbox" data-k="maps"> neuron maps</label>
+        <select class="ui-field sm" data-k="space" aria-label="Plot"></select>
+        <label class="nt-check ui-check-row" title="Each neuron's activation over the input domain, drawn inside its node"><input class="ui-check" type="checkbox" data-k="maps">neuron maps</label>
       </div>
       <canvas class="nt-plot"></canvas>
       <div class="nt-steps" hidden>
-        <button data-act="prev" title="Load the previous sample">&#9664;</button>
+        <button type="button" class="ui-btn xs icon" data-act="prev" title="Load the previous sample">${icon('chevron-left', '&#9664;')}</button>
         <span class="nt-steps-lab"></span>
-        <button data-act="next" title="Load the next sample">&#9654;</button>
+        <button type="button" class="ui-btn xs icon" data-act="next" title="Load the next sample">${icon('chevron-right', '&#9654;')}</button>
       </div>
-      <div class="nt-cap"><span class="nt-axes"></span><span class="nt-info"></span></div>
+      <div class="nt-cap"><span class="nt-axes"></span><span class="nt-info ui-caption"></span></div>
     </div>`;
   stage.appendChild(panel);
 
@@ -528,8 +549,9 @@ export function install(ctx) {
   const axesEl = $('.nt-axes'), infoEl = $('.nt-info');
   const goBtns = [...panel.querySelectorAll('.nt-go')], stepBtn = $('[data-act="step"]');
   const steps = $('.nt-steps'), stepsLab = $('.nt-steps-lab');
-  const HINT = ro ? '' : 'click a point to load it as the current sample';
-  const SEQ_HINT = ro ? '' : 'hover a cell for its value; ◀ ▶ load the samples';
+  const setSec = $('.nt-set'), setSum = $('.nt-set .ui-sec-sum');
+  // the caption line under the plot is for readouts: how to use it lives in the head's help icon
+  const HINT = '', SEQ_HINT = '';
 
   // A sequence dataset's shape reads tokens × features: 3×2 → 3×2.
   const dsShape = v => (v.kind === 'seq' && v.tokens > 1
@@ -565,12 +587,17 @@ export function install(ctx) {
     const theme = ctx.theme ? ctx.theme() : (document.documentElement.dataset.theme || 'dark');
     const pos = rgbOf(colorFor(1, 1, theme)), neg = rgbOf(colorFor(-1, 1, theme));
     const bg = v('--bg', theme === 'light' ? '#fbfbf8' : '#1d2327');
+    // the plots sit on --well (recessed, as the loss chart); the neuron maps blend onto the canvas's --bg
+    const well = v('--well', theme === 'light' ? '#f1f1ed' : '#1b2125');
     return {
-      theme, bg, bgRGB: rgbOf(bg), pos, neg,
-      fg: v('--ui-fg', '#e6e6e0'), muted: v('--ui-muted', '#9aa3a8'),
-      line: v('--ui-line', 'rgba(255,255,255,0.1)'), accent: v('--accent', '#5ac8fa'),
+      theme, bg, bgRGB: rgbOf(bg), well, wellRGB: rgbOf(well), pos, neg,
+      fg: v('--text-1', v('--ui-fg', '#ecebe4')), muted: v('--text-3', v('--ui-muted', '#939ca2')),
+      line: v('--line-2', v('--ui-line', 'rgba(255,255,255,0.1)')), line1: v('--line-1', 'rgba(255,255,255,0.06)'),
+      line3: v('--line-3', 'rgba(255,255,255,0.18)'),
+      font: v('--font-ui', '"Segoe UI", system-ui, sans-serif'),
+      hi: v('--hi', HI),   // HI: the light theme's is darker (docs/DESIGN.md, Data palette)
       cls: [neg, pos, ...EXTRA.map(rgbOf)],
-      stroke: theme === 'light' ? 'rgba(20,20,20,0.85)' : 'rgba(255,255,255,0.9)',
+      stroke: well,   // a point's rim: the surface, so neighbours and the field part round it
     };
   }
   const pal = () => (P || (P = palette()));
@@ -748,7 +775,8 @@ export function install(ctx) {
   function setRunning(v) {
     running = v;
     panel.classList.toggle('running', v);
-    for (const b of goBtns) b.innerHTML = b.classList.contains('nt-go-mini') ? (v ? '&#10074;&#10074;' : '&#9654;') : (v ? '&#10074;&#10074; Pause' : '&#9654; Play');
+    const ico = v ? icon('pause', '&#10074;&#10074;') : icon('play', '&#9654;');
+    for (const b of goBtns) b.innerHTML = b.classList.contains('nt-go-mini') ? ico : `${ico}<span>${v ? 'Pause' : 'Play'}</span>`;
   }
 
   function play() {
@@ -827,8 +855,8 @@ export function install(ctx) {
     // the attention panel show its words; part of the same commit, so undo brings the old names back
     // Names that are all vocabulary words were left by a word dataset: a sample without words drops them.
     if (d.words?.[i]) { net.meta = net.meta || {}; net.meta.tokenNames = d.words[i].slice(); }
-    else if (Array.isArray(net.meta?.tokenNames) && model.WORDS && net.meta.tokenNames.length
-      && net.meta.tokenNames.every(w => Object.hasOwn(model.WORDS, w))) delete net.meta.tokenNames;
+    else if (Array.isArray(net.meta?.tokenNames) && net.meta.tokenNames.length
+      && net.meta.tokenNames.every(w => isVocabWord(w, model))) delete net.meta.tokenNames;
     lastLoaded = i;
     if (!running) store.commit(`Load sample ${i + 1}`);
     else { dirty = true; kick(); }
@@ -893,11 +921,25 @@ export function install(ctx) {
   }
   const attnChoice = (net, t) => { const cs = attnChoices(net); return cs.find(c => c.value === t.space) || cs[0] || null; };
 
+  // The Settings summary with the speed, or without it when that doesn't fit the head (then an
+  // ellipsis). Measured while shown only: applyUi fits it again when the panel opens or unfolds.
+  let sumText = ['', ''];
+  function fitSum() {
+    if (setSum.textContent !== sumText[0]) setSum.textContent = sumText[0];
+    if (setSum.clientWidth && setSum.scrollWidth > setSum.clientWidth + 0.5) setSum.textContent = sumText[1];
+  }
+
   function syncControls() {
     const net = store.net, t = readSettings(net, model);
     const seq = model.DATASETS[t.dataset]?.kind === 'seq';
     for (const k of ['dataset', 'n', 'noise', 'seed', 'lr', 'batch', 'speed', 'initSeed', 'maps']) setVal(K(k), t[k]);
     setVal(K('loss'), net.meta?.loss === 'xent' ? 'xent' : 'mse');
+    // the folded Settings head sums them up (the rest, and the whole line, in its title)
+    const sum = `${t.n} pts · noise ${t.noise} · lr ${t.lr} · batch ${t.batch || 'all'}`;
+    sumText = [`${sum} · ${t.speed}×`, sum];
+    const tip = `${sumText[0]} · ${net.meta?.loss === 'xent' ? 'cross-entropy' : 'MSE'} loss · data seed ${t.seed}`;
+    if (setSum.parentElement.title !== tip) setSum.parentElement.title = tip;
+    fitSum();
     const maps = K('maps');
     maps.disabled = ro || seq;
     if (seq) maps.checked = false;   // shown off; the saved setting comes back with a plain dataset
@@ -962,6 +1004,7 @@ export function install(ctx) {
     const act = b.dataset.act;
     if (act === 'fold') fold();
     if (ro) return;
+    if (act === 'settings') { ui.settings = !ui.settings; saveUi(); applyUi(); }
     if (act === 'play') toggle();
     else if (act === 'step') step();
     else if (act === 'reset') reset();
@@ -997,7 +1040,16 @@ export function install(ctx) {
   function applyUi() {
     panel.hidden = !ui.open;
     panel.classList.toggle('folded', !!ui.fold);
-    $('.nt-fold').innerHTML = ui.fold ? '&#9656;' : '&#9662;';
+    const fb = $('.nt-fold');
+    if (fb.dataset.fold !== String(!!ui.fold)) {
+      fb.dataset.fold = String(!!ui.fold);
+      fb.innerHTML = ui.fold ? icon('chevron-down', '&#9662;') : icon('chevron-up', '&#9652;');
+      fb.title = ui.fold ? 'Unfold' : 'Fold to the header';
+      fb.setAttribute('aria-expanded', String(!ui.fold));
+    }
+    setSec.classList.toggle('folded', !ui.settings);
+    setSec.firstElementChild.setAttribute('aria-expanded', String(!!ui.settings));
+    fitSum();
     if (ui.x == null || ui.y == null) { panel.style.left = ''; panel.style.top = ''; panel.style.right = ''; }
     else { panel.style.left = ui.x + 'px'; panel.style.top = ui.y + 'px'; panel.style.right = 'auto'; }
     if (toolBtn) toolBtn.classList.toggle('on', !!ui.open);
@@ -1013,7 +1065,7 @@ export function install(ctx) {
   if (!ro && ctx.addButton) {
     try {
       toolBtn = ctx.addButton({
-        label: 'Train', icon: '&#8711;', group: 'train',
+        label: 'Train', icon: icon('train', '&#8711;'), group: 'train',
         title: 'Training panel (Space: play/pause, T: one step)',
         onClick: () => { ui.open = !ui.open; saveUi(); applyUi(); dirty = true; kick(); },
       });
@@ -1038,8 +1090,9 @@ export function install(ctx) {
   });
   store.on('values', () => { dirty = true; mapsDirty = true; kick(); });
   ctx.onTheme?.(() => { P = null; mapUrls.clear(); dirty = true; mapsDirty = true; kick(); });
-  ctx.onShow?.(v => { if (v) { dirty = true; mapsDirty = true; kick(); } });
+  ctx.onShow?.(v => { if (v) { dirty = true; mapsDirty = true; kick(); fitSum(); } });
   const sizer = new ResizeObserver(() => {
+    fitSum();   // the Settings head got its width (shown, unfolded) or a new one
     if (size.chart === chart.clientWidth && size.plot === plot.clientWidth) return;
     size.chart = chart.clientWidth;
     size.plot = plot.clientWidth;
@@ -1049,6 +1102,7 @@ export function install(ctx) {
   });
   sizer.observe(chart);
   sizer.observe(plot);
+  sizer.observe(setSum.parentElement);
 
   // ---------------------------------------------------------------- rendering
 
@@ -1110,7 +1164,8 @@ export function install(ctx) {
           : 'Accuracy: the share of points classified correctly';
       }
     }
-    mini.textContent = `${ro && ds ? (ds.label || t.dataset) + ' · ' : ''}epoch ${epoch} · ${lastEval ? fmtLoss(lastEval.loss) : '–'}`;
+    const m = `${ro && ds ? (ds.label || t.dataset) + ' · ' : ''}epoch ${epoch} · loss ${lastEval ? fmtLoss(lastEval.loss) : '–'}`;
+    if (mini.textContent !== m) { mini.textContent = m; mini.title = m; }
     const mis = !!ds && !ok;
     warn.hidden = !mis;
     if (mis) {
@@ -1144,27 +1199,35 @@ export function install(ctx) {
     const key = [w, hs.length, hs[hs.length - 1], hs[0], t.every, pal().theme].join('|');
     if (!w || key === chartKey) return;
     chartKey = key;
+    // On --well (CSS): a --text-1 curve (UI, not data) over a faint fill, the latest loss as a dot,
+    // a --line-1 baseline, and the scale's top and the epoch count in --text-3 (docs/DESIGN.md C5).
     const h = 56, p = pal(), g = sizeCanvas(chart, w, h);
     g.clearRect(0, 0, w, h);
-    g.font = '10px system-ui, "Segoe UI", sans-serif';
+    g.font = `11px ${p.font}`;
+    g.textBaseline = 'alphabetic';
     if (hs.length < 2) {
-      g.fillStyle = p.muted;
-      g.fillText(hs.length ? `loss ${fmtLoss(hs[0])} at epoch 0; press Play` : 'loss per epoch', 6, h / 2 + 3);
+      g.fillStyle = p.muted; g.textAlign = 'left';
+      g.fillText(hs.length ? `loss ${fmtLoss(hs[0])} at epoch 0: press Play` : 'loss per epoch', 10, h / 2 + 4);
       return;
     }
     let max = 0;
     for (const v of hs) max = Math.max(max, v);
     max = max || 1;
-    const pad = 4, top = 13;
-    const X = i => pad + i / (hs.length - 1) * (w - 2 * pad), Y = v => h - pad - v / max * (h - top - pad);
-    g.strokeStyle = p.line; g.lineWidth = 1;
-    g.beginPath(); g.moveTo(pad, h - pad + 0.5); g.lineTo(w - pad, h - pad + 0.5); g.stroke();
+    const px = 10, top = 20, base = h - 7;
+    const X = i => px + i / (hs.length - 1) * (w - 2 * px), Y = v => base - clamp(v / max, 0, 1) * (base - top);
+    g.strokeStyle = p.line1; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(px, base + 0.5); g.lineTo(w - px, base + 0.5); g.stroke();
     g.beginPath();
     hs.forEach((v, i) => (i ? g.lineTo(X(i), Y(v)) : g.moveTo(X(i), Y(v))));
-    g.strokeStyle = p.accent; g.lineWidth = 1.6; g.lineJoin = 'round'; g.stroke();
+    g.lineTo(X(hs.length - 1), base); g.lineTo(X(0), base); g.closePath();
+    g.fillStyle = p.fg; g.globalAlpha = 0.07; g.fill(); g.globalAlpha = 1;
+    g.beginPath();
+    hs.forEach((v, i) => (i ? g.lineTo(X(i), Y(v)) : g.moveTo(X(i), Y(v))));
+    g.strokeStyle = p.fg; g.lineWidth = 1.5; g.lineJoin = 'round'; g.lineCap = 'round'; g.stroke();
+    g.beginPath(); g.arc(X(hs.length - 1), Y(hs[hs.length - 1]), 2.5, 0, Math.PI * 2); g.fillStyle = p.fg; g.fill();
     g.fillStyle = p.muted;
-    g.textAlign = 'left'; g.fillText(fmtLoss(max), pad, 9);
-    g.textAlign = 'right'; g.fillText(`epoch ${(hs.length - 1) * t.every}`, w - pad, 9);
+    g.textAlign = 'left'; g.fillText(fmtLoss(max), px, 14);
+    g.textAlign = 'right'; g.fillText(`epoch ${(hs.length - 1) * t.every}`, w - px, 14);
     g.textAlign = 'left';
   }
 
@@ -1172,7 +1235,7 @@ export function install(ctx) {
   let tile = null;
   function heat(g, S, out, Kout, d, amax) {
     if (!tile) { const c = document.createElement('canvas'); c.width = c.height = GRID; tile = c.getContext('2d'); }
-    const p = pal(), bg = p.bgRGB, img = tile.createImageData(GRID, GRID), px = img.data;
+    const p = pal(), bg = p.wellRGB, img = tile.createImageData(GRID, GRID), px = img.data;
     for (let s = 0; s < GRID * GRID; s++) {
       let rgb, a;
       if (Kout === 1) {
@@ -1200,25 +1263,25 @@ export function install(ctx) {
 
   function axes(g, S, x0px, y0px) {
     const p = pal();
-    g.strokeStyle = p.muted; g.globalAlpha = 0.35; g.lineWidth = 1;
+    g.strokeStyle = p.line3; g.lineWidth = 1;
     g.beginPath();
     if (x0px > 0 && x0px < S) { g.moveTo(Math.round(x0px) + 0.5, 0); g.lineTo(Math.round(x0px) + 0.5, S); }
     if (y0px > 0 && y0px < S) { g.moveTo(0, Math.round(y0px) + 0.5); g.lineTo(S, Math.round(y0px) + 0.5); }
     g.stroke();
-    g.globalAlpha = 1;
   }
 
   // Range labels: x0 and x1 along the bottom edge, y1 and y0 down the left edge (y0 just above
-  // x0). The box is rarely centred on 0, so the bottom-left corner needs both of its values.
+  // x0). The box is rarely centred on 0, so the bottom-left corner needs both of its values. Inset
+  // clear of the plot's rounded corners.
   function ticks(g, S, dom) {
-    const p = pal(), f = v => (model.fmt ? model.fmt(v, 1) : v.toFixed(1));
-    g.font = '10px system-ui, "Segoe UI", sans-serif';
+    const p = pal(), f = v => (model.fmt ? model.fmt(v, 1) : v.toFixed(1)), m = 7;
+    g.font = `11px ${p.font}`;
     g.fillStyle = p.muted;
     g.textAlign = 'left';
-    g.fillText(f(dom.x0), 3, S - 3);
-    g.fillText(f(dom.y0), 3, S - 15);
-    g.fillText(f(dom.y1), 3, 11);
-    g.textAlign = 'right'; g.fillText(f(dom.x1), S - 3, S - 3);
+    g.fillText(f(dom.x0), m, S - m);
+    g.fillText(f(dom.y0), m, S - m - 13);
+    g.fillText(f(dom.y1), m, m + 9);
+    g.textAlign = 'right'; g.fillText(f(dom.x1), S - m, S - m);
     g.textAlign = 'left';
   }
 
@@ -1245,14 +1308,14 @@ export function install(ctx) {
         any = true;
       }
       if (!any) continue;
-      g.fillStyle = groups > 1 ? css(p.cls[c]) : p.fg;
+      g.fillStyle = groups > 1 ? css(p.cls[c]) : p.muted;   // regression: the data in --text-3 under the --text-1 fit
       g.fill();
       if (groups > 1) g.stroke();
     }
     if (hl >= 0 && hl < d.n) ring(g, pts[2 * hl], pts[2 * hl + 1], 6, p.fg);
   }
 
-  function ring(g, x, y, r = 7, color = HI) {
+  function ring(g, x, y, r = 7, color = pal().hi) {
     if (!Number.isFinite(x) || !Number.isFinite(y)) return;
     g.beginPath();
     g.arc(x, y, r, 0, Math.PI * 2);
@@ -1273,10 +1336,10 @@ export function install(ctx) {
     if (!S) return;
     const p = pal(), T = d.T, L = net.layers.length, fw = store.state.fwd;
     const f2 = v => (model.fmt ? model.fmt(v, 2) : v.toFixed(2));
-    const font = (px, w = '') => `${w}${px}px system-ui, "Segoe UI", sans-serif`;
+    const font = (px, w = '') => `${w}${px}px ${p.font}`;
     if (!inOk) {
       const g = sizeCanvas(plot, S, 64);
-      g.fillStyle = p.bg; g.fillRect(0, 0, S, 64);
+      g.fillStyle = p.well; g.fillRect(0, 0, S, 64);
       g.fillStyle = p.muted; g.font = font(12);
       g.fillText('The network does not fit this dataset', 10, 36);
       setAxes('seq', []);
@@ -1291,8 +1354,8 @@ export function install(ctx) {
     // token names (net.meta.tokenNames, docs/NN_LENS.md) replace t1…tn; the row labels widen to fit
     const names = Array.from({ length: T }, (_, i) => tokenLabel(net, i));   // focus.js: its name, else t1, t2, ...
     const g0 = plot.getContext('2d');
-    g0.font = font(10);
-    const pad = 8, lw = Math.min(64, Math.max(20, Math.ceil(Math.max(...names.map(s => g0.measureText(s).width))) + 7)), gap = 9, head = 30, minOut = 66;
+    g0.font = font(11);
+    const pad = 10, lw = Math.min(64, Math.max(20, Math.ceil(Math.max(...names.map(s => g0.measureText(s).width))) + 7)), gap = 9, head = 30, minOut = 66;
     const who = i => (names[i] === `t${i + 1}` ? `token ${i + 1}` : `${names[i]} (token ${i + 1})`);
     const fit = k => Math.floor((S - 2 * pad - lw - 2 * gap - minOut) / Math.max(1, k));
     let showX = true, c = Math.min(36, fit(dIn + nA));
@@ -1300,13 +1363,20 @@ export function install(ctx) {
     c = Math.max(12, c);
     const H = pad + head + T * c + 26;
     const g = sizeCanvas(plot, S, H);
-    g.fillStyle = p.bg; g.fillRect(0, 0, S, H);
+    g.fillStyle = p.well; g.fillRect(0, 0, S, H);
     g.textBaseline = 'middle';
     const y0 = pad + head;
     const xX = pad + lw, xA = showX ? xX + dIn * c + gap : xX, xO = xA + nA * c + (nA || showX ? gap : 0), wO = S - pad - xO;
     const numPx = c >= 30 ? 10 : c >= 25 ? 9 : 8;   // cell values, when they fit in the cell
-    const title = (x, s) => { g.font = font(10.5, '600 '); g.fillStyle = p.fg; g.textAlign = 'left'; g.fillText(s, x, pad + 5); };
-    const colLab = (x, s) => { g.font = font(9.5); g.fillStyle = p.muted; g.textAlign = 'center'; g.fillText(s, x, pad + 20); };
+    const title = (x, s) => { g.font = font(11, '600 '); g.fillStyle = p.fg; g.textAlign = 'left'; g.fillText(s, x, pad + 5); };
+    const colLab = (x, s) => { g.font = font(10); g.fillStyle = p.muted; g.textAlign = 'center'; g.fillText(s, x, pad + 20); };
+    // a cell's fill: colorFor's ramp with its alpha capped at 0.72, so the value on it stays --text-1
+    // (as the matrix panel's cells, docs/DESIGN.md B3)
+    const cellFill = (v, max) => {
+      if (!Number.isFinite(v)) return 'rgba(128,128,128,0.25)';
+      const rgb = v >= 0 ? p.pos : p.neg, a = Math.min(0.72, 0.12 + 0.88 * Math.min(1, Math.abs(v) / (max || 1)));
+      return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${a.toFixed(3)})`;
+    };
     const box = (x, y, v, max, txt, masked) => {
       if (masked) {
         g.save();
@@ -1317,8 +1387,8 @@ export function install(ctx) {
         g.stroke();
         g.restore();
       } else {
-        g.fillStyle = Number.isFinite(v) ? colorFor(v, max, p.theme) : 'rgba(128,128,128,0.25)';
-        g.fillRect(x + 1, y + 1, c - 2, c - 2);
+        g.fillStyle = cellFill(v, max);
+        g.beginPath(); g.roundRect(x + 1, y + 1, c - 2, c - 2, Math.min(4, c / 6)); g.fill();
       }
       const s = masked ? '–' : txt;
       g.font = font(numPx);
@@ -1328,7 +1398,7 @@ export function install(ctx) {
       }
     };
     // row labels: token t
-    g.font = font(10); g.fillStyle = p.muted; g.textAlign = 'right';
+    g.font = font(11); g.fillStyle = p.muted; g.textAlign = 'right';
     const clip = (s, w) => { if (g.measureText(s).width <= w) return s; while (s.length > 1 && g.measureText(s + '…').width > w) s = s.slice(0, -1); return s + '…'; };
     for (let i = 0; i < T; i++) g.fillText(clip(names[i], lw - 7), xX - 5, y0 + i * c + c / 2);
     // x_t
@@ -1346,7 +1416,7 @@ export function install(ctx) {
     // A: rows are queries (this token), columns the keys it reads
     if (ch) {
       title(xA, net.layers[ch.l].heads > 1 ? `A, head ${ch.hd + 1}` : 'A (attention)');
-      g.font = font(9.5);
+      g.font = font(10);
       for (let j = 0; j < T; j++) colLab(xA + j * c + c / 2, clip(names[j], c - 2));
       for (let i = 0; i < T; i++) for (let j = 0; j < T; j++) {
         const a = A?.[i]?.[j], masked = causal && j > i, x = xA + j * c, y = y0 + i * c;
@@ -1367,24 +1437,24 @@ export function install(ctx) {
       g.textAlign = 'left';
       for (let i = 0; i < T; i++) {
         const top = y0 + i * c;
-        if (i) { g.strokeStyle = p.line; g.lineWidth = 1; g.beginPath(); g.moveTo(xO, top + 0.5); g.lineTo(xO + wO, top + 0.5); g.stroke(); }
+        if (i) { g.strokeStyle = p.line1; g.lineWidth = 1; g.beginPath(); g.moveTo(xO, top + 0.5); g.lineTo(xO + wO, top + 0.5); g.stroke(); }
         const w = got[i], y = want[i], hit = !!w && w === y;
         const mark = w && y ? (hit ? '✓' : '✗') : '';
-        g.font = font(10.5, '600 ');
+        g.font = font(11, '600 ');
         g.fillStyle = w && y && !hit ? bad : p.fg;
         g.textAlign = 'left';
         g.fillText(clip(w || '?', wO - 14), xO + 2, two ? top + c / 2 - 5 : top + c / 2);
         g.textAlign = 'right';
         g.fillText(mark, xO + wO, two ? top + c / 2 - 5 : top + c / 2);
         if (two) {
-          g.font = font(9); g.fillStyle = p.muted; g.textAlign = 'left';
+          g.font = font(10); g.fillStyle = p.muted; g.textAlign = 'left';
           g.fillText(clip(`y ${y || '–'}`, wO - 2), xO + 2, top + c / 2 + 6);
         }
         const v = yh.slice(i * dOut, (i + 1) * dOut).map(a => (Number.isFinite(a) ? f2(a) : '?')).join(', ');
         seqCells.push({ x: xO, y: top, w: wO, h: c, text: `${who(i)}: ŷ = (${v}), nearest word “${w || '?'}”; target “${y || 'none'}”${mark ? ' ' + mark : ''}` });
       }
     } else if (!ok || wO < 30) {
-      g.font = font(10); g.fillStyle = p.muted; g.textAlign = 'left';
+      g.font = font(11); g.fillStyle = p.muted; g.textAlign = 'left';
       g.fillText(ok ? '' : 'outputs don\'t fit', xO, y0 + c / 2);
     } else {
       const yh = outs.map(q => fw?.node?.[q.id]?.a), ys = outs.map(q => q.target);
@@ -1394,12 +1464,12 @@ export function install(ctx) {
       g.strokeStyle = p.muted; g.globalAlpha = 0.45; g.lineWidth = 1;
       g.beginPath(); g.moveTo(Math.round(x0) + 0.5, y0); g.lineTo(Math.round(x0) + 0.5, y0 + T * c); g.stroke();
       g.globalAlpha = 1;
-      g.font = font(9); g.fillStyle = p.muted;
+      g.font = font(10); g.fillStyle = p.muted;
       g.textAlign = 'left'; g.fillText(`−${f2(vmax)}`, xO, pad + 20);
       g.textAlign = 'right'; g.fillText(f2(vmax), xO + wO, pad + 20);
       const lh = (c - 4) / dOut;
       for (let i = 0; i < T; i++) {
-        if (i) { g.strokeStyle = p.line; g.beginPath(); g.moveTo(xO, y0 + i * c + 0.5); g.lineTo(xO + wO, y0 + i * c + 0.5); g.stroke(); }
+        if (i) { g.strokeStyle = p.line1; g.lineWidth = 1; g.beginPath(); g.moveTo(xO, y0 + i * c + 0.5); g.lineTo(xO + wO, y0 + i * c + 0.5); g.stroke(); }
         for (let f = 0; f < dOut; f++) {
           const k = i * dOut + f, a = yh[k], y = ys[k], ly = y0 + i * c + 2 + f * lh;
           if (Number.isFinite(a)) {
@@ -1411,7 +1481,7 @@ export function install(ctx) {
           }
           if (typeof y === 'number' && Number.isFinite(y)) {
             const xy = X(y);
-            g.strokeStyle = HI; g.lineWidth = 2.5;
+            g.strokeStyle = p.hi; g.lineWidth = 2.5;
             g.beginPath(); g.moveTo(xy, ly - 0.5); g.lineTo(xy, ly + lh + 0.5); g.stroke();
           }
           seqCells.push({ x: xO, y: ly, w: wO, h: lh, text: `${who(i)}, output ${f + 1}: ŷ = ${Number.isFinite(a) ? f2(a) : '?'}, y = ${typeof y === 'number' ? f2(y) : 'none'}` });
@@ -1420,14 +1490,14 @@ export function install(ctx) {
     }
     // legend + this sample's loss
     const ly = y0 + T * c + 14;
-    g.font = font(10); g.textAlign = 'left';
+    g.font = font(11); g.textAlign = 'left';
     let x = pad;
     if (wordsOut) {
       g.fillStyle = p.muted; g.fillText('ŷ: nearest word · y: target', x, ly);
     } else if (ok) {
       g.fillStyle = css(p.pos); g.fillRect(x, ly - 4, 12, 8); x += 16;
       g.fillStyle = p.muted; g.fillText('output ŷ', x, ly); x += g.measureText('output ŷ').width + 12;
-      g.strokeStyle = HI; g.lineWidth = 2.5; g.beginPath(); g.moveTo(x + 2, ly - 6); g.lineTo(x + 2, ly + 6); g.stroke(); x += 8;
+      g.strokeStyle = p.hi; g.lineWidth = 2.5; g.beginPath(); g.moveTo(x + 2, ly - 6); g.lineTo(x + 2, ly + 6); g.stroke(); x += 8;
       g.fillStyle = p.muted; g.fillText('target y', x, ly); x += g.measureText('target y').width + 12;
     }
     const bl = store.state.bwd?.loss;
@@ -1451,10 +1521,10 @@ export function install(ctx) {
     if (d && d.kind === 'seq') { drawSeq(net, t, d, ok, inOk); return; }
     seqCells = [];
     const p = pal(), g = sizeCanvas(plot, S, S);
-    g.fillStyle = p.bg;
+    g.fillStyle = p.well;
     g.fillRect(0, 0, S, S);
     if (!d || !d.dom) {
-      g.fillStyle = p.muted; g.font = '12px system-ui, sans-serif';
+      g.fillStyle = p.muted; g.font = `12px ${p.font}`;
       g.fillText('Plots need a dataset with 1 or 2 inputs', 10, S / 2);
       setAxes('', []);
       return;
@@ -1491,15 +1561,15 @@ export function install(ctx) {
               const X = sx(d.curve[i]), Y = clamp(sy(out[i * d.K + k]), -S, 2 * S);
               i ? g.lineTo(X, Y) : g.moveTo(X, Y);
             }
-            g.strokeStyle = d.K > 1 ? css(p.cls[k % p.cls.length]) : p.accent;
-            g.lineWidth = 2.4; g.lineJoin = 'round';
+            g.strokeStyle = d.K > 1 ? css(p.cls[k % p.cls.length]) : p.fg;
+            g.lineWidth = 2; g.lineJoin = 'round';
             g.stroke();
           }
         }
       }
       if (inOk) {
         const xin = model.nodesIn(net, 0)[0].value;
-        g.setLineDash([4, 4]); g.strokeStyle = HI; g.lineWidth = 1.2;
+        g.setLineDash([4, 4]); g.strokeStyle = p.hi; g.lineWidth = 1.2;
         g.beginPath(); g.moveTo(sx(xin), 0); g.lineTo(sx(xin), S); g.stroke();
         g.setLineDash([]);
         const outs = L > 1 ? model.nodesIn(net, L - 1) : [];

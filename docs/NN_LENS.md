@@ -27,8 +27,8 @@ sets them from a word dataset's sentence (docs/NN_CONTRACT.md, the train.js hand
   a string or a finite number whose trimmed text is not empty and is not that slot's own default
   `t{i+1}` (1-based: `'t2'` in slot 1 is unnamed, `'t2'` in slot 0 is a name).
   `tokenLabel(net, t)` is the name, else `t{t+1}`.
-- **Every reader goes through these two**: the canvas token boxes (cut to 8 characters, the full
-  name in the tooltip), the matrix panel's headers and trace card, the inspector cards, the Train
+- **Every reader goes through these two**: the canvas token labels (cut to 8 characters, the full
+  name in the box's tooltip), the matrix panel's headers and trace card, the inspector cards, the Train
   plot's row labels, the attention panel, the lens bar's token chips and the Explain captions.
   In KaTeX a name is `\text{…}`; an unnamed token stays `t_{i}`.
 - **Renaming** by hand happens in the attention panel only. `ctx.attnviz.rename(i, name)` collapses
@@ -137,25 +137,30 @@ head: `any` is false, every weight 1 and `rows` / `heads` / `groups` null.
 
 ## The lens bar (lens.js)
 
-The bar floats at the bottom left of `#nn-stage` and shows only the controls that apply:
+The bar floats at the bottom left of `#nn-stage` in one row and shows only the controls that
+apply. It starts hidden: L or the toolbar's Lens button shows it.
 - **Focus** menu: Whole net, then every layer, the input included, each followed by its parts
   (`Q`, `K`, `V`; `1 scores`, `2 softmax`, `3 mix`). `[` and `]` skip the input.
-- **Token** (2+ tokens): `all`, then a chip per token (its name cut to 10 characters, or t_n).
-- **Head** (2+ heads): `all`, 1, 2, ...
+- **Token** (2+ tokens): `all`, then a chip per token (its name cut to 10 characters, or t_n);
+  the followed token's chip wears the HI ring. Past five tokens it is a menu instead.
+- **Head** (2+ heads): `all`, 1, 2, ... (heads 1 to 3 with their colour swatch).
 - **Edges**: a show / hide toggle per edge type when the net has two or more (W, A, fixed), and
   threshold sliders: |w| from 0 to the largest |w| rounded up to 0.1, A from 0 to 1. A slider is
   disabled while its edge type is hidden.
 - **Clear**: the default lens.
 
-Clicking the active token or head chip turns it off. The toolbar's **Lens** button shows or hides
-the bar and carries a dot while the lens is not the default. The bar is hidden in the clean view
+Short of room (the stage, or a floating panel reaching down beside the bar), the thresholds move
+into a "more" menu that opens above the bar (its button carries a dot while a threshold is set);
+only if even that doesn't fit does the bar wrap. Clicking the active token or head chip turns it
+off. The toolbar's **Lens** button shows or hides the bar and carries a HI dot in its corner while
+the lens is not the default (its tooltip then says what the lens does). The bar is hidden in the clean view
 (H) and never built in the audience window; while it is not showing, its keys toast what they
 did. UI state: localStorage `mathboard.nn.lens` = `{ open }`.
 
 ## How the other modules draw the lens
 
 - **Canvas (view.js)** dims and hides as in the table above and outlines the focused layer's
-  header and band. When nothing is hovered or stepped, a followed token shows its row of A on the
+  lane. When nothing is hovered or stepped, a followed token shows its row of A on the
   attention edges (only head h's when `head` is set), as hovering it would.
 - **Matrix panel (matrix.js)** applies the lens in place, without a rebuild. focus folds every
   other layer to a one-line summary (click a summary to focus that layer), scrolls the focused
@@ -214,15 +219,18 @@ ctx.attnviz = {          // also the panel element's .nnAttn
 |---|---|
 | arcs | who reads whom: queries left, keys right, a line per pair as thick as A_ij, a colour per head (up to three heads together; with more, head 1 unless one is picked). Masked pairs and pairs the lens hides get no line; pairs outside its emphasis fade. Hover a token to see its lines alone with their A_ij; click it to follow it. |
 | dots | why: q_i and every k_j as arrows from the origin (a number line when d_h = 1, a chosen pair of dimensions when d_h > 2), q's line with each key's shadow on it, and a table of q·k, s = q·k × scale and A = softmax(s) as bars. Masked keys are dashed. Holds the scale slider. |
-| mix | what comes out: the v_j, their shaded convex hull, the A_ij v_j tip-to-tail and the resulting z_i (a staircase on a number line when d_h = 1). Holds Send to 3D. |
-| heat | the numbers: S and A of each head as heatmaps (with numbers when the cells are big enough), masked cells hatched, the followed query's row ringed. Hover a cell for what it means; click a row to follow that query. |
+| mix | what comes out: the v_j, their shaded convex hull, the A_ij v_j tip-to-tail and the resulting z_i (a staircase on a number line when d_h = 1). Holds the scale slider and Send to 3D. |
+| heat | the numbers: S and A of each head as heatmaps (with numbers when the cells are big enough), masked cells hatched, the followed query's row ringed. Hover a cell for what it means (a tooltip); click a row to follow that query. |
 
-- **Header**: mode buttons, a layer menu (2+ attention layers) and ×. Drag it to move the panel,
+- **Header**: mode buttons, a layer menu (2+ attention layers), a help icon and ×. The help icon's
+  title says how to read the mode and use the panel. Drag the header to move the panel,
   double-click it to put the panel back; the corner grip sets the width. Under the drawing: the
-  mode's formula in KaTeX with live numbers, and a one-line note.
+  mode's formula in KaTeX with live numbers, and a note when something needs saying (masked keys,
+  what the lens hides, the plane of a wider head, a hovered token in arcs).
 - **Picks row**: query chips (with `all` in arcs and heat) and, with 2+ heads, head chips in
-  their colours.
-- **Scale slider** (dots; the temperature control): sets the layer's `scale` on a log scale from
+  their colours. The followed token or head has an HI ring; one shown only because dots and mix
+  need one has a dashed ring.
+- **Scale slider** (dots and mix; the temperature control): sets the layer's `scale` on a log scale from
   2⁻⁴ to 2⁴ times the default 1/√d_h. Larger sharpens A, smaller flattens it. Dragging calls
   `store.touch()`, releasing commits; within 0.03 (in log₂) of the default it stores null (the
   default). The 1/√d button resets it.
@@ -249,10 +257,11 @@ tour = null | { i, n, title, text }   // title and text: plain text with $…$ K
 ```
 
 - The caption card renders `tour` alone, so an audience window only needs the state. It sits along
-  the bottom or the top edge of the stage where it hides the least, trying three widths. Costs:
+  the bottom or the top edge of the stage (or just above a shown lens bar) where it hides the
+  least, trying three widths up to 600 px. Costs:
   each neuron it covers (4 on the focused layer and the one before it, else 1), each layer header
-  (2, the focused layer's 8), each floating panel by the share covered (the attention panel 12, a
-  folded Train panel 1, others 6), the attention panel's header 3 more, then the net's box. In the clean view and the audience its
+  (2, the focused layer's 8), each floating panel by the share covered (the attention panel and
+  the lens bar 12, a folded Train panel 1, others 6), the attention panel's header 3 more, then the net's box. In the clean view and the audience its
   buttons are hidden.
 - `buildSteps(net, M, fwd?, { stages }?) -> step[]` is a pure named export (`stages` defaults to
   focus.js's). A step is `{ key, title(env), text(env), lens: { focus?, token?, head? }, viz?,

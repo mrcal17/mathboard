@@ -146,7 +146,9 @@ Differences from the spec above:
   - A causal next-word task was left out on purpose: with mse on word vectors, positions whose next
     word the grammar leaves open would need "don't care" targets (and so no backward pass for any
     sample), a softmax over the vocabulary doesn't fit the 40-node limit, and a grammar that fixes
-    every next word has only a handful of sentences.
+    every next word has only a handful of sentences. The next-word task came later, with one-hot
+    words and a softmax over the vocabulary, as its own dataset `nl_next` and the `tiny_lm` preset
+    (174 nodes, the one preset over the limit, made for the Flow view): docs/NN_FLOW.md.
 - **Presets** (group Attention, after Sequences): `words` (hand-set), `pronouns`, `agreement`,
   `attention`, `causal`, `causal_rot`, `multihead` and `transformer`.
   - The **transformer has 2 tokens**, because 3 tokens would need 54 nodes against the menu's
@@ -176,13 +178,15 @@ Differences from the spec above:
 ## Display expectations
 
 **View**
-- Token layers draw their nodes as token blocks: a rounded box per token labelled t₁…tₙ, with
-  group bands such as Q / K / V.
+- Token layers draw their nodes as token blocks: a soft rounded box per token, under a group
+  letter such as Q / K / V. The labels t₁…tₙ show once per row, left of the first token layer;
+  any other box shows its label while it is hovered or followed.
 - An attention layer draws data-dependent edges from V tokens to Z tokens, with width and
   opacity set by `A[i][j]`, plus a small n×n heatmap of `A` in its header.
 - Hovering a Z token shows its attention row.
 - Hovering or selecting a tied edge lights every edge in its tie group.
-- Fixed edges are dashed and can't be edited.
+- Fixed edges are dotted and grey (they are not parameters, so they get no weight colour) and
+  can't be edited.
 
 **Matrix panel**
 - Token layers show activations as `tokens × d` matrices (X, Q, K, V, Z, H) instead of flat
@@ -217,10 +221,10 @@ Everything above is in place. Differences and additions:
   next neuron of a row. Q, K, V is then 9 rows high instead of an 18-neuron column, and in a
   1600 × 900 window with the Train panel and a 40% matrix panel these presets fit at 0.63 to 0.73
   zoom instead of about 0.45. Later layers, and every other preset, stay columns; **Layout** makes
-  columns. A layer of one token draws no token boxes: its group band is enough.
-- **Heatmap and attention edges.** The heatmap sits just above the attention layer's header, one
-  n×n block per head. Attention edges run V_j,f -> Z_i,f, one per feature; causally masked pairs
-  have none, and their heatmap cells are hatched.
+  columns. A layer of one token draws no token boxes: its group letter is enough.
+- **Heatmap and attention edges.** The heatmap sits in the attention layer's header, left of its
+  name, one n×n block per head. Attention edges run V_j,f -> Z_i,f, one per feature; causally
+  masked pairs have none, and their heatmap cells are hatched.
 - **Hover.** Hovering a token box, a heatmap cell or an attention edge sets the shared hover
   `{ kind: 'token', layer, t, g?, h? }` (docs/NN_CONTRACT.md), so the matrix panel, the cards and
   the audience window follow it. A Z token or a query token shows its row of A, a key or value

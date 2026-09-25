@@ -225,34 +225,84 @@ export function createScene(container) {
   // ------------------------------------------------------------------ axes + grid
   function niceStep() { return E <= 1.5 ? 0.25 : E <= 3 ? 0.5 : E <= 8 ? 1 : E <= 16 ? 2 : E <= 40 ? 5 : E <= 80 ? 10 : E <= 200 ? 25 : 100; }
 
+  // The XY floor: one line per tick step (so lines meet the ticks at every extent), shaded by
+  // vertex colour from full strength near the middle to almost the page colour at the corners,
+  // so the floor has no hard square edge. Built once per theme / extent change.
+  function floorGrid(t, step, bg) {
+    const n = Math.floor(E / step + 1e-9), K = 16, pts = [], cols = [];
+    const minor = new THREE.Color(t.grid), major = new THREE.Color(t.gridMajor), c = new THREE.Color();
+    const r0 = 0.8 * E, r1 = Math.SQRT2 * E;
+    const shade = (base, x, y) => {
+      const k = Math.min(1, Math.max(0, (Math.hypot(x, y) - r0) / (r1 - r0)));
+      return c.copy(base).lerp(bg, 0.85 * k * (2 - k)); // ease out: the fade starts gently
+    };
+    for (let i = -n; i <= n; i++) {
+      const a = i * step, base = i === 0 ? major : minor;
+      for (let k = 0; k < K; k++) {
+        const b0 = -E + (2 * E * k) / K, b1 = -E + (2 * E * (k + 1)) / K;
+        for (const [x0, y0, x1, y1] of [[a, b0, a, b1], [b0, a, b1, a]]) {
+          pts.push(x0, y0, 0, x1, y1, 0);
+          shade(base, x0, y0).toArray(cols, cols.length);
+          shade(base, x1, y1).toArray(cols, cols.length);
+        }
+      }
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+    g.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
+    const m = new THREE.LineBasicMaterial({ vertexColors: true });
+    owned.axes.push(g, m);
+    return new THREE.LineSegments(g, m);
+  }
+
+  // An axis seen end-on (Front, Side, Top) would pile its ticks and name onto the origin: hide
+  // them while it points at the camera. Cheap, and it only touches the labels when that flips.
+  let axisLabels = [[], [], []], endOn = [false, false, false];
+  const toCamera = new THREE.Vector3();
+  function hideEndOnAxes() {
+    toCamera.copy(camera.position).sub(controls.target).normalize();
+    for (let i = 0; i < 3; i++) {
+      const end = Math.abs(toCamera.getComponent(i)) > 0.985;
+      if (end === endOn[i]) continue;
+      endOn[i] = end;
+      for (const o of axisLabels[i]) o.visible = !end;
+    }
+  }
+
   function buildAxes() {
     clear(axes, owned.axes);
-    const t = THEMES[theme], step = niceStep(), s = E / 6;
-    scene.background = new THREE.Color(t.bg);
+    axisLabels = [[], [], []];
+    endOn = [false, false, false];
+    const t = THEMES[theme], step = niceStep(), s = E / 6, bg = new THREE.Color(t.bg);
+    scene.background = bg;
 
-    if (showGrid) {
-      const grid = new THREE.GridHelper(2 * E, Math.round((2 * E) / step), t.gridMajor, t.grid);
-      grid.rotation.x = Math.PI / 2; // GridHelper lies in XZ; we want the XY floor
-      axes.add(grid);
-      owned.axes.push(grid.geometry, grid.material);
-    }
+    if (showGrid) axes.add(floorGrid(t, step, bg));
 
+    // Positive half-axes end in a small head; in 3D the negative halves are quieter, which says
+    // which way each axis points at a glance. Neither is data, so both stay neutral.
     const axisMat = new THREE.MeshBasicMaterial({ color: t.axis });
-    owned.axes.push(axisMat);
-    const L = E * 1.1;
+    const negMat = showZ ? new THREE.MeshBasicMaterial({ color: new THREE.Color(t.axis).lerp(bg, 0.45) }) : axisMat;
+    owned.axes.push(axisMat, negMat);
+    const L = E * 1.1, r = 0.012 * s, headLen = 0.24 * s, o = new THREE.Vector3();
     const dirs = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)];
     dirs.forEach((d, i) => {
       if (i === 2 && !showZ) return;
-      const m = new THREE.Mesh(GEO.cyl, axisMat);
-      m.scale.set(0.012 * s, 2 * L, 0.012 * s);
-      m.quaternion.setFromUnitVectors(Y_AXIS, d);
-      axes.add(m);
-      label(axes, d.clone().multiplyScalar(L + 0.35 * s), 'xyz'[i], 'g-axis');
+      const plus = new THREE.Mesh(GEO.cyl, axisMat), minus = new THREE.Mesh(GEO.cyl, negMat), head = new THREE.Mesh(GEO.cone, axisMat);
+      placeAlong(plus, o, d, L - headLen, r);
+      placeAlong(minus, o, d.clone().negate(), L, r);
+      placeAlong(head, d.clone().multiplyScalar(L - headLen), d, headLen, 0.055 * s);
+      axes.add(plus, minus, head);
+      axisLabels[i].push(label(axes, d.clone().multiplyScalar(L + 0.35 * s), 'xyz'[i], 'g-axis'));
       for (let n = -Math.floor(E / step) * step; n <= E + 1e-9; n += step) {
         if (Math.abs(n) < 1e-9) continue;
         const pos = d.clone().multiplyScalar(n);
-        if (i === 2) pos.x -= 0.25 * s; else pos.z -= 0.28 * s;
-        label(axes, pos, String(+(Math.round(n / step) * step).toFixed(2)), 'g-tick');
+        // x, y: just below the floor; in 2D (looking straight down) beside the axis instead. z is
+        // upright on screen, so its labels sit on the axis and CSS moves them right (.g-tz).
+        if (i < 2 && showZ) pos.z -= 0.28 * s;
+        else if (i === 0) pos.y -= 0.3 * s;
+        else if (i === 1) pos.x -= 0.3 * s;
+        const cls = `g-tick${i === 2 ? ' g-tz' : ''}${n < 0 && showZ ? ' neg' : ''}`;
+        axisLabels[i].push(label(axes, pos, String(+(Math.round(n / step) * step).toFixed(2)), cls));
       }
     });
   }
@@ -452,6 +502,7 @@ export function createScene(container) {
     for (const fn of frameHooks) fn(dt, t / 1000);
     for (const fn of contentHooks) fn(dt, t / 1000);
     controls.update();
+    hideEndOnAxes();
     renderer.render(scene, camera);
     labelRenderer.render(scene, camera);
     requestAnimationFrame(frame);

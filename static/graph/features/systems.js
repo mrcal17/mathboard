@@ -1406,10 +1406,11 @@ function installRenderers(registerRenderer) {
 const CSS = `
 .g-label.sy-sm { font-size: 16px; }
 `;
-const HELP = `<p><code>rowpicture(A, b)</code> <code>colpicture(A, b)</code> <code>eliminate(A, b, k)</code> (k: step slider)
+const HELP = `<h4 class="ui-overline">Systems and subspaces</h4>
+<p><code>rowpicture(A, b)</code> <code>colpicture(A, b)</code> <code>eliminate(A, b, k)</code> (k: step slider)
 <code>lstsq(A, b)</code> <code>subspaces(A)</code> or <code>subspaces(A, t)</code> <code>gramschmidt(u, v, w, k)</code>
 <code>basis(b1, b2)</code> <code>coords(v, B)</code></p>
-<p>Readouts: <code>solve rref rank nullspace colspace rowspace leftnull eig svd qr lu charpoly tr</code></p>`;
+<p>Readouts: ${'solve rref rank nullspace colspace rowspace leftnull eig svd qr lu charpoly tr'.split(' ').map((f) => `<code>${f}</code>`).join(' ')}</p>`;
 
 // Which argument is the step slider, and its natural range.
 const STEP_ARG = {

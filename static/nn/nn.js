@@ -9,7 +9,7 @@
 // Audience windows (?audience) are read-only mirrors. graph/features/lecture.js carries the
 // presenter's state over its BroadcastChannel using window.mathboardNet (see the end of start()).
 
-const MODULES = ['view', 'inspector', 'matrix', 'train', 'lens', 'attnviz', 'tour', 'view3d', 'surf3d'];
+const MODULES = ['view', 'inspector', 'matrix', 'train', 'lens', 'attnviz', 'tour', 'view3d', 'surf3d', 'flow'];
 const STORE_KEY = 'mathboard.nn';
 const DEFAULT_PRESET = 'xor';
 const PRESET_SEED = 1;                     // presets always build the same weights; Randomize reshuffles
@@ -43,14 +43,56 @@ const safe = (fn, ...args) => {
   try { return fn(...args); } catch (err) { console.error('[nn] handler failed:', err); }
 };
 
+// Line icons from static/icons.js (docs/DESIGN.md, Icons). An addButton icon is an icon name, an
+// <svg> string or older glyph HTML; a module button whose label LABEL_ICON knows gets that line
+// icon in place of a glyph, so the whole bar draws one set.
+const ICONS = window.mathboardIcons || null;
+const LABEL_ICON = { Weights: 'weights', Lens: 'lens', '3D': 'layers', Train: 'train', Attention: 'attention', '3D plots': 'surface', Explain: 'explain' };
+const svgIcon = (name, size = 16) => ICONS?.svg(name, { size }) || '';
+function iconHtml(icon, label) {
+  if (typeof icon === 'string' && /^[a-z][a-z-]*$/.test(icon)) return svgIcon(icon);
+  if (typeof icon === 'string' && icon.trim().startsWith('<svg')) return icon;
+  const named = LABEL_ICON[String(label).replace(/<[^>]*>/g, '').trim()];
+  return (named && svgIcon(named)) || icon || '';
+}
+// An icon-only button's label and icon: the glyph stands in if the icons did not load.
+const iconOnly = (name, glyph) => (svgIcon(name) ? { label: '', icon: name } : { label: glyph });
+const caret = () => `<span class="nn-caret" aria-hidden="true">${svgIcon('chevron-down', 12) || '&#9662;'}</span>`;
+
 let toastTimer = 0;
 function toast(msg, ms = 2400) {
   const t = $('toast');
   if (!t) return;
   t.textContent = msg;
   t.hidden = false;
+  placeToast(t);
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { t.hidden = true; }, ms);
+}
+// In the Net tab the toast is centred over the stage (not the window), above any bar docked at the
+// stage's bottom under it: the lens bar, the 3D and Flow views' bars, a card parked there. A bar is
+// a shown element of the stage (or of a view covering it) that ends near the bottom and is less
+// than 40% of the stage tall. nn.css reads the variables, only while the tab shows.
+function placeToast(t) {
+  const s = el.stage.getBoundingClientRect(), b = document.body.style;
+  if (!visible() || s.width < 50) {
+    for (const k of ['--nn-toast-x', '--nn-toast-bottom', '--nn-toast-max']) b.removeProperty(k);
+    return;
+  }
+  const cx = s.left + s.width / 2, max = Math.max(200, s.width - 40);
+  const half = Math.min(t.offsetWidth, max) / 2;
+  let bottom = 36;
+  for (const c of el.stage.querySelectorAll(':scope > *, :scope > * > *')) {
+    const r = c.getBoundingClientRect();
+    if (!r.width || !r.height || r.height > 0.4 * s.height || r.bottom < s.bottom - 60 || r.bottom > s.bottom + 1) continue;
+    if (r.right < cx - half || r.left > cx + half) continue;
+    const cs = getComputedStyle(c);
+    if (cs.visibility === 'hidden' || cs.position === 'static' || +cs.opacity === 0) continue;
+    bottom = Math.max(bottom, innerHeight - r.top + 12);
+  }
+  b.setProperty('--nn-toast-x', `${Math.round(cx)}px`);
+  b.setProperty('--nn-toast-bottom', `${Math.round(bottom)}px`);
+  b.setProperty('--nn-toast-max', `${Math.round(max)}px`);
 }
 
 function download(href, name) {
@@ -127,6 +169,7 @@ async function start({ model, createStore }) {
   const store = createStore(init.net);
   let split = Number.isFinite(init.split) && init.split > 0 && init.split < 1 ? init.split : SPLIT_DEFAULT;
   let matrixHidden = init.matrixHidden;
+  let matrixAway = false;   // hidden for a while by a view that shows the matrices itself (Flow); not saved
   el.root.classList.toggle('nn-audience', audience);
 
   // ---------------------------------------------------------------- ctx
@@ -136,6 +179,9 @@ async function start({ model, createStore }) {
     store, model, audience, view: null,
     el: { root: el.root, bar: el.bar, stage: el.stage, matrix: el.matrix },
     addButton, toast, theme, active,
+    // matrixAway(true): hide the matrix panel while a view shows the matrices itself (the Flow
+    // view); matrixAway(false) brings back what the user had. Dragging the divider ends it.
+    matrixAway: on => setAway(on),
     onTheme: fn => { themeFns.add(fn); return () => themeFns.delete(fn); },
     onShow: fn => { showFns.add(fn); return () => showFns.delete(fn); },
     get graph() { return window.mathboardGraph || null; },
@@ -167,11 +213,18 @@ async function start({ model, createStore }) {
     sections.set(name, g);
     return g;
   }
-  // label is HTML, and so is icon: it goes before the label and is dropped when the bar is short of room.
+  // label is HTML. icon (an icons.js name, an <svg> string or glyph HTML, see iconHtml) goes before
+  // the label and is dropped when the bar is short of room; with no label the button is icon-only
+  // (square, and it keeps its icon), and its title is also its accessible name.
   function addButton({ label = '', title = '', onClick = null, group = 'modules', icon = '' } = {}) {
     const b = document.createElement('button');
     b.type = 'button';
-    b.innerHTML = icon ? `<span class="nn-ico" aria-hidden="true">${icon}</span>${label}` : label;
+    const ico = iconHtml(icon, label);
+    b.innerHTML = ico ? `<span class="nn-ico" aria-hidden="true">${ico}</span>${label}` : label;
+    if (ico && !label) {
+      b.classList.add('nn-iconbtn');
+      if (title) b.setAttribute('aria-label', title.replace(/\s*\([^)]*\)\s*$/, ''));
+    }
     if (title) b.title = title;
     if (onClick) b.addEventListener('click', onClick);
     groupEl(group).appendChild(b);
@@ -185,17 +238,19 @@ async function start({ model, createStore }) {
     if (t.closest('button') || (t.closest('.nn-pop') && !t.matches('input, .np-scroll'))) e.preventDefault();
   });
 
-  // Short of room, the bar first drops the buttons' icons, then some padding, and only then wraps.
-  const FIT = [[], ['nn-compact'], ['nn-compact', 'nn-tight']];
+  // Short of room, the bar first tightens the room round its buttons (icons kept), then drops the
+  // buttons' icons, then some padding, and only then wraps.
+  const FIT = [[], ['nn-snug'], ['nn-compact'], ['nn-compact', 'nn-tight']];
   let fitQueued = false;
   function fitBar() {
     if (!visible()) return;   // hidden, everything measures 0
     const cs = Object.values(clusters).filter(c => c.childElementCount);
     for (const cls of FIT) {
-      el.bar.classList.remove('nn-compact', 'nn-tight');
+      el.bar.classList.remove('nn-snug', 'nn-compact', 'nn-tight');
       el.bar.classList.add(...cls);
       if (cs.every(c => Math.abs(c.offsetTop - cs[0].offsetTop) < 8)) break;
     }
+    el.root.style.setProperty('--nn-bar-h', `${el.bar.offsetHeight}px`);   // the cheat sheet opens under it
   }
   function queueFit() {
     if (fitQueued) return;
@@ -275,7 +330,7 @@ async function start({ model, createStore }) {
   // search field filters on label, key, group and note (every word must match somewhere); the line
   // at the bottom shows the active preset's note, which is also its tooltip. Keys: typing filters,
   // ↑ ↓ (or Tab) move, ← → change column while the field is empty, Enter opens, Esc closes.
-  const newBtn = addButton({ label: 'New net<span class="nn-caret">&#9662;</span>', icon: '&#10022;', group: 'new',
+  const newBtn = addButton({ label: `New net${caret()}`, icon: svgIcon('sparkle') ? 'sparkle' : '&#10022;', group: 'new',
     title: 'Start a new net from a preset (N). Ctrl+Z goes back' });
   newBtn.classList.add('nn-new');
   const presets = Object.entries(model.PRESETS || {}).map(([key, p]) => ({ key, label: p.label || key, note: p.note || '', group: p.group || 'Other' }));
@@ -295,14 +350,14 @@ async function start({ model, createStore }) {
   presetPop.className = 'nn-presets';
   presetPop.innerHTML = `
     <div class="np-top">
-      <input class="np-find" type="text" spellcheck="false" autocomplete="off" placeholder="Search ${presetCount} presets"
-        role="combobox" aria-label="Search the presets" aria-controls="np-list" aria-expanded="true" aria-autocomplete="list">
-      <span class="np-keys"><kbd>&uarr;</kbd> <kbd>&darr;</kbd> <kbd>&larr;</kbd> <kbd>&rarr;</kbd> choose
-        <kbd>Enter</kbd> open <kbd>Esc</kbd> close</span>
+      <label class="np-field">${svgIcon('search')}<input class="np-find ui-field" type="text" spellcheck="false" autocomplete="off" placeholder="Search ${presetCount} presets"
+        role="combobox" aria-label="Search the presets" aria-controls="np-list" aria-expanded="true" aria-autocomplete="list"></label>
+      <span class="np-keys"><span><kbd>&uarr;</kbd><kbd>&darr;</kbd><kbd>&larr;</kbd><kbd>&rarr;</kbd> choose</span>
+        <span><kbd>Enter</kbd> open</span> <span><kbd>Esc</kbd> close</span></span>
     </div>
     <div class="np-scroll">
       <div class="np-cols" id="np-list" role="listbox" aria-label="Presets">${[...presetSecs].map(([g, list], i) => `
-        <section class="np-sec" role="group" aria-labelledby="np-h${i}"><h4 id="np-h${i}">${esc(g)}</h4>${list.map(it => `
+        <section class="np-sec" role="group" aria-labelledby="np-h${i}"><h4 class="ui-overline" id="np-h${i}">${esc(g)}</h4>${list.map(it => `
           <button type="button" class="np-item" role="option" aria-selected="false" id="np-${esc(it.key)}" data-key="${esc(it.key)}"${it.note ? ` title="${esc(it.note)}"` : ''}>${presetLabel(it.label)}</button>`).join('')}
         </section>`).join('')}
       </div>
@@ -398,37 +453,42 @@ async function start({ model, createStore }) {
     if (b) choosePreset(b.dataset.key);
   });
 
-  addButton({ label: '+ Layer', title: 'Insert a dense hidden layer after the selected layer (or before the outputs)', onClick: addLayer, group: 'net' });
-  addButton({ label: 'Layout', title: 'Auto layout: evenly spaced columns', onClick: autoLayout, group: 'net' });
-  addButton({ label: 'Fit', title: 'Fit the network to the view (F)', onClick: () => fit(), group: 'net' });
-  addButton({ label: 'Randomize', title: 'New random weights: He for ReLU nets, Xavier otherwise (Shift+click: small weights)', onClick: randomize, group: 'net' });
-  const undoBtn = addButton({ label: '&#8630;', title: 'Undo (Ctrl+Z)', onClick: undo, group: 'edit' });
-  const redoBtn = addButton({ label: '&#8631;', title: 'Redo (Ctrl+Y)', onClick: redo, group: 'edit' });
+  // "+ Layer": the plus is its icon, kept when the bar drops the others (.nn-keepico).
+  addButton({ ...(svgIcon('plus') ? { label: 'Layer', icon: 'plus' } : { label: '+ Layer' }), onClick: addLayer, group: 'net',
+    title: 'Insert a dense hidden layer after the selected layer (or before the outputs)' }).classList.add('nn-keepico');
+  addButton({ label: 'Layout', icon: 'layout', title: 'Auto layout: evenly spaced columns', onClick: autoLayout, group: 'net' });
+  addButton({ label: 'Fit', icon: 'fit', title: 'Fit the network to the view (F)', onClick: () => fit(), group: 'net' });
+  addButton({ label: 'Randomize', icon: 'dice', title: 'New random weights: He for ReLU nets, Xavier otherwise (Shift+click: small weights)', onClick: randomize, group: 'net' });
+  const undoBtn = addButton({ ...iconOnly('undo', '&#8630;'), title: 'Undo (Ctrl+Z)', onClick: undo, group: 'edit' });
+  const redoBtn = addButton({ ...iconOnly('redo', '&#8631;'), title: 'Redo (Ctrl+Y)', onClick: redo, group: 'edit' });
 
   // ---------------------------------------------------------------- File menu
   // ↑ ↓ and Enter work too. Each item keeps its tooltip, and shows it as its second line.
-  const fileBtn = addButton({ label: 'File<span class="nn-caret">&#9662;</span>', group: 'file',
+  const fileBtn = addButton({ label: `File${caret()}`, icon: 'file', group: 'file',
     title: 'Export or import the net as a .json file, or take a picture of it' });
   const filePop = document.createElement('div');
-  filePop.className = 'nn-filemenu';
+  filePop.className = 'nn-filemenu ui-menu';
   filePop.setAttribute('role', 'menu');
   const fileItems = [];
-  function fileItem(label, title, fn) {
+  function fileItem(label, title, fn, icon) {
     const b = document.createElement('button');
     b.type = 'button';
+    b.className = 'ui-menu-item';
     b.setAttribute('role', 'menuitem');
     b.title = title;
-    b.innerHTML = `${label}<small>${esc(title)}</small>`;
+    b.innerHTML = `${svgIcon(icon)}<span>${label}<small>${esc(title)}</small></span>`;
     b.addEventListener('click', () => { closeMenu(); fn(); });
     fileItems.push(b);
     return b;
   }
+  const fileSep = document.createElement('hr');
+  fileSep.className = 'ui-menu-sep';
   filePop.append(
-    fileItem('Export', 'Download the net as a .json file', exportNet),
-    fileItem('Import', 'Load a net from a .json file (Ctrl+Z goes back)', () => file.click()),
-    document.createElement('hr'),
-    fileItem('PNG', 'Download a picture of the network', () => png()),
-    fileItem('To board', 'Put a picture of the network on the current board page', () => toBoard()),
+    fileItem('Export', 'Download the net as a .json file', exportNet, 'download'),
+    fileItem('Import', 'Load a net from a .json file (Ctrl+Z goes back)', () => file.click(), 'upload'),
+    fileSep,
+    fileItem('PNG', 'Download a picture of the network', () => png(), 'image'),
+    fileItem('To board', 'Put a picture of the network on the current board page', () => toBoard(), 'board'),
   );
   let fileAct = -1;
   const paintFileAct = i => { fileAct = i; fileItems.forEach((b, j) => b.classList.toggle('act', j === i)); };
@@ -449,7 +509,7 @@ async function start({ model, createStore }) {
 
   // The audience window belongs to graph/features/lecture.js (api.audience); it mirrors this tab too.
   const audienceBtn = addButton({
-    label: 'Audience', icon: '&#10697;', group: 'tail',
+    label: 'Audience', icon: svgIcon('audience') ? 'audience' : '&#10697;', group: 'tail',
     title: 'Open an audience window: no UI, follows this window live (drag it to the projector)',
     onClick: () => {
       const a = ctx.graph?.audience;
@@ -461,7 +521,7 @@ async function start({ model, createStore }) {
   audienceBtn.classList.add('nn-audience-btn');
   const paintAudience = () => audienceBtn.classList.toggle('on', !!ctx.graph?.audience?.isOpen);
   setInterval(() => { if (visible()) paintAudience(); }, 1000);   // notices the window being closed
-  const helpBtn = addButton({ label: '?', title: 'Keys and tools (?)', onClick: () => toggleHelp(), group: 'tail' });
+  const helpBtn = addButton({ ...iconOnly('help', '?'), title: 'Keys and tools (?)', onClick: () => toggleHelp(), group: 'tail' });
   helpBtn.classList.add('nn-help-btn');
 
   const file = document.createElement('input');
@@ -724,10 +784,15 @@ async function start({ model, createStore }) {
   help.id = 'nn-help';
   help.className = 'panel';
   help.hidden = true;
+  help.setAttribute('role', 'dialog');
+  help.setAttribute('aria-label', 'Net tab: keys and tools');
   const row = (keys, what) => `<tr><td>${keys}</td><td>${what}</td></tr>`;
+  // A toolbar row: the button's icon before its name, as the bar draws it.
+  const tool = (icons, name, what) => row(`<span class="nn-help-tool">${[].concat(icons).map(n => svgIcon(n, 14)).join('')}${name}</span>`, what);
+  const tex = s => { try { return window.katex ? window.katex.renderToString(s, { throwOnError: false }) : `<b>${esc(s)}</b>`; } catch { return `<b>${esc(s)}</b>`; } };
   help.innerHTML = `
-    <h3>Net tab</h3>
-    <p>Each layer computes <b>z = W a + b</b>, then <b>a = f(z)</b>. The panel on the right shows the same numbers as matrices.</p>
+    <div class="nn-help-head"><h3>Net tab</h3><button type="button" class="nn-help-x ui-btn sm icon" title="Close (Esc)" aria-label="Close">${svgIcon('close') || '&times;'}</button></div>
+    <p class="nn-help-lead">Each layer computes ${tex('z = W a + b')}, then ${tex('a = f(z)')}. The panel on the right shows the same numbers as matrices.</p>
     <h4>Keys (not while typing)</h4>
     <table>
       ${row('<kbd>Ctrl+Z</kbd> <kbd>Ctrl+Y</kbd>', 'undo / redo')}
@@ -760,24 +825,30 @@ async function start({ model, createStore }) {
       ${row('<kbd>&larr;</kbd> <kbd>&rarr;</kbd>', '3D tensor view: previous / next reshape step (when Explain is not running)')}
       ${row('<kbd>P</kbd> <kbd>Shift+P</kbd>', 'open / close the 3D plots panel; next plot: surface, landscape, space, simplex')}
     </table>
+    <h4>Flow</h4>
+    <table>
+      ${row('<kbd>G</kbd> <kbd>Shift+G</kbd>', 'Flow view on / off; play the stages')}
+      ${row('<kbd>&larr;</kbd> <kbd>&rarr;</kbd>', 'Flow view: previous / next stage (when Explain is not running)')}
+    </table>
     <h4>Toolbar, left to right</h4>
     <p>Build the net and undo; what the view shows and the panels; then File, Audience and this sheet.</p>
-    <table>
-      ${row('New net', 'the preset menu (<kbd>N</kbd>): presets by topic, a search field, Blank net last; Ctrl+Z goes back')}
-      ${row('+ Layer', 'insert a dense hidden layer after the selected layer, or before the outputs')}
-      ${row('Layout, Fit', 'evenly spaced columns; zoom to fit')}
-      ${row('Randomize', 'new weights: He for ReLU nets, Xavier otherwise; Shift+click for small ones')}
-      ${row('&#8630; &#8631;', 'undo / redo')}
-      ${row('Weights', 'numbers on the edges (W)')}
-      ${row('Lens', 'focus one stage, follow a token or a head, hide weak edges; the rest dims')}
-      ${row('3D', 'the net in 3D: layers in depth, an attention layer as one slab per head, or the multi-head reshape as moving cubes')}
-      ${row('Train', 'the Train panel: datasets, training and plots')}
-      ${row('Attention', 'one attention layer as arcs, dot products, the weighted sum or heatmaps')}
-      ${row('3D plots', 'a neuron as a surface over the inputs, the loss landscape with the training path, the data morphing through the layers, the softmax simplex')}
-      ${row('Explain', 'a guided walkthrough of this net, one caption per step; it sets the lens and panels as it goes')}
-      ${row('File: Export, Import', 'the net as a .json file')}
-      ${row('File: PNG, To board', 'download a picture, or put it on the current board page')}
-      ${row('Audience', 'a window without UI that mirrors this one live, for the projector')}
+    <table class="nn-help-tools">
+      ${tool('sparkle', 'New net', 'the preset menu (<kbd>N</kbd>): presets by topic, a search field, Blank net last; Ctrl+Z goes back')}
+      ${tool('plus', svgIcon('plus') ? 'Layer' : '+ Layer', 'insert a dense hidden layer after the selected layer, or before the outputs')}
+      ${tool(['layout', 'fit'], 'Layout, Fit', 'evenly spaced columns; zoom to fit')}
+      ${tool('dice', 'Randomize', 'new weights: He for ReLU nets, Xavier otherwise; Shift+click for small ones')}
+      ${svgIcon('undo') ? tool(['undo', 'redo'], 'Undo, Redo', 'undo / redo') : row('&#8630; &#8631;', 'undo / redo')}
+      ${tool('weights', 'Weights', 'numbers on the edges (W)')}
+      ${tool('lens', 'Lens', 'focus one stage, follow a token or a head, hide weak edges; the rest dims')}
+      ${tool('layers', '3D', 'the net in 3D: layers in depth, an attention layer as one slab per head, or the multi-head reshape as moving cubes')}
+      ${row('Flow', 'the whole forward pass as matrix tiles, stage by stage, down to the next-word softmax; hover a cell to trace it')}
+      ${tool('train', 'Train', 'the Train panel: datasets, training and plots')}
+      ${tool('attention', 'Attention', 'one attention layer as arcs, dot products, the weighted sum or heatmaps')}
+      ${tool('surface', '3D plots', 'a neuron as a surface over the inputs, the loss landscape with the training path, the data morphing through the layers, the softmax simplex')}
+      ${tool('explain', 'Explain', 'a guided walkthrough of this net, one caption per step; it sets the lens and panels as it goes')}
+      ${tool('file', 'File: Export, Import', 'the net as a .json file')}
+      ${tool('file', 'File: PNG, To board', 'download a picture, or put it on the current board page')}
+      ${tool('audience', 'Audience', 'a window without UI that mirrors this one live, for the projector')}
     </table>
     <h4>Mouse</h4>
     <table>
@@ -789,13 +860,25 @@ async function start({ model, createStore }) {
       ${row('Drag empty space, wheel', 'pan, zoom')}
       ${row('Divider', 'drag to resize the matrix panel; double-click to hide or show it')}
     </table>`;
+  for (const h of help.querySelectorAll('h4')) h.classList.add('ui-overline');
+  help.querySelector('.nn-help-x').addEventListener('click', () => toggleHelp(false));
   el.root.appendChild(help);
+  // A toolbar row written without an icon (a module's) borrows its button's, once the bar has it.
+  function helpIcons() {
+    const btns = [...el.bar.querySelectorAll('.nn-cluster button')];
+    for (const td of help.querySelectorAll('.nn-help-tools td:first-child')) {
+      if (td.querySelector('svg, .nn-help-tool')) continue;
+      const b = btns.find(x => x.textContent.trim() === td.textContent.trim() && x.querySelector('.nn-ico svg'));
+      if (b) td.innerHTML = `<span class="nn-help-tool">${b.querySelector('.nn-ico').innerHTML.replace(/width="16" height="16"/, 'width="14" height="14"')}${td.innerHTML}</span>`;
+    }
+  }
   function toggleHelp(open = help.hidden) {
+    if (open) helpIcons();
     help.hidden = !open;
     helpBtn.classList.toggle('on', open);
   }
   document.addEventListener('pointerdown', e => {
-    if (!help.hidden && !help.contains(e.target) && e.target !== helpBtn) toggleHelp(false);
+    if (!help.hidden && !help.contains(e.target) && !helpBtn.contains(e.target)) toggleHelp(false);
   });
 
   // ---------------------------------------------------------------- keys (Net tab only)
@@ -825,16 +908,26 @@ async function start({ model, createStore }) {
   // ---------------------------------------------------------------- splitter
   function applySplit() {
     el.main.style.setProperty('--nn-split', String(split));
-    el.main.classList.toggle('matrix-hidden', matrixHidden);
+    el.main.classList.toggle('matrix-hidden', matrixHidden || matrixAway);
   }
   function setSplit(f, hidden = matrixHidden) {
-    if (f === split && hidden === matrixHidden) return;
+    if (f === split && hidden === matrixHidden && !matrixAway) return;
     split = f;
     matrixHidden = hidden;
+    matrixAway = false;   // the user's own choice (or the presenter's, mirrored) ends a view's hiding
+    applySplit();
+    mirrorChanged();
+  }
+  function setAway(on) {
+    if (audience || !!on === matrixAway) return;   // the audience follows the presenter's panel
+    matrixAway = !!on;
     applySplit();
     mirrorChanged();
   }
   applySplit();
+  el.split.setAttribute('role', 'separator');
+  el.split.setAttribute('aria-orientation', 'vertical');
+  el.split.setAttribute('aria-label', 'Matrix panel divider');
   el.split.addEventListener('pointerdown', e => {
     if (audience || e.button !== 0) return;
     e.preventDefault();
@@ -863,7 +956,7 @@ async function start({ model, createStore }) {
   el.split.addEventListener('dblclick', () => {
     if (audience) return;
     getSelection()?.removeAllRanges();
-    setSplit(split, !matrixHidden);
+    setSplit(split, !(matrixHidden || matrixAway));
     save();
   });
 
@@ -922,7 +1015,7 @@ async function start({ model, createStore }) {
   // The matrix panel's toggles (ctx.matrix.opt) and the view's weight labels are UI state with no
   // store event: a click in the toolbars or the matrix panel, or a key, re-posts after it has run.
   function mirrorChanged() { for (const fn of mirrorFns) safe(fn); }
-  for (const evt of ['net', 'layout', 'sel', 'hover', 'anim', 'lens', 'viz', 'tour', 'v3d', 's3d']) store.on(evt, mirrorChanged);
+  for (const evt of ['net', 'layout', 'sel', 'hover', 'anim', 'lens', 'viz', 'tour', 'v3d', 's3d', 'flow']) store.on(evt, mirrorChanged);
   if (!audience) {
     const later = () => { if (mirrorFns.size) requestAnimationFrame(mirrorChanged); };
     el.bar.addEventListener('click', later);
@@ -934,8 +1027,8 @@ async function start({ model, createStore }) {
   const netApi = window.mathboardNet = {
     store, ctx, audience, ready: false,
     mirrorState: () => ({
-      net: store.net, sel: store.state.sel, hover: store.state.hover, anim: store.state.anim, split, matrixHidden,
-      lens: store.state.lens, viz: store.state.viz, tour: store.state.tour, v3d: store.state.v3d, s3d: store.state.s3d,
+      net: store.net, sel: store.state.sel, hover: store.state.hover, anim: store.state.anim, split, matrixHidden: matrixHidden || matrixAway,
+      lens: store.state.lens, viz: store.state.viz, tour: store.state.tour, v3d: store.state.v3d, s3d: store.state.s3d, flow: store.state.flow ?? null,
       matrix: ctx.matrix?.opt ? { ...ctx.matrix.opt } : null, weights: !!ctx.view?.weights,
     }),
     applyMirror(m) {
@@ -953,7 +1046,7 @@ async function start({ model, createStore }) {
         safe(() => ctx.matrix.render?.());
       }
       if ('weights' in m && ctx.view && ctx.view.weights !== !!m.weights) ctx.view.weights = !!m.weights;
-      for (const k of ['sel', 'hover', 'anim', 'lens', 'viz', 'tour', 'v3d', 's3d']) if (k in m && !same(m[k], store.state[k])) store.set(k, m[k] ?? null);
+      for (const k of ['sel', 'hover', 'anim', 'lens', 'viz', 'tour', 'v3d', 's3d', 'flow']) if (k in m && !same(m[k], store.state[k])) store.set(k, m[k] ?? null);
       if (Number.isFinite(m.split)) setSplit(m.split, !!m.matrixHidden);
     },
     onMirror(fn) { mirrorFns.add(fn); return () => mirrorFns.delete(fn); },

@@ -112,7 +112,8 @@ test('function name followed by ( is a call, other names multiply', () => {
   assert.equal(val('sin(0)'), 0);
   assert.equal(val('2sin(0) + 1'), 1);
   assert.deepEqual(val('a = 2', 'a(1, 2, 3)'), V(2, 4, 6));
-  assert.match(err('sin'), /sin is a function/);
+  assert.equal(val('sin').type, 'graph'); // a bare one-number function draws y = sin(x)
+  assert.match(err('det'), /det is a function/);
   assert.match(err('u = (1,0,0)', 'det u'), /det is a function/);
 });
 
@@ -331,8 +332,8 @@ test('circular definitions', () => {
   assert.equal(rows[2].error, 'a has an error');
   assert.equal(rows[3].value, 5);
   assert.equal(last('u = u + (1, 0, 0)').error, 'circular definition: u → u');
-  const three = evaluate(['x = y', 'y = z', 'z = x']);
-  assert.equal(three[2].error, 'circular definition: z → x → y → z');
+  const three = evaluate(['p = q', 'q = r', 'r = p']);
+  assert.equal(three[2].error, 'circular definition: r → p → q → r');
 });
 
 test('duplicate definitions error on every defining row', () => {
