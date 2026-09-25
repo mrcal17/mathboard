@@ -285,18 +285,22 @@ export function install(ctx) {
     const { THREE, OrbitControls, CSS2DRenderer, CSS2DObject } = K;
     const FOV = 24;
     const DIRS = { stack: [0.36, 0.42, 0.84], heads: [0.34, 0.3, 1], tensor: [0.62, 0.28, 1] };
-    const DIM = 0.1, NUM_MIN = 0.25, FOCUS_NODE = 0.42, FOCUS_EDGE = 0.13, FOCUS_ATT = 0.1;
-    const FIXED_A = 0.45, FIXED_R = 0.014;   // a fixed edge's opacity and radius
+    const DIM = 0.1, NUM_MIN = 0.25, FOCUS_NODE = 0.42, FOCUS_EDGE = 0.35, FOCUS_ATT = 0.25;
+    const FIXED_A = 0.34;                    // a fixed edge's strength at rest (full while held)
     const NUM_PX = 28;                       // heads, tensor: a cell's number shows when its face is this wide on screen
-    const PUB_MS = 120, STEP_MS = 1100, PLAY_MS = 2600;
-    const NODE_R = 0.34, CUBE = 0.8;
+    const PUB_MS = 120, STEP_MS = 1100, PLAY_MS = 2600, SETTLE_MS = 800;
+    const NODE_R = 0.32, CUBE = 0.8, TD = 0.34;   // TD: a cell tile's depth
+    const CELL_A = 0.72;                     // cells cap colorFor's alpha as the matrix panel does, so numbers read on them
+    const MAX_DPR = 1.5;                     // pixel ratio cap: MSAA does the rest
+    const calm = () => !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 
     // ---------------------------------------------------------------- DOM
     const mk = (tag, cls, parent) => { const e = document.createElement(tag); if (cls) e.className = cls; if (parent) parent.appendChild(e); return e; };
     const root = mk('div', `nn3d${audience ? ' ro' : ''}`);
     const gl = mk('div', 'nn3d-gl', root);
     const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+    const dpr = () => Math.min(MAX_DPR, window.devicePixelRatio || 1);
+    renderer.setPixelRatio(dpr());
     gl.appendChild(renderer.domElement);
     const labelR = new CSS2DRenderer();
     labelR.domElement.className = 'nn3d-labels';
@@ -310,13 +314,30 @@ export function install(ctx) {
     bar.addEventListener('mousedown', e => { if (e.target.closest('button')) e.preventDefault(); });
 
     const scene = new THREE.Scene();
+    scene.matrixWorldAutoUpdate = false;   // the loop updates the scene graph once a frame, for both renderers
     const camera = new THREE.PerspectiveCamera(FOV, 1, 0.05, 5000);
+    scene.add(camera);   // it carries the key light
+    // Soft, matte light (Lambert: no specular): a hemisphere, sky over a grey ground, and one gentle
+    // key that rides with the camera, a little up and to the left of it. The face turned to the
+    // viewer gets about 1 (so a value's colour reads as in the matrix panel), the sides shade off
+    // to about 0.85 and the undersides to about 0.6. Intensities carry the π of three's lights.
+    const hemi = new THREE.HemisphereLight(0xffffff, 0xffffff, 0.9 * Math.PI);
+    hemi.groundColor.setRGB(0.35, 0.35, 0.35, THREE.LinearSRGBColorSpace);
+    scene.add(hemi);
+    const key = new THREE.DirectionalLight(0xffffff, 0.45 * Math.PI);
+    key.position.set(-1.1, 1.6, 4);
+    key.target.position.set(0, 0, -4);
+    camera.add(key, key.target);
+    // Light fog toward the page colour: the back of the content falls off by about a third.
+    scene.fog = new THREE.Fog(0x000000, 10, 100);
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
-    controls.dampingFactor = 0.12;
-    controls.rotateSpeed = 0.75;
-    controls.zoomSpeed = 1.1;
+    controls.dampingFactor = 0.08;
+    controls.rotateSpeed = 0.6;
+    controls.zoomSpeed = 0.8;
+    controls.panSpeed = 0.8;
     controls.screenSpacePanning = true;
+    controls.maxPolarAngle = Math.PI * 0.62;   // a little under the horizon at most: the ground stays a floor
     controls.enabled = !audience;
     camera.position.set(-10, 8, 12);
 
@@ -324,46 +345,139 @@ export function install(ctx) {
     const V3 = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
     const UP = V3(0, 1, 0);
     const tm = new THREE.Matrix4(), tq = new THREE.Quaternion(), ts = V3(), tp = V3(), tv = V3(), tc = new THREE.Color();
-    // Flat colour with the shading baked into the vertices, so a cell's front face shows its value
-    // colour exactly (as in the matrix panel) and the other faces read as a solid.
-    function bakedBox() {
-      const g = new THREE.BoxGeometry(1, 1, 1), n = g.attributes.normal, col = new Float32Array(n.count * 3);
-      for (let i = 0; i < n.count; i++) {
-        const x = n.getX(i), y = n.getY(i), z = n.getZ(i);
-        const s = z > 0.5 ? 1 : y > 0.5 ? 0.62 : x > 0.5 ? 0.46 : x < -0.5 ? 0.4 : y < -0.5 ? 0.3 : 0.36;
-        col.set([s, s, s], 3 * i);
-      }
-      g.setAttribute('color', new THREE.BufferAttribute(col, 3));
-      return g;
+    // A rounded rectangle, w × h, centred.
+    function roundShape(w, h, r) {
+      const s = new THREE.Shape(), x = w / 2, y = h / 2;
+      r = Math.min(r, x, y);
+      s.moveTo(-x + r, -y);
+      s.lineTo(x - r, -y); s.absarc(x - r, -y + r, r, -Math.PI / 2, 0);
+      s.lineTo(x, y - r); s.absarc(x - r, y - r, r, 0, Math.PI / 2);
+      s.lineTo(-x + r, y); s.absarc(-x + r, y - r, r, Math.PI / 2, Math.PI);
+      s.lineTo(-x, -y + r); s.absarc(-x + r, -y + r, r, Math.PI, 1.5 * Math.PI);
+      return s;
     }
-    function bakedSphere() {
-      const g = new THREE.SphereGeometry(1, 22, 16), n = g.attributes.normal, col = new Float32Array(n.count * 3);
-      const L = V3(-0.45, 0.65, 0.62).normalize();
-      for (let i = 0; i < n.count; i++) {
-        const d = Math.max(0, n.getX(i) * L.x + n.getY(i) * L.y + n.getZ(i) * L.z);
-        const s = 0.34 + 0.66 * d ** 0.9;
-        col.set([s, s, s], 3 * i);
+    // A cell: a 1 × 1 rounded tile, `depth` deep, centred. Indexed and built by hand (66 vertices,
+    // not an ExtrudeGeometry's 324): the corners' sides shade smoothly, the faces are flat.
+    function tileGeo(depth, r = 0.14, seg = 3) {
+      const h = 0.5, pts = [];
+      for (const [cx, cy, a0] of [[h - r, -h + r, -Math.PI / 2], [h - r, h - r, 0], [-h + r, h - r, Math.PI / 2], [-h + r, -h + r, Math.PI]]) {
+        for (let k = 0; k <= seg; k++) { const a = a0 + (k / seg) * (Math.PI / 2); pts.push([cx + r * Math.cos(a), cy + r * Math.sin(a), Math.cos(a), Math.sin(a)]); }
       }
-      g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+      const n = pts.length, z1 = depth / 2, z0 = -depth / 2, pos = [], nor = [], idx = [];
+      const cap = (z, nz) => {   // a fan round the centre, facing nz
+        const c = pos.length / 3;
+        pos.push(0, 0, z); nor.push(0, 0, nz);
+        for (const [x, y] of pts) { pos.push(x, y, z); nor.push(0, 0, nz); }
+        for (let k = 0; k < n; k++) { const a = c + 1 + k, b = c + 1 + ((k + 1) % n); if (nz > 0) idx.push(c, a, b); else idx.push(c, b, a); }
+      };
+      cap(z1, 1);
+      cap(z0, -1);
+      const s0 = pos.length / 3;   // the sides: two rings with outward normals
+      for (const [x, y, nx, ny] of pts) { pos.push(x, y, z1, x, y, z0); nor.push(nx, ny, 0, nx, ny, 0); }
+      for (let k = 0; k < n; k++) { const a = s0 + 2 * k, c = s0 + 2 * ((k + 1) % n); idx.push(a, a + 1, c + 1, a, c + 1, c); }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+      g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+      g.setIndex(idx);
       return g;
     }
     const GEO = {
-      box: bakedBox(), sphere: bakedSphere(), cyl: new THREE.CylinderGeometry(1, 1, 1, 10, 1, true),
-      plane: new THREE.PlaneGeometry(1, 1), ring: new THREE.TorusGeometry(1, 0.075, 8, 48), ringThin: new THREE.TorusGeometry(1, 0.045, 8, 48),
+      sphere: new THREE.SphereGeometry(1, 22, 16), sphereLo: new THREE.SphereGeometry(1, 14, 10),   // Lo: nets of 300+ neurons
+      tile: tileGeo(TD), bar: tileGeo(1),
+      plane: new THREE.PlaneGeometry(1, 1), ring: new THREE.TorusGeometry(1, 0.05, 6, 48), ringThin: new THREE.TorusGeometry(1, 0.032, 6, 48),
       ball: new THREE.SphereGeometry(1, 12, 8),
-      // a square frame (half-side 0.5 to 0.62) for a lit cell's front face
-      frame: new THREE.RingGeometry(0.5 * Math.SQRT2, 0.62 * Math.SQRT2, 4, 1, Math.PI / 4),
+      // a square frame (half-side 0.5 to 0.58) for a lit cell's front face
+      frame: new THREE.RingGeometry(0.5 * Math.SQRT2, 0.58 * Math.SQRT2, 4, 1, Math.PI / 4),
     };
+    // Screen-space lines (weights, attention, the heads' fans): one instance per segment, a width in
+    // CSS px whatever the zoom, so thin ones stay crisp instead of shimmering; under 1 px a line is
+    // drawn 1 px wide and fainter. Colours are sRGB, already blended toward the page (as the canvas
+    // blends colorFor's alpha), and fog toward it by depth as the meshes do.
+    const LINE_VS = `
+      attribute vec3 iA;
+      attribute vec3 iB;
+      attribute vec3 iC;
+      attribute float iW;
+      uniform vec2 uRes;
+      uniform float uPx;
+      uniform float uNear;
+      uniform vec3 uBg;
+      uniform vec2 uFog;
+      varying vec3 vC;
+      void main() {
+        vC = uBg;
+        vec4 a = modelViewMatrix * vec4(iA, 1.0);
+        vec4 b = modelViewMatrix * vec4(iB, 1.0);
+        float zn = -uNear;
+        if (iW <= 0.0 || (a.z > zn && b.z > zn)) { gl_Position = vec4(0.0, 0.0, -2.0, 1.0); return; }
+        if (a.z > zn) a = mix(a, b, (a.z - zn) / (a.z - b.z));
+        else if (b.z > zn) b = mix(b, a, (b.z - zn) / (b.z - a.z));
+        vec4 ca = projectionMatrix * a;
+        vec4 cb = projectionMatrix * b;
+        vec2 d = (cb.xy / cb.w - ca.xy / ca.w) * uRes;
+        float len = length(d);
+        d = len > 1e-5 ? d / len : vec2(1.0, 0.0);
+        vec4 c = position.x < 0.5 ? ca : cb;
+        c.xy += vec2(-d.y, d.x) * position.y * max(iW, 1.0) * uPx / uRes * c.w;
+        gl_Position = c;
+        float depth = -(position.x < 0.5 ? a.z : b.z);
+        vC = mix(mix(uBg, iC, clamp(iW, 0.0, 1.0)), uBg, smoothstep(uFog.x, uFog.y, depth));
+      }`;
+    const LINE_FS = `
+      varying vec3 vC;
+      void main() { gl_FragColor = vec4(vC, 1.0); }`;
+    // The ground: a faint dot grid under the content, fading out toward its rim (aF) and with the
+    // fog. One point sprite per dot, so it costs only the dots' pixels; a dot under a pixel fades
+    // instead of sparkling, as a thin line does.
+    const GROUND_VS = `
+      attribute float aF;
+      uniform float uDot;
+      uniform float uA;
+      uniform vec2 uRes;
+      uniform vec2 uFog;
+      varying float vA;
+      varying float vR;
+      varying float vS;
+      void main() {
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * mv;
+        float px = uDot * projectionMatrix[1][1] * uRes.y * 0.5 / max(1e-3, -mv.z);
+        float d = max(px, 1.0);
+        vS = d + 2.0;
+        gl_PointSize = vS;
+        vR = 0.5 * d / vS;
+        vA = uA * aF * clamp(px, 0.0, 1.0) * (1.0 - smoothstep(uFog.x, uFog.y, -mv.z));
+      }`;
+    const GROUND_FS = `
+      uniform vec3 uC;
+      varying float vA;
+      varying float vR;
+      varying float vS;
+      void main() {
+        float e = 0.7 / vS;
+        float a = vA * (1.0 - smoothstep(vR - e, vR + e, length(gl_PointCoord - 0.5)));
+        if (a < 0.002) discard;
+        gl_FragColor = vec4(uC, a);
+      }`;
+    const fogU = { value: new THREE.Vector2(1e4, 2e4) };
     const MAT = {
-      shade: new THREE.MeshBasicMaterial({ vertexColors: true }),
-      flat: new THREE.MeshBasicMaterial(),
-      band: new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.05, depthWrite: false, side: THREE.DoubleSide }),
-      grp: new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.07, depthWrite: false, side: THREE.DoubleSide }),
-      plate: new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.16, depthWrite: false, side: THREE.DoubleSide }),
-      halo: new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }),
-      ring: new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false }),
-      line: new THREE.LineBasicMaterial({ transparent: true, opacity: 0.22, depthWrite: false }),
+      lit: new THREE.MeshLambertMaterial(),   // neurons, cells, bars: instance colours under the matte light
+      flat: new THREE.MeshBasicMaterial(),    // the head accents: exact colour
+      band: new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.05, depthWrite: false, side: THREE.DoubleSide }),    // stack: the held layer
+      plate: new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.05, depthWrite: false, side: THREE.DoubleSide }),   // heads, tensor
+      halo: new THREE.MeshBasicMaterial({ side: THREE.DoubleSide, fog: false }),
+      ring: new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false, fog: false }),
+      line: new THREE.ShaderMaterial({
+        vertexShader: LINE_VS, fragmentShader: LINE_FS,
+        uniforms: { uRes: { value: new THREE.Vector2(1, 1) }, uPx: { value: 1 }, uNear: { value: camera.near }, uBg: { value: new THREE.Vector3() }, uFog: fogU },
+      }),
+      ground: new THREE.ShaderMaterial({
+        vertexShader: GROUND_VS, fragmentShader: GROUND_FS, transparent: true, depthWrite: false,
+        uniforms: { uC: { value: new THREE.Vector3(1, 1, 1) }, uA: { value: 0.1 }, uDot: { value: 0.1 }, uRes: null, uFog: fogU },
+      }),
     };
+
+    MAT.ground.uniforms.uRes = MAT.line.uniforms.uRes;   // one resolution for both (size() sets it)
 
     // ---------------------------------------------------------------- theme
     const hexRGB = s => {
@@ -372,37 +486,72 @@ export function install(ctx) {
       const r = /rgba?\(([^)]+)\)/.exec(String(s));
       return r ? r[1].split(',').slice(0, 3).map(x => +x) : null;
     };
-    // fixed: fixed edges (a residual, a pooling weight) are not parameters, so they are drawn in the
-    // UI's muted text colour (--text-3), never a weight colour, as on the 2D canvas.
+    // Colour is for data (the value pair, attention, the heads, HI). Structure is neutral: the
+    // neurons' and cells' base (--n3-node), plates (--n3-plate), the ground (--n3-ground) and fixed
+    // edges and fans in the muted text colour (--text-3), as on the 2D canvas. The --n3-* tokens
+    // live in view3d.css (literal hex / rgba: read here).
     const PAL = {
-      dark: { node: [38, 45, 50], hi: [255, 213, 74], att: [183, 148, 255], line: [255, 255, 255], fixed: [147, 156, 162], bgFall: [29, 35, 39],
+      dark: { node: [78, 88, 95], hi: [255, 213, 74], att: [183, 148, 255], line: [255, 255, 255], fixed: [147, 156, 162], bgFall: [29, 35, 39],
+        plate: [255, 255, 255, 0.045], ground: [255, 255, 255, 0.12],
         toks: ['#f0a23b', '#4fb3d9', '#7bd672', '#e0629a', '#c9a0ff', '#e8d94a', '#ff8a5c', '#9fb0bd'] },
-      light: { node: [255, 255, 255], hi: [232, 168, 0], att: [116, 66, 214], line: [0, 0, 0], fixed: [107, 112, 117], bgFall: [251, 251, 248],
+      light: { node: [226, 229, 227], hi: [232, 168, 0], att: [116, 66, 214], line: [0, 0, 0], fixed: [107, 112, 117], bgFall: [251, 251, 248],
+        plate: [0, 0, 0, 0.04], ground: [0, 0, 0, 0.11],
         toks: ['#d9822b', '#1f86b8', '#3c9a35', '#c2185b', '#7442d6', '#a38c00', '#e0562b', '#5c6b77'] },
     };
     // a head keeps its colour in every panel: the head tokens (style.css section 1, literal hex)
     const HEAD_VARS = ['--att', '--head-2', '--head-3', '--head-4', '--head-5', '--head-6'];
+    const rgbaOf = s => {   // '#rrggbb' or 'rgba(r, g, b, a)' -> [r, g, b, a] | null
+      const m = /^#?([0-9a-f]{6})$/i.exec(String(s).trim());
+      if (m) return [...[0, 2, 4].map(k => parseInt(m[1].slice(k, k + 2), 16)), 1];
+      const r = /rgba?\(([^)]+)\)/.exec(String(s));
+      if (!r) return null;
+      const p = r[1].split(',').map(x => +x);
+      return p.length >= 3 && p.slice(0, 3).every(Number.isFinite) ? [p[0], p[1], p[2], Number.isFinite(p[3]) ? p[3] : 1] : null;
+    };
+    const srgb = (c, v3 = V3()) => v3.set(c[0] / 255, c[1] / 255, c[2] / 255);
     let P = null;
     function retheme() {
-      const th = theme(), base = PAL[th], cs = getComputedStyle(document.documentElement);
+      const th = theme(), base = PAL[th], cs = getComputedStyle(document.documentElement), rs = getComputedStyle(root);
       const bg = hexRGB(cs.getPropertyValue('--bg')) || base.bgFall;
       const heads = HEAD_VARS.map(v => hexRGB(cs.getPropertyValue(v)) || base.att);
-      P = { ...base, th, bg, heads, toks: base.toks.map(hexRGB) };
-      scene.background = new THREE.Color().setRGB(bg[0] / 255, bg[1] / 255, bg[2] / 255, THREE.SRGBColorSpace);
-      const lc = new THREE.Color().setRGB(...base.line.map(x => x / 255), THREE.SRGBColorSpace);
-      MAT.band.color.copy(lc);
-      MAT.grp.color.copy(lc);
-      MAT.line.color.copy(lc);
-      MAT.line.opacity = th === 'light' ? 0.2 : 0.22;
-      MAT.plate.opacity = th === 'light' ? 0.13 : 0.17;
+      const tok = (name, fall) => rgbaOf(rs.getPropertyValue(name)) || fall;
+      const node = tok('--n3-node', base.node).slice(0, 3), plate = tok('--n3-plate', base.plate), ground = tok('--n3-ground', base.ground);
+      P = { ...base, th, bg, heads, node, plate, ground, toks: base.toks.map(hexRGB) };
+      cfInit(th);
+      const bgc = new THREE.Color().setRGB(bg[0] / 255, bg[1] / 255, bg[2] / 255, THREE.SRGBColorSpace);
+      scene.background = bgc;
+      scene.fog.color.copy(bgc);
+      MAT.band.color.setRGB(plate[0] / 255, plate[1] / 255, plate[2] / 255, THREE.SRGBColorSpace);
+      MAT.band.opacity = Math.min(1, plate[3] * 1.5);
+      MAT.plate.opacity = plate[3];
       MAT.ring.color.setRGB(...base.hi.map(x => x / 255), THREE.SRGBColorSpace);
       MAT.halo.color.setRGB(...base.hi.map(x => x / 255), THREE.SRGBColorSpace);
+      srgb(bg, MAT.line.uniforms.uBg.value);
+      srgb(ground, MAT.ground.uniforms.uC.value);
+      MAT.ground.uniforms.uA.value = ground[3];
       invalidate();
     }
     const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
-    // colorFor's colour laid over base (as its alpha would blend it on the canvas).
+    // colorFor as numbers, so the hot paths (every edge, every frame while training) parse no
+    // strings: [r, g, b, a]. cfInit checks it against store.js colorFor for the theme and falls
+    // back to parsing colorFor's string if they ever differ.
     const rgba = s => { const m = /rgba?\(([^)]+)\)/.exec(s); const p = m ? m[1].split(',').map(Number) : [128, 128, 128, 0.4]; return [p[0], p[1], p[2], p[3] ?? 1]; };
-    const over = (v, max, base) => { const c = rgba(colorFor(v, max, P.th)); return mix(base, c, c[3]); };
+    let cf = (v, max) => rgba(colorFor(v, max, P.th));
+    function cfInit(th) {
+      const pos = rgba(colorFor(1, 1, th)), neg = rgba(colorFor(-1, 1, th)), bad = rgba(colorFor(NaN, 1, th));
+      const fast = (v, max, out = [0, 0, 0, 0]) => {
+        const c = !Number.isFinite(v) ? bad : v >= 0 ? pos : neg;
+        out[0] = c[0]; out[1] = c[1]; out[2] = c[2];
+        out[3] = Number.isFinite(v) ? 0.12 + 0.88 * Math.min(1, Math.abs(v) / (max || 1)) : c[3];
+        return out;
+      };
+      const same = [0.5, -0.25, 0, 2, -3, 0.04].every(v => { const a = rgba(colorFor(v, 1, th)), b = fast(v, 1); return a.every((x, i) => Math.abs(x - b[i]) < 2e-3); });
+      cf = same ? fast : (v, max, out) => { const c = rgba(colorFor(v, max, th)); if (out) { out[0] = c[0]; out[1] = c[1]; out[2] = c[2]; out[3] = c[3]; return out; } return c; };
+    }
+    // colorFor's colour laid over base (as its alpha would blend it on the canvas); cap: the most
+    // alpha a cell takes (CELL_A), eased as the matrix panel eases it above 0.5.
+    const easeCap = (a, cap) => (a <= 0.5 ? a : 0.5 + (cap - 0.5) * Math.min(1, (a - 0.5) / 0.5));
+    const over = (v, max, base, cap = 1) => { const c = cf(v, max); return mix(base, c, cap < 1 ? easeCap(c[3], cap) : c[3]); };
     const setCol = (mesh, i, c) => { tc.setRGB(c[0] / 255, c[1] / 255, c[2] / 255, THREE.SRGBColorSpace); mesh.setColorAt(i, tc); };
     // Lens emphasis -> opacity, as on the canvas (0.1 + 0.9 v; 1 at full emphasis).
     const le = v => (v >= 0.995 ? 1 : DIM + (1 - DIM) * clamp(v, 0, 1));
@@ -425,10 +574,11 @@ export function install(ctx) {
     // instanced meshes (the geometries and materials are shared, so only the instances go).
     function newContent() {
       const group = new THREE.Group();
+      group.matrixAutoUpdate = false;   // content objects are placed once (instances and labels carry the motion)
       scene.add(group);
-      const labs = [];
+      const labs = [], geos = [];
       return {
-        group, labs,
+        group, labs, geos,
         label(cls, html, pos, cx = 0.5, cy = 0.5, parent = group) {
           const el = document.createElement('div');
           el.className = `nn3d-lab ${cls}`;
@@ -445,24 +595,76 @@ export function install(ctx) {
           m.count = n;
           m.frustumCulled = false;
           m.renderOrder = order;
+          m.matrixAutoUpdate = false;
           tc.setRGB(1, 1, 1);
           for (let i = 0; i < n; i++) m.setColorAt(i, tc);
           group.add(m);
           return m;
         },
-        lines(points, order = -1) {   // plate outlines: pairs of points
-          const g = new THREE.BufferGeometry().setFromPoints(points);
-          const o = new THREE.LineSegments(g, MAT.line);
-          o.renderOrder = order;
+        // n screen-space line segments (LINE_VS): seg(i, a, b) once, then set(i, rgb, px) per paint
+        // (px 0 hides one), then flush().
+        lines(n, order = 0) {
+          const m = Math.max(1, n), g = new THREE.InstancedBufferGeometry();
+          g.setAttribute('position', new THREE.BufferAttribute(new Float32Array([0, -1, 0, 1, -1, 0, 1, 1, 0, 0, 1, 0]), 3));
+          g.setIndex([0, 1, 2, 0, 2, 3]);
+          const at = k => new THREE.InstancedBufferAttribute(new Float32Array(m * k), k);
+          const A = at(3), B = at(3), Cc = at(3), W = at(1);
+          Cc.setUsage(THREE.DynamicDrawUsage);
+          W.setUsage(THREE.DynamicDrawUsage);
+          g.setAttribute('iA', A); g.setAttribute('iB', B); g.setAttribute('iC', Cc); g.setAttribute('iW', W);
+          g.instanceCount = n;
+          const mesh = new THREE.Mesh(g, MAT.line);
+          mesh.frustumCulled = false;
+          mesh.renderOrder = order;
+          mesh.matrixAutoUpdate = false;
+          group.add(mesh);
+          geos.push(g);
+          const a = A.array, b = B.array, c = Cc.array, w = W.array;
+          return {
+            n, mesh,
+            seg(i, p, q) { const k = 3 * i; a[k] = p.x; a[k + 1] = p.y; a[k + 2] = p.z; b[k] = q.x; b[k + 1] = q.y; b[k + 2] = q.z; A.needsUpdate = B.needsUpdate = true; },
+            set(i, rgb, px) { const k = 3 * i; c[k] = rgb[0] / 255; c[k + 1] = rgb[1] / 255; c[k + 2] = rgb[2] / 255; w[i] = px; },
+            flush() { Cc.needsUpdate = W.needsUpdate = true; },
+          };
+        },
+        // a rounded plate (w × h, facing +z; 'yz' faces +x), its geometry owned by this content
+        plateGeo(w, h, r = 0.22) {
+          const g = new THREE.ShapeGeometry(roundShape(w, h, r), 4);
+          geos.push(g);
+          return g;
+        },
+        // the faint ground under the content's box: a dot grid on a disc, fading out at its rim,
+        // on world multiples of its step (so the pattern stays put across rebuilds)
+        ground(box) {
+          if (box.isEmpty()) return null;
+          const c = box.getCenter(V3()), sz = box.getSize(V3());
+          const R = Math.max(sz.x, sz.z) * 0.5 + 2, step = Math.max(1, Math.round(R / 10)), y = box.min.y - 0.9;
+          const pos = [], fade = [];
+          for (let x = Math.ceil((c.x - R) / step) * step; x <= c.x + R; x += step) {
+            for (let z = Math.ceil((c.z - R) / step) * step; z <= c.z + R; z += step) {
+              const r = Math.hypot(x - c.x, z - c.z) / R;
+              if (r >= 1) continue;
+              const u = clamp((r - 0.1) / 0.9, 0, 1);
+              pos.push(x, y, z);
+              fade.push(1 - u * u * (3 - 2 * u));
+            }
+          }
+          const g = new THREE.BufferGeometry();
+          g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+          g.setAttribute('aF', new THREE.Float32BufferAttribute(fade, 1));
+          geos.push(g);
+          const o = new THREE.Points(g, MAT.ground);
+          o.renderOrder = -10;
+          o.frustumCulled = false;
+          o.matrixAutoUpdate = false;
           group.add(o);
+          MAT.ground.uniforms.uDot.value = 0.085 * step;
           return o;
         },
         dispose() {
           for (const o of labs) o.element.remove();
-          group.traverse(o => {
-            if (o.isInstancedMesh) o.dispose();
-            else if (o.isLineSegments) o.geometry.dispose();
-          });
+          group.traverse(o => { if (o.isInstancedMesh) o.dispose(); });
+          for (const g of geos) g.dispose();
           scene.remove(group);
         },
       };
@@ -472,27 +674,9 @@ export function install(ctx) {
       tm.compose(p, q || tq.identity(), ts);
       mesh.setMatrixAt(i, tm);
     };
-    // A cylinder from a to b with radius r (r = 0 hides it).
-    const setRod = (mesh, i, a, b, r) => {
-      tv.subVectors(b, a);
-      const len = tv.length();
-      if (len < 1e-6 || r <= 0) { ts.set(0, 0, 0); tm.compose(a, tq.identity(), ts); mesh.setMatrixAt(i, tm); return; }
-      tq.setFromUnitVectors(UP, tv.multiplyScalar(1 / len));
-      tp.addVectors(a, b).multiplyScalar(0.5);
-      ts.set(r, len, r);
-      tm.compose(tp, tq, ts);
-      mesh.setMatrixAt(i, tm);
-    };
     const flushInst = m => { m.instanceMatrix.needsUpdate = true; if (m.instanceColor) m.instanceColor.needsUpdate = true; };
-    // A flat rectangle (plate) in a plane: 'xy' faces z, 'yz' faces x.
+    // a plate facing +z turned to face +x (a stack sheet's y-z plane)
     const ROT_YZ = new THREE.Quaternion().setFromAxisAngle(UP, Math.PI / 2);
-    const rectPts = (c, w, h, plane) => {
-      const hw = w / 2, hh = h / 2;
-      const P4 = plane === 'yz'
-        ? [V3(c.x, c.y - hh, c.z - hw), V3(c.x, c.y - hh, c.z + hw), V3(c.x, c.y + hh, c.z + hw), V3(c.x, c.y + hh, c.z - hw)]
-        : [V3(c.x - hw, c.y - hh, c.z), V3(c.x + hw, c.y - hh, c.z), V3(c.x + hw, c.y + hh, c.z), V3(c.x - hw, c.y + hh, c.z)];
-      return [P4[0], P4[1], P4[1], P4[2], P4[2], P4[3], P4[3], P4[0]];
-    };
 
     // ---------------------------------------------------------------- net index (as view.js's ix)
     function index(net) {
@@ -532,8 +716,11 @@ export function install(ctx) {
         return { l, g: Math.floor(k / (s.T * s.d)), t: Math.floor(k / s.d) % s.T, f: k % s.d };
       };
       const tokNode = (l, g, t, f) => { const s = shape[l]; return s ? byLayer[l][(g * s.T + t) * s.d + f] : undefined; };
-      return { li, lix, byLayer, nodeById, rank, edgeById, ties, biasTies, shape, att, pos, tokNode };
+      return { li, lix, byLayer, nodeById, rank, edgeById, ties, biasTies, shape, att, pos, tokNode, of: [net.nodes, net.edges, net.layers] };
     }
+    // Undo, redo and the audience mirror swap in new node and edge objects with the same ids (no
+    // rebuild): a mode's paint and pick re-index when the arrays are no longer the ones indexed.
+    const stale = (I, net) => I.of[0] !== net.nodes || I.of[1] !== net.edges || I.of[2] !== net.layers;
     // Stable key of what the 3D layout depends on: a change rebuilds, anything else repaints.
     function netKey(net) {
       return JSON.stringify([
@@ -699,7 +886,8 @@ export function install(ctx) {
 
     // ================================================================ mode: stack
     function buildStack() {
-      const net = store.net, I = index(net), C = newContent(), L = net.layers.length;
+      const net = store.net, C = newContent(), L = net.layers.length;
+      let I = index(net);
       if (!net.nodes.length) return { ...C, empty: 'An empty net: add neurons on the canvas (D goes back to it)' };
       // Sheets in y-z planes, one per layer along x. Features run down (y) as in the canvas's
       // columns, groups (Q, K, V) stacked; tokens go into depth (z), token 1 in front, so a
@@ -736,23 +924,23 @@ export function install(ctx) {
       const pos = new Map();
       sheets.forEach(s => { for (const [id, c] of s.cells) pos.set(id, V3(s.x, c.y, c.z)); });
 
-      // -- plates: a faint band per layer, a stronger one per group (Q, K, V)
-      const plates = [];
+      // -- a faint plate per layer, shown only while the layer is hovered or selected (as the
+      //    canvas's lanes): at rest the neurons' columns are the structure
       sheets.forEach(s => {
         if (!s.cells.size) return;
-        const zc = (s.z0 + s.z1) / 2, zw = s.z1 - s.z0;
-        plates.push({ mat: 'band', c: V3(s.x, (s.y0 + s.y1) / 2, zc), w: zw + 1, h: s.y1 - s.y0 + 1 });
-        for (const g of s.groups) plates.push({ mat: 'grp', c: V3(s.x + 0.001, (g.ya + g.yb) / 2, zc), w: zw + 0.66, h: g.ya - g.yb + 0.66 });
+        const o = new THREE.Mesh(C.plateGeo(s.z1 - s.z0 + 1, s.y1 - s.y0 + 1, 0.35), MAT.band);
+        o.position.set(s.x - 0.01, (s.y0 + s.y1) / 2, (s.z0 + s.z1) / 2);
+        o.quaternion.copy(ROT_YZ);
+        o.renderOrder = -2;
+        o.visible = false;
+        o.updateMatrix();
+        o.matrixAutoUpdate = false;
+        C.group.add(o);
+        s.plate = o;
       });
-      for (const kind of ['band', 'grp']) {
-        const list = plates.filter(p => p.mat === kind), m = C.inst(GEO.plane, MAT[kind], list.length, -2);
-        list.forEach((p, i) => setBox(m, i, p.c, p.w, p.h, 1, ROT_YZ));
-        flushInst(m);
-      }
-      C.lines(plates.flatMap(p => rectPts(p.c, p.w, p.h, 'yz')));
 
       // -- neurons
-      const nodeMesh = C.inst(GEO.sphere, MAT.shade, net.nodes.length);
+      const nodeMesh = C.inst(net.nodes.length > 300 ? GEO.sphereLo : GEO.sphere, MAT.lit, net.nodes.length);
       net.nodes.forEach((n, i) => setBox(nodeMesh, i, pos.get(n.id) || V3(), pos.has(n.id) ? NODE_R : 0));
       flushInst(nodeMesh);
 
@@ -792,7 +980,12 @@ export function install(ctx) {
       }
       let nSeg = 0;
       for (const r of edgeRecs) { r.first = nSeg; nSeg += r.segs.length; }
-      const edgeMesh = C.inst(GEO.cyl, MAT.flat, nSeg);
+      const edgeLines = C.lines(nSeg);
+      for (const r of edgeRecs) r.segs.forEach((s, k) => edgeLines.seg(r.first + k, s[0], s[1]));
+      // At rest weights are faint, and fainter and thinner the more there are; hovering or selecting
+      // brings a neuron's (or a layer's) edges forward at their full colorFor strength.
+      const crowd = 30 / Math.max(30, edgeRecs.filter(r => !I.edgeById.get(r.id)?.fixed).length);
+      const K0 = clamp(0.62 * crowd ** 0.25, 0.16, 0.62), WS = clamp(crowd ** 0.2, 0.5, 1), KA = 0.75;
 
       // -- attention edges V_j,f -> Z_i,f, and the n × n tile of A (bars) in front of each attention sheet
       const attRecs = [], tiles = [];
@@ -814,9 +1007,10 @@ export function install(ctx) {
         }
         s.tile = { x0: s.x - wAll / 2, y: yTop - (a.T * cell) / 2, z: zF, yb: yTop - a.T * cell };
       });
-      const attMesh = C.inst(GEO.cyl, MAT.flat, attRecs.length);
+      const attLines = C.lines(attRecs.length);
+      attRecs.forEach((r, k) => attLines.seg(k, r.pts[0], r.pts[1]));
       const attByKey = new Map(attRecs.map(r => [r.key, r]));
-      const tileMesh = C.inst(GEO.box, MAT.shade, tiles.length);
+      const tileMesh = C.inst(GEO.bar, MAT.lit, tiles.length);
 
       // -- highlight rings and step-through pulses
       const ringMesh = C.inst(GEO.ring, MAT.ring, 64, 3), ringThin = C.inst(GEO.ringThin, MAT.ring, 128, 3);
@@ -830,19 +1024,21 @@ export function install(ctx) {
         if (s) return `${l ? `${act} · ` : ''}${s.T} × ${s.d}${s.groups ? ' each' : ''}`;
         return l === 0 ? `${n} input${n === 1 ? '' : 's'}` : `${act} · ${n}`;
       };
+      // One label per layer: its name. The second line (activation, shape) opens while the layer or
+      // one of its neurons is hovered, selected, stepped or the lens's focus.
       sheets.forEach((s, l) => {
         const lay = net.layers[l], name = lay.name || (l === 0 ? 'Input' : l === L - 1 ? 'Output' : 'Hidden');
         const o = C.label('nn3d-head', `<b>${esc(name)}</b><span>${esc(headSub(lay, l))}</span>`, V3(s.x, s.lid + 0.75, s.z0), 0.5, 1);
         o.userData.layer = l;
+        o.userData.fit = true;
         s.headLab = o;
-        for (const g of s.groups) C.label('nn3d-grp', `<i>${esc(g.name)}</i>`, V3(s.x, (g.ya + g.yb) / 2, s.z1 + 0.75), 1, 0.5);
-        if (s.tile) C.label('nn3d-grp att', '<i>A</i>', V3(s.tile.x0 - 0.15, s.tile.y, s.tile.z), 1, 0.5);
+        for (const g of s.groups) C.label('nn3d-grp', `<i>${esc(g.name)}</i>`, V3(s.x, (g.ya + g.yb) / 2, s.z1 + 0.6), 1, 0.5);
       });
-      const firstTok = sheets.findIndex(s => s.T > 1);
+      const firstTok = sheets.findIndex(s => s.T > 1), tokLabs = [];
       if (firstTok >= 0) {
         const s = sheets[firstTok], names = tokenNames(net);
         for (let t = 0; t < s.T; t++) {
-          C.label(`nn3d-tok${names[t] ? ' name' : ''}`, names[t] ? esc(names[t].length > 10 ? `${names[t].slice(0, 9)}…` : names[t]) : sub('t', t + 1), V3(s.x, s.y0 - 0.62, ((s.T - 1) / 2 - t) * ZT), 0.5, 0);
+          tokLabs.push(C.label(`nn3d-tok${names[t] ? ' name' : ''}`, names[t] ? esc(names[t].length > 10 ? `${names[t].slice(0, 9)}…` : names[t]) : sub('t', t + 1), V3(s.x, s.y0 - 0.62, ((s.T - 1) / 2 - t) * ZT), 0.5, 0));
         }
       }
       const valLabs = new Map();
@@ -863,13 +1059,19 @@ export function install(ctx) {
       const act = n => { const v = store.state.fwd?.node?.[n.id]?.a; return isNum(v) ? v : I.li.get(n.layer) === 0 && isNum(n.value) ? n.value : NaN; };
       const attA = (l, h, i, j) => { const v = store.state.fwd?.attn?.[l]?.heads?.[h]?.A?.[i]?.[j]; return isNum(v) ? v : NaN; };
 
+      const bgMix = (out, c, t) => { out[0] = P.bg[0] + (c[0] - P.bg[0]) * t; out[1] = P.bg[1] + (c[1] - P.bg[1]) * t; out[2] = P.bg[2] + (c[2] - P.bg[2]) * t; return out; };
+      const hiMix = (out, t) => { for (let k = 0; k < 3; k++) out[k] += (P.hi[k] - out[k]) * t; return out; };
+      const openL = new Set();   // layers whose header shows its second line
       function paint() {
+        if (stale(I, net)) I = index(net);
         const st = store.state, fwd = st.fwd, v3 = cur();
         const E = lensOf(), dim = !!E?.any, hides = !!E?.hides;
         const H = resolve(I, st.hover), S = resolve(I, st.sel), A = resolveAnim(I, st.anim);
         const foci = attFoci(I, E, A);
         const focusOn = H.any || A.any || !!foci[0]?.hover;
-        const maxW = maxAbs(net.edges.map(e => e.w)) || 1;
+        let maxW = 0;
+        for (const e of net.edges) if (isNum(e.w)) maxW = Math.max(maxW, Math.abs(e.w));
+        maxW ||= 1;
         const maxA = (fwd ? maxAbs(fwd.a, fwd.z) : maxAbs(net.nodes.map(act))) || 1;
         const marked = id => H.nodes.has(id) || S.nodes.has(id) || A.lit.has(id) || (focusOn && (H.rel.has(id) || A.rel.has(id)));
         // neurons
@@ -887,30 +1089,42 @@ export function install(ctx) {
             if (lab.element.__t !== s) { lab.element.__t = s; lab.element.textContent = s; }
             lab.element.style.opacity = op < 0.99 ? String(Math.max(0.3, op)) : '';
           }
-          if (S.nodes.has(n.id)) rings.push({ p, r: NODE_R + 0.13, k: 'sel' });
-          else if (A.lit.has(n.id)) rings.push({ p, r: NODE_R + 0.13, k: 'lit' });
-          else if (H.nodes.has(n.id)) thin.push({ p, r: NODE_R + 0.11 });
+          if (S.nodes.has(n.id)) rings.push({ p, r: NODE_R + 0.12, k: 'sel' });
+          else if (A.lit.has(n.id)) rings.push({ p, r: NODE_R + 0.12, k: 'lit' });
+          else if (H.nodes.has(n.id)) thin.push({ p, r: NODE_R + 0.1 });
         });
         flushInst(nodeMesh);
-        // weight edges
+        // weight edges: faint at rest (K0, WS), their colorFor strength and a wider line when they
+        // touch the hovered or selected neuron or layer; the held edge and its tie group get HI
         pulses = [];
+        const c4 = [0, 0, 0, 0], rgb = [0, 0, 0];
         for (const r of edgeRecs) {
-          const e = I.edgeById.get(r.id), w = isNum(e.w) ? e.w : 0;
+          const e = I.edgeById.get(r.id);
+          if (!e) continue;
+          const w = isNum(e.w) ? e.w : 0, u = Math.min(1, Math.abs(w) / maxW);
           const gone = hides && E.hidden.edge(e.id);
           const on = H.edges.has(e.id) || S.edges.has(e.id), tie = H.ties.has(e.id) || S.ties.has(e.id);
-          const lit = A.litE.has(e.id), rel = focusOn && (H.relE.has(e.id) || lit);
-          // a fixed edge is thin and muted (not a weight colour), at full strength only while held
-          const ev = dim ? E.edge(e.id) : 1, held = on || tie || lit;
-          const c = e.fixed ? [...P.fixed, held ? 1 : FIXED_A] : rgba(colorFor(w, maxW, P.th));
-          let op = held ? 1 : le(ev) * (focusOn && !rel ? FOCUS_EDGE : 1);
-          let col = mix(P.bg, c, c[3] * op), rad = e.fixed ? FIXED_R : 0.013 + 0.05 * Math.min(1, Math.abs(w) / maxW);
-          if (on || tie || lit) { col = mix(col, P.hi, on ? 0.55 : 0.35); rad += on ? 0.03 : 0.018; }
-          for (let k = 0; k < r.segs.length; k++) setRod(edgeMesh, r.first + k, r.segs[k][0], r.segs[k][1], gone ? 0 : rad);
-          for (let k = 0; k < r.segs.length; k++) setCol(edgeMesh, r.first + k, col);
+          const lit = A.litE.has(e.id), held = on || tie || lit;
+          const fwdE = held || (focusOn && H.relE.has(e.id)) || S.relE.has(e.id);
+          const ev = dim ? E.edge(e.id) : 1;
+          let s, px;
+          if (e.fixed) {   // not a parameter: muted text colour, thin, dashed
+            c4[0] = P.fixed[0]; c4[1] = P.fixed[1]; c4[2] = P.fixed[2];
+            s = held ? 1 : fwdE ? 0.7 : FIXED_A;
+            px = held ? 1.6 : 1;
+          } else {
+            cf(w, maxW, c4);
+            s = c4[3] * (fwdE ? 1 : K0);
+            px = fwdE ? 0.9 + 2.6 * u : (0.55 + 2.2 * u) * WS;
+          }
+          if (!held) s *= le(ev) * (focusOn && !fwdE ? FOCUS_EDGE : 1);
+          bgMix(rgb, c4, s);
+          if (held) { hiMix(rgb, on ? 0.55 : 0.35); px += on ? 1.2 : 0.6; }
+          for (let k = 0; k < r.segs.length; k++) edgeLines.set(r.first + k, rgb, gone ? 0 : px);
           if (lit && !gone) pulses.push({ pts: r.pts, rev: A.dir === 'bwd' });
         }
-        flushInst(edgeMesh);
-        // attention edges: width and opacity from A_ij
+        edgeLines.flush();
+        // attention edges: strength and width from A_ij, faint at rest, full on a shown row
         const rowOf = new Map();   // attention keys the shown rows light
         for (const F of foci) {
           for (const r of attRecs) {
@@ -919,18 +1133,21 @@ export function install(ctx) {
             rowOf.set(r.key, F);
           }
         }
+        const attHi = mix(P.att, P.hi, 0.3);
         attRecs.forEach((r, k) => {
           const A0 = attA(r.l, r.h, r.i, r.j), u = isNum(A0) ? clamp(A0, 0, 1) : 0;
           const gone = hides && E.hidden.attn(r.l, r.i, r.j, r.h);
           const lit = A.litE.has(r.key), rel = rowOf.has(r.key) && !rowOf.get(r.key).lens;
           const ev = dim ? E.attn(r.l, r.i, r.j, r.h) : 1;
-          const op = (lit || rel ? 1 : le(ev) * (focusOn ? FOCUS_ATT : 1)) * (isNum(A0) ? 0.06 + 0.88 * u : 0.12);
-          setRod(attMesh, k, r.pts[0], r.pts[1], gone ? 0 : 0.011 + 0.06 * u + (lit ? 0.012 : 0));
-          setCol(attMesh, k, mix(P.bg, lit ? mix(P.att, P.hi, 0.3) : P.att, op));
+          let s = (isNum(A0) ? 0.06 + 0.88 * u : 0.12) * (lit || rel ? 1 : KA);
+          if (!(lit || rel)) s *= le(ev) * (focusOn ? FOCUS_ATT : 1);
+          bgMix(rgb, lit ? attHi : P.att, s);
+          attLines.set(k, rgb, gone ? 0 : lit || rel ? 1 + 3 * u + (lit ? 0.6 : 0) : (0.55 + 2.4 * u) * WS);
           if (lit && !gone && A.att?.ph !== 'softmax') pulses.push({ pts: r.pts, rev: A.dir === 'bwd' });
         });
-        flushInst(attMesh);
-        // A tiles (per head T × T): bars as tall as A_ij, the shown row ringed by colour
+        attLines.flush();
+        // A tiles (per head T × T): bars as tall as A_ij over a faint neutral cell, the shown row in HI
+        const cellBase = mix(P.bg, P.node, 0.45);
         tiles.forEach((c, k) => {
           const v = attA(c.l, c.h, c.i, c.j), u = isNum(v) ? clamp(v, 0, 1) : 0;
           const rows = dim ? E.rows(c.l) : null, hs = dim ? E.heads(c.l) : null;
@@ -938,8 +1155,8 @@ export function install(ctx) {
           const shown = foci.some(F => F.l === c.l && (F.h == null || F.h === c.h) && (F.dir === 'row' ? c.i === F.t : c.j === F.t));
           const depth = c.masked ? 0.02 : 0.05 + 0.6 * u;
           tp.set(c.c.x, c.c.y, c.c.z + depth / 2);
-          setBox(tileMesh, k, tp, c.cell * 0.9, c.cell * 0.9, depth);
-          const base = c.masked ? mix(P.bg, P.line, 0.12) : mix(P.bg, P.att, 0.08 + 0.92 * u);
+          setBox(tileMesh, k, tp, c.cell * 0.86, c.cell * 0.86, depth);
+          const base = c.masked ? mix(P.bg, P.node, 0.2) : mix(cellBase, P.att, 0.1 + 0.9 * u);
           setCol(tileMesh, k, mix(P.bg, shown ? mix(base, P.hi, 0.45) : base, keep ? 1 : 0.25));
         });
         flushInst(tileMesh);
@@ -973,18 +1190,25 @@ export function install(ctx) {
           tip.position.copy(pos.get(tipId)).add(V3(0, NODE_R + 0.1, 0));
           tip.visible = true;
         } else tip.visible = false;
-        // headers dim with their layer
+        // headers: dim with their layer; the second line opens for a held layer (the layer itself,
+        // or a neuron of it hovered, selected or stepped) or the lens's focus, and its plate shows
+        const open = new Set([H.layer, S.layer].filter(Number.isInteger));
+        for (const id of [...H.nodes, ...S.nodes, ...A.lit]) { const n = I.nodeById.get(id); if (n) open.add(I.li.get(n.layer)); }
         for (const s of sheets) {
           if (!s.headLab) continue;
-          const lv = dim ? E.layer(s.headLab.userData.layer) : 1, foc = E?.lens.focus?.layer === net.layers[s.headLab.userData.layer].id;
-          s.headLab.element.style.opacity = lv < 0.995 ? String(le(lv)) : '';
-          s.headLab.element.classList.toggle('foc', !!foc);
-          s.headLab.element.classList.toggle('hov', H.layer === s.headLab.userData.layer || S.layer === s.headLab.userData.layer);
+          const l = s.headLab.userData.layer, el = s.headLab.element;
+          const lv = dim ? E.layer(l) : 1, foc = E?.lens.focus?.layer === net.layers[l].id, hov = H.layer === l || S.layer === l;
+          el.style.opacity = lv < 0.995 ? String(le(lv)) : '';
+          el.classList.toggle('foc', !!foc);
+          el.classList.toggle('hov', hov);
+          const wide = open.has(l) || !!foc;
+          if (wide !== openL.has(l)) { if (wide) openL.add(l); else openL.delete(l); el.classList.toggle('open', wide); relabel = true; }
+          if (s.plate) s.plate.visible = hov || !!foc;
         }
         placeRings();
       }
       function placeRings() {
-        const pulse = 1 + 0.18 * Math.sin(performance.now() / 175);
+        const pulse = 1 + 0.16 * Math.sin(performance.now() / 175);
         ringMesh.count = Math.min(64, rings.length);
         rings.slice(0, 64).forEach((r, i) => setBox(ringMesh, i, r.p, r.r * (r.k === 'lit' ? pulse : 1), r.r * (r.k === 'lit' ? pulse : 1), r.r, camera.quaternion));
         ringThin.count = Math.min(128, thin.length);
@@ -1002,7 +1226,7 @@ export function install(ctx) {
         pulseMesh.count = Math.min(256, pulses.length);
         if (pulses.length) {
           const u = (t / 1100) % 1, e = u < 0.5 ? 4 * u * u * u : 1 - (-2 * u + 2) ** 3 / 2;
-          pulses.slice(0, 256).forEach((q, i) => setBox(pulseMesh, i, pathAt(q.pts, q.rev ? 1 - e : e), 0.075));
+          pulses.slice(0, 256).forEach((q, i) => setBox(pulseMesh, i, pathAt(q.pts, q.rev ? 1 - e : e), 0.07));
           flushInst(pulseMesh);
           busy = true;
         }
@@ -1010,6 +1234,7 @@ export function install(ctx) {
       }
       // Screen-space picking: a neuron under the cursor, else an A tile cell, else the nearest edge.
       function pick(px, py, proj) {
+        if (stale(I, net)) I = index(net);
         let best = null;
         for (const n of net.nodes) {
           const p = pos.get(n.id);
@@ -1041,32 +1266,76 @@ export function install(ctx) {
         for (const r of attRecs) if (!(E?.hides && E.hidden.attn(r.l, r.i, r.j, r.h))) near(r.pts, { kind: 'token', layer: r.l, t: r.i, ...(I.att[r.l].heads > 1 ? { h: r.h } : {}), att: true });
         return hit;
       }
+      // What the camera frames: the neurons, the A tiles and a little room over each header (the
+      // headers themselves are fitted at their size on screen: userData.fit).
       const points = () => {
         const pts = [...pos.values()];
-        // a header is about 3 units wide and 1.3 tall at the default zoom: keep all of it in frame
-        for (const s of sheets) if (s.headLab) { const h = s.headLab.position; pts.push(V3(h.x - 1.6, h.y + 1.3, h.z), V3(h.x + 1.6, h.y + 1.3, h.z)); }
+        for (const s of sheets) if (s.headLab) { const h = s.headLab.position; pts.push(V3(h.x, h.y + 0.4, h.z)); }
         for (const c of tiles) pts.push(c.c);
         return pts;
       };
-      // Headers that touch on screen drop their subtitle; if they still touch, every other one of
-      // them moves up a line. Measured after the labels are placed, while the camera moves.
+      C.ground(new THREE.Box3().setFromPoints([...pos.values(), ...tiles.map(c => c.c)]));
+      // At rest, headers that touch another on screen drop their second line, then each takes the
+      // lowest of three rows (lifted LIFT px apart) where it touches none placed before it, left to
+      // right; one that fits in none hides (a deep net in a small window). A held header (open,
+      // hovered, the lens's focus) keeps its second line and goes in on top of that rest layout,
+      // hiding only the headers it touches, so hovering never reshuffles the others. The rest
+      // layout is worked out again only when the camera has moved. Token names that would touch
+      // the one before them hide. Measured after a render, when the camera has moved or a header
+      // opened or closed.
+      const LIFT = 30;
+      let restAt = -1;   // camMoves when the rest layout was last worked out
       function declutter() {
         const hs = sheets.filter(s => s.headLab?.visible).map(s => s.headLab.element);
-        for (const e of hs) e.classList.remove('compact', 'up');
-        const clash = () => {
-          const rs = hs.map(e => ({ e, r: e.getBoundingClientRect() })).filter(x => x.r.width).sort((a, b) => a.r.left - b.r.left);
-          const out = [];
-          for (let k = 0; k + 1 < rs.length; k++) {
-            const a = rs[k].r, b = rs[k + 1].r;
-            if (a.right + 4 > b.left && a.bottom > b.top && b.bottom > a.top) out.push([rs[k].e, rs[k + 1].e]);
+        const held = e => e.classList.contains('open') || e.classList.contains('hov') || e.classList.contains('foc');
+        const touch = (a, b) => a.right + 6 > b.left && b.right + 6 > a.left && a.bottom > b.top && b.bottom > a.top;
+        const lift = (r, k) => ({ left: r.left, right: r.right, top: r.top - k * LIFT, bottom: r.bottom - k * LIFT });
+        const setRow = (e, k) => { e.classList.toggle('up', k === 1); e.classList.toggle('up2', k === 2); e.classList.toggle('gone', k < 0); };
+        const H = hs.filter(held), R = hs.filter(e => !held(e));
+        if (!H.length || restAt !== camMoves) {
+          restAt = camMoves;
+          for (const e of R) { e.classList.remove('compact'); setRow(e, 0); }
+          let rs = R.map(e => ({ e, r: e.getBoundingClientRect() })).filter(x => x.r.width);
+          if (rs.some(a => rs.some(b => b !== a && touch(a.r, b.r)))) {
+            for (const a of rs) if (rs.some(b => b !== a && touch(a.r, b.r))) a.e.classList.add('compact');
+            rs = rs.map(x => ({ e: x.e, r: x.e.getBoundingClientRect() })).sort((a, b) => a.r.left - b.r.left);
+            const placed = [];
+            for (const x of rs) {
+              let k = 0;
+              while (k < 3 && placed.some(p => touch(lift(x.r, k), p))) k++;
+              x.e.__row = k < 3 ? k : -1;
+              if (k < 3) placed.push(lift(x.r, k));
+            }
+          } else for (const x of rs) x.e.__row = 0;
+        }
+        for (const e of R) setRow(e, e.__row ?? 0);
+        if (H.length) {
+          const shown = R.filter(e => !e.classList.contains('gone')).map(e => ({ e, r: e.getBoundingClientRect() }));
+          const placed = [];
+          for (const e of H.sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left)) {
+            e.classList.remove('compact');
+            setRow(e, 0);
+            // the row (clear of other held headers) where it hides the fewest others
+            const r0 = e.getBoundingClientRect();
+            let k = -1, cost = Infinity;
+            for (let j = 0; j < 3; j++) {
+              if (placed.some(p => touch(lift(r0, j), p))) continue;
+              const c = shown.filter(x => touch(lift(r0, j), x.r)).length;
+              if (c < cost) { cost = c; k = j; }
+            }
+            if (k < 0) k = 0;
+            setRow(e, k);
+            const r = lift(r0, k);
+            placed.push(r);
+            for (const x of shown) if (touch(r, x.r)) x.e.classList.add('gone');
           }
-          return out;
-        };
-        let pairs = clash();
-        if (!pairs.length) return;
-        for (const [a, b] of pairs) { a.classList.add('compact'); b.classList.add('compact'); }
-        pairs = clash();
-        pairs.forEach(([, b], k) => { if (k % 2 === 0 || !pairs[k - 1] || pairs[k - 1][1] !== pairs[k][0]) b.classList.add('up'); });
+        }
+        let last = null;
+        for (const o of tokLabs) {
+          const r = o.element.getBoundingClientRect(), hit = last && r.width && r.left < last.right + 3 && last.left < r.right + 3 && r.top < last.bottom && last.top < r.bottom;
+          o.element.style.visibility = hit ? 'hidden' : '';
+          if (!hit && r.width) last = r;
+        }
       }
       return {
         ...C, paint, frame, pick, points, declutter, dir: DIRS.stack,
@@ -1100,7 +1369,7 @@ export function install(ctx) {
       return a && b ? Math.hypot(b.x - a.x, b.y - a.y) : 0;
     };
     function showNum(o) {
-      const d = o.userData, vis = !d.no && (!!d.on || (!!d.nums && !!d.want));
+      const d = o.userData, vis = !d.no && (!!d.on || (!!d.nums && !!d.want && !d.hid));
       const small = vis && !d.on && d.face != null && d.face < NUM_PX;
       const txt = small ? String(d.txt ?? '').replace(/^(−?)0\./, '$1.') : String(d.txt ?? '');
       if (o.element.__t !== txt) { o.element.__t = txt; o.element.textContent = txt; }
@@ -1110,21 +1379,66 @@ export function install(ctx) {
       o.visible = vis;
       return true;
     }
-    // Value cubes in x-y planes (rows = tokens top to bottom), with a HI halo behind lit ones.
+    // A number whose cell sits behind a nearer cell on screen (a slab behind a slab) hides, so
+    // only the numbers of the faces you see show: labels ignore depth. Run after the faces are
+    // measured; the held cell always shows its number. -> true if any visibility changed.
+    function occlude(labs) {
+      const qs = [];
+      for (const o of labs) {
+        const d = o.userData;
+        d.hid = false;
+        if (d.no || !d.nums || !d.want || !d.face) continue;
+        const q = proj(o.position, 0);
+        if (q) qs.push({ o, x: q.x, y: q.y, z: q.z, h: d.face * 0.45 });
+      }
+      qs.sort((a, b) => a.z - b.z);
+      for (let i = 1; i < qs.length; i++) {
+        const a = qs[i];
+        for (let j = 0; j < i; j++) {
+          const b = qs[j];
+          if (!b.o.userData.hid && b.z < a.z - 1e-6 && Math.abs(a.x - b.x) < b.h && Math.abs(a.y - b.y) < b.h) { a.o.userData.hid = true; break; }
+        }
+      }
+      // then, nearest first, a number whose text would touch one already shown hides too
+      const kept = [];
+      for (const a of qs) {
+        const d = a.o.userData;
+        if (d.hid) continue;
+        const small = d.face < NUM_PX, fs = small ? clamp(Math.round(23 * d.face / 22) / 2, 7.5, 11.5) : 11.5;
+        const txt = small ? String(d.txt ?? '').replace(/^(−?)0\./, '$1.') : String(d.txt ?? '');
+        const w = txt.length * fs * 0.27 + 1, h = fs * 0.55;   // half-extents of the drawn text
+        if (kept.some(k => Math.abs(a.x - k.x) < w + k.w && Math.abs(a.y - k.y) < h + k.h)) { d.hid = true; continue; }
+        kept.push({ x: a.x, y: a.y, w, h });
+      }
+      let changed = false;
+      for (const o of labs) changed = showNum(o) || changed;
+      return changed;
+    }
+    // Value tiles in x-y planes (rows = tokens top to bottom), with a HI frame on lit ones.
     function cellSet(C, n) {
-      const mesh = C.inst(GEO.box, MAT.shade, n), halo = C.inst(GEO.frame, MAT.halo, n, 2);
+      const mesh = C.inst(GEO.tile, MAT.lit, n), halo = C.inst(GEO.frame, MAT.halo, n, 2);
       halo.count = 0;
       return { mesh, halo };
+    }
+    // The heads' marks: head colour only on a thin accent (a strip along a slab's left edge, a bar
+    // under a chunk), the plates themselves neutral. A head label carries a swatch, not a colour.
+    const headSw = h => `<span class="ui-sw" style="background: var(${HEAD_VARS[h % HEAD_VARS.length]})"></span>`;
+    // W_O's value from its tied edges, read fresh (it trains): the tie's first edge.
+    function woReader(wo, I) {
+      const ids = wo ? wo.ties.map(r => r.map(t => (t && I.ties.get(t)?.[0]) || null)) : [];
+      return (idx, i, j) => { const id = ids[i]?.[j], e = id && idx().edgeById.get(id); return e && isNum(e.w) ? e.w : wo.W[i][j]; };
     }
 
     // ================================================================ mode: heads
     function buildHeads(v) {
-      const net = store.net, I = index(net), C = newContent(), list = attnLayers(net);
+      const net = store.net, C = newContent(), list = attnLayers(net);
+      let I = index(net);
+      const idx = () => (stale(I, net) ? (I = index(net)) : I);
       if (!list.length) return { ...C, empty: 'Heads shows an attention layer, and this net has none. Try the "Two heads: max and min" or "Transformer block" preset' };
       const l = list.includes(I.li.get(v.layer)) ? I.li.get(v.layer) : list[0];
       const a = I.att[l], T = a.T, d = a.d, H = a.heads, dh = a.dh, qkv = l - 1;
-      const wo = projOf(net, l), dOut = wo ? wo.W[0].length : 0;
-      // Cells in x-y planes (rows = tokens). Q | K | V on top (each head's column chunk tinted),
+      const wo = projOf(net, l), dOut = wo ? wo.W[0].length : 0, woAt = woReader(wo, I);
+      // Cells in x-y planes (rows = tokens). Q | K | V on top (each head's column chunk marked),
       // split into one slab per head below them, stepping down and back in depth:
       // Q_h K_h -> A_h (bars), A_h V_h = Z_h; then, right of the slabs, concat Z × W_O = Z W_O.
       const GZ = 2.1, SLAB = T + 2.0, ROW = T + 2.1;
@@ -1133,10 +1447,11 @@ export function install(ctx) {
       const zOf = h => -h * GZ;
       const yOf = t => (T - 1) / 2 - t;
       const X = {};
-      const row = (list, gap) => {   // [key, width] centred on x = 0
-        const W0 = list.reduce((s, [, w]) => s + w, 0) + gap * (list.length - 1);
+      const row = (list, gap) => {   // [key, width, gap after?] centred on x = 0; returns the width, gaps included
+        const gs = list.map(([, , g], i) => (i < list.length - 1 ? g ?? gap : 0));
+        const W0 = list.reduce((s, [, w]) => s + w, 0) + gs.reduce((s, g) => s + g, 0);
         let x = -W0 / 2;
-        for (const [k, w, g] of list) { X[k] = x + (w - 1) / 2; x += w + (g ?? gap); }
+        list.forEach(([k, w], i) => { X[k] = x + (w - 1) / 2; x += w + gs[i]; });
         return W0;
       };
       row([['Qf', d], ['Kf', d], ['Vf', d]], 1.1);
@@ -1173,83 +1488,91 @@ export function install(ctx) {
         bars.push({ h, i, j, masked: a.causal && j > i, p: V3(X.A - (T - 1) / 2 + j, yS(h) + yOf(i), zOf(h)) });
       }
       const { mesh, halo } = cellSet(C, cells.length);
-      cells.forEach((c, i) => setBox(mesh, i, c.p, CUBE));
+      cells.forEach((c, i) => setBox(mesh, i, c.p, CUBE, CUBE, 1));
       flushInst(mesh);
-      const barMesh = C.inst(GEO.box, MAT.shade, bars.length), barHalo = C.inst(GEO.frame, MAT.halo, bars.length, 2);
+      const barMesh = C.inst(GEO.bar, MAT.lit, bars.length), barHalo = C.inst(GEO.frame, MAT.halo, bars.length, 2);
       barHalo.count = 0;
 
-      // plates: each head's slab, and each head's column chunk of Q, K, V and concat Z
-      const plates = [];
-      const x0 = -slabW / 2 - 0.55, x1 = slabW / 2 + 0.55;
+      // neutral plates: each head's slab, and one behind each of Q, K, V and concat Z; the head
+      // colour on an accent beside a slab and under each head's column chunk
+      const x0 = -slabW / 2 - 0.55, x1 = slabW / 2 + 0.55, backZ = TD / 2 + 0.12;
+      const slabs = [], chunks = [], accents = [];
       for (let h = 0; h < H; h++) {
-        plates.push({ h, c: V3(0, yS(h), zOf(h) - 0.46), w: x1 - x0, hh: T + 0.9 });
-        for (const k of ['Qf', 'Kf', 'Vf']) plates.push({ h, c: V3(X[k] - (d - 1) / 2 + h * dh + (dh - 1) / 2, yA, zMid - 0.44), w: dh + 0.22, hh: T + 0.3 });
-        plates.push({ h, c: V3(X.Zc - (d - 1) / 2 + h * dh + (dh - 1) / 2, yC, zMid - 0.44), w: dh + 0.22, hh: T + 0.3 });
+        slabs.push({ h, c: V3(0, yS(h), zOf(h) - backZ) });
+        accents.push({ h, c: V3(x0 + 0.06, yS(h), zOf(h) - backZ + 0.004), w: 0.08, hh: T + 0.5 });
+        const cx = k => X[k] - (d - 1) / 2 + h * dh + (dh - 1) / 2;
+        for (const k of ['Qf', 'Kf', 'Vf']) accents.push({ h, c: V3(cx(k), yA - T / 2 - 0.2, zMid), w: dh - 0.12, hh: 0.08 });
+        accents.push({ h, c: V3(cx('Zc'), yC + T / 2 + 0.2, zMid), w: dh - 0.12, hh: 0.08 });
       }
-      const plateMesh = C.inst(GEO.plane, MAT.plate, plates.length, -2);
-      plates.forEach((p, i) => { setBox(plateMesh, i, p.c, p.w, p.hh, 1); setCol(plateMesh, i, P.heads[p.h % P.heads.length]); });
-      flushInst(plateMesh);
-      // fans: split (chunk h of Q, K, V -> head h's piece) and concat (Z_h -> chunk h)
+      for (const k of ['Qf', 'Kf', 'Vf', 'Zc']) chunks.push({ h: null, c: V3(X[k], k === 'Zc' ? yC : yA, zMid - backZ) });
+      const slabMesh = C.inst(C.plateGeo(x1 - x0, T + 0.9, 0.3), MAT.plate, slabs.length, -2);
+      slabs.forEach((p, i) => setBox(slabMesh, i, p.c, 1));
+      const chunkMesh = C.inst(C.plateGeo(d + 0.3, T + 0.3, 0.22), MAT.plate, chunks.length, -2);
+      chunks.forEach((p, i) => setBox(chunkMesh, i, p.c, 1));
+      const accMesh = C.inst(GEO.plane, MAT.flat, accents.length);
+      accents.forEach((p, i) => setBox(accMesh, i, p.c, p.w, p.hh, 1));
+      [slabMesh, chunkMesh, accMesh].forEach(flushInst);
+      // fans: split (chunk h of Q, K, V -> head h's piece) and concat (Z_h -> chunk h), thin and neutral
       const fans = [];
-      const bot = y => y - T / 2 - 0.12, top = y => y + T / 2 + 0.12;
+      const bot = y => y - T / 2 - 0.28, top = y => y + T / 2 + 0.28;
       for (let h = 0; h < H; h++) {
         const cx = k => X[k] - (d - 1) / 2 + h * dh + (dh - 1) / 2;
-        for (const [f, p] of [['Qf', 'Q'], ['Kf', 'K'], ['Vf', 'V']]) fans.push({ h, a: V3(cx(f), bot(yA), zMid), b: V3(X[p], top(yS(h)), zOf(h)) });
+        for (const [f, p] of [['Qf', 'Q'], ['Kf', 'K'], ['Vf', 'V']]) fans.push({ h, a: V3(cx(f), bot(yA), zMid), b: V3(X[p], yS(h) + T / 2 + 0.12, zOf(h)) });
         fans.push({ h, a: V3(X.Z + dh / 2 + 0.1, yS(h), zOf(h)), b: V3(cx('Zc'), top(yC), zMid) });
       }
-      const fanMesh = C.inst(GEO.cyl, MAT.flat, fans.length);
-      // labels
+      const fanLines = C.lines(fans.length);
+      fans.forEach((f, i) => fanLines.seg(i, f.a, f.b));
+      // labels: the blocks' names; a slab's own names (Q_h ... Z_h) on head 1, and on another head
+      // while one of its cells is held; "head n" with its swatch
       const lab = (html, p, cls = 'nn3d-name', cx = 0.5, cy = 1) => C.label(cls, html, p, cx, cy);
       const name = (k, i) => (i == null ? `<i>${k}</i>` : sub(k, i));
-      for (const k of ['Q', 'K', 'V']) lab(name(k), V3(X[`${k}f`], yA + T / 2 + 0.2, zMid));
-      lab(`<i>Z</i> = [${sub('Z', 1)}${H > 1 ? ` ${H > 2 ? '⋯ ' : ''}${sub('Z', H)}` : ''}]`, V3(X.Zc, yC - T / 2 - 0.25, zMid), 'nn3d-name', 0.5, 0);
+      for (const k of ['Q', 'K', 'V']) lab(name(k), V3(X[`${k}f`], yA + T / 2 + 0.2, zMid)).userData.fit = true;
+      lab(`<i>Z</i> = [${sub('Z', 1)}${H > 1 ? ` ${H > 2 ? '⋯ ' : ''}${sub('Z', H)}` : ''}]`, V3(X.Zc, yC - T / 2 - 0.25, zMid), 'nn3d-name', 0.5, 0).userData.fit = true;
       if (wo) {
         lab(katexHtml(wo.name), V3(X.W, yC - d / 2 - 0.25, zMid), 'nn3d-name tex', 0.5, 0);
-        lab(katexHtml(`Z${wo.name}`), V3(X.out, yC - T / 2 - 0.25, zMid), 'nn3d-name tex', 0.5, 0);
+        lab(katexHtml(`Z${wo.name}`), V3(X.out, yC - T / 2 - 0.25, zMid), 'nn3d-name tex', 0.5, 0).userData.fit = true;
         lab('×', V3((X.Zc + X.W) / 2 + (d - dOut) / 4, yC, zMid), 'nn3d-op', 0.5, 0.5);
         lab('=', V3((X.W + X.out) / 2, yC, zMid), 'nn3d-op', 0.5, 0.5);
       }
+      const slabNames = [];
       for (let h = 0; h < H; h++) {
-        if (H > 3 && h > 0 && h < H - 1) continue;
         const z = zOf(h), n = h + 1, ty = yS(h) + T / 2 + 0.2;
-        for (const k of ['Q', 'K', 'A', 'V', 'Z']) lab(name(k, n), V3(X[k], ty, z));
-        const o = lab(`head ${n}`, V3(x0 - 0.25, yS(h), z), 'nn3d-headlab', 1, 0.5);
-        o.element.style.color = `var(${HEAD_VARS[h % HEAD_VARS.length]})`;   // follows the theme
+        slabNames.push(['Q', 'K', 'A', 'V', 'Z'].map(k => lab(name(k, n), V3(X[k], ty, z))));
+        if (H > 3 && h > 0 && h < H - 1) continue;
+        lab(`${headSw(h)}head ${n}`, V3(x0 - 0.3, yS(h), z), 'nn3d-headlab', 1, 0.5).userData.fit = true;
         if (h === 0) {
           lab('→', V3((X.K + X.A) / 2 - (T - dh) / 4, yS(0), z), 'nn3d-op', 0.5, 0.5);
           lab('·', V3((X.A + X.V) / 2 + (T - dh) / 4, yS(0), z), 'nn3d-op', 0.5, 0.5);
           lab('=', V3((X.V + X.Z) / 2, yS(0), z), 'nn3d-op', 0.5, 0.5);
         }
       }
-      const secX = Math.min(X.Qf - d / 2, x0) - 0.4;
-      lab('split by columns', V3(secX, (bot(yA) + top(yS(0))) / 2, zMid / 2), 'nn3d-sec', 1, 0.5);
-      lab('concat', V3(X.Zc, top(yC) + 0.55, zMid), 'nn3d-sec', 0.5, 1);
-      if (wo) lab('project', V3(X.W, yC + d / 2 + 0.55, zMid), 'nn3d-sec', 0.5, 1);
-      const numLabs = cells.length + bars.length <= 220 ? cells.map(c => C.label('nn3d-num', '', c.p.clone().add(V3(0, 0, CUBE / 2)), 0.5, 0.5)) : [];
+      const numLabs = cells.length + bars.length <= 220 ? cells.map(c => C.label('nn3d-num', '', c.p.clone().add(V3(0, 0, TD / 2)), 0.5, 0.5)) : [];
       const barLabs = cells.length + bars.length <= 220 ? bars.map(() => C.label('nn3d-num att', '', V3(), 0.5, 0.5)) : [];
 
       const val = c => {
         const fwd = store.state.fwd, fa = fwd?.attn?.[l];
-        if (c.kind === 'W') return wo.W[c.i][c.j];
+        if (c.kind === 'W') return woAt(idx, c.i, c.j);
         if (c.kind === 'Q' || c.kind === 'K' || c.kind === 'V' || c.kind === 'Z') return fa?.heads?.[c.h]?.[c.kind]?.[c.t]?.[c.e];
         if (c.kind === 'out') {
           const zs = M.reshape(net, l, fwd?.a?.[l]).X;
-          return zs[c.t].reduce((s, z, i) => s + z * wo.W[i][c.f], 0);
+          return zs[c.t].reduce((s, z, i) => s + z * woAt(idx, i, c.f), 0);
         }
         return c.node ? fwd?.node?.[c.node]?.a : NaN;
       };
+      const barBase = () => mix(P.bg, P.node, 0.5);
       function paint() {
+        idx();
         const st = store.state, fwd = st.fwd, fa = fwd?.attn?.[l], v3 = cur();
         const E = lensOf(), dim = !!E?.any;
         const maxA = (fwd ? maxAbs(fwd.a, fwd.z) : 1) || 1, maxW = maxAbs(net.edges.map(e => e.w)) || 1;
         const hl = heldCells(I, cells, bars, { l, qkv, wo, a }), focusOn = hl.any;
-        const lit = [];
+        const lit = [], hot = new Set();
         cells.forEach((c, i) => {
           const vv = val(c), on = hl.cells.has(i);
           const e = !dim ? 1 : c.node ? E.node(c.node) : c.edge ? E.edge(c.edge) : 1;
           const op = on ? 1 : le(e) * (focusOn ? FOCUS_NODE : 1);
-          setCol(mesh, i, mix(P.bg, over(vv, c.kind === 'W' ? maxW : maxA, P.node), op));
-          if (on) lit.push(c.p);
+          setCol(mesh, i, mix(P.bg, over(vv, c.kind === 'W' ? maxW : maxA, P.node, CELL_A), op));
+          if (on) { lit.push(c.p); if (c.e !== undefined) hot.add(c.h); }
           const o = numLabs[i];
           if (o) {
             Object.assign(o.userData, { txt: num(vv), nums: !!v3?.nums, on, want: e >= NUM_MIN, no: false });
@@ -1259,20 +1582,20 @@ export function install(ctx) {
         });
         flushInst(mesh);
         halo.count = lit.length;
-        lit.forEach((p, i) => setBox(halo, i, tp.set(p.x, p.y, p.z + CUBE / 2 + 0.01), CUBE, CUBE, 1));
+        lit.forEach((p, i) => setBox(halo, i, tp.set(p.x, p.y, p.z + TD / 2 + 0.01), CUBE, CUBE, 1));
         flushInst(halo);
-        const litBars = [];
+        const litBars = [], bb = barBase();
         bars.forEach((b, i) => {
           const A0 = fa?.heads?.[b.h]?.A?.[b.i]?.[b.j], u = isNum(A0) ? clamp(A0, 0, 1) : 0, on = hl.bars.has(i);
           const e = dim ? E.attn(l, b.i, b.j, b.h) : 1, op = on ? 1 : le(e) * (focusOn ? FOCUS_NODE : 1);
-          const depth = b.masked ? 0.04 : 0.08 + 1.0 * u;
-          setBox(barMesh, i, tp.set(b.p.x, b.p.y, b.p.z - CUBE / 2 + depth / 2), CUBE, CUBE, depth);
-          const base = b.masked ? mix(P.node, P.line, 0.1) : mix(P.node, P.att, 0.1 + 0.9 * u);
+          const depth = b.masked ? 0.04 : 0.08 + 1.0 * u, z0 = b.p.z - TD / 2;
+          setBox(barMesh, i, tp.set(b.p.x, b.p.y, z0 + depth / 2), CUBE, CUBE, depth);
+          const base = b.masked ? mix(P.bg, P.node, 0.25) : mix(bb, P.att, 0.1 + 0.9 * u);
           setCol(barMesh, i, mix(P.bg, base, op));
-          if (on) litBars.push(V3(b.p.x, b.p.y, b.p.z - CUBE / 2 + depth));
+          if (on) { litBars.push(V3(b.p.x, b.p.y, z0 + depth)); hot.add(b.h); }
           const o = barLabs[i];
           if (o) {
-            o.position.set(b.p.x, b.p.y, b.p.z - CUBE / 2 + depth + 0.02);
+            o.position.set(b.p.x, b.p.y, z0 + depth + 0.02);
             Object.assign(o.userData, { txt: num(A0), nums: !!v3?.nums, on, want: e >= NUM_MIN, no: b.masked });
             showNum(o);
           }
@@ -1281,16 +1604,19 @@ export function install(ctx) {
         barHalo.count = litBars.length;
         litBars.forEach((p, i) => setBox(barHalo, i, tp.set(p.x, p.y, p.z + 0.01), CUBE, CUBE, 1));
         flushInst(barHalo);
-        const hs = dim ? E.heads(l) : null;
-        fans.forEach((f, i) => {
-          setRod(fanMesh, i, f.a, f.b, 0.035);
-          setCol(fanMesh, i, mix(P.bg, P.heads[f.h % P.heads.length], hs && !hs.has(f.h) ? 0.2 : 0.85));
-        });
-        flushInst(fanMesh);
-        plates.forEach((p, i) => setCol(plateMesh, i, mix(P.bg, P.heads[p.h % P.heads.length], hs && !hs.has(p.h) ? 0.25 : 1)));
-        flushInst(plateMesh);
+        // a head the lens drops fades: its plates, accents and fans
+        const hs = dim ? E.heads(l) : null, kept = h => !hs || hs.has(h);
+        fans.forEach((f, i) => fanLines.set(i, mix(P.bg, P.fixed, kept(f.h) ? (hot.has(f.h) ? 0.8 : 0.45) : 0.12), hot.has(f.h) ? 1.4 : 1));
+        fanLines.flush();
+        slabs.forEach((p, i) => setCol(slabMesh, i, kept(p.h) ? P.plate : P.bg));
+        chunks.forEach((p, i) => setCol(chunkMesh, i, P.plate));
+        accents.forEach((p, i) => setCol(accMesh, i, mix(P.bg, P.heads[p.h % P.heads.length], kept(p.h) ? 1 : 0.2)));
+        [slabMesh, chunkMesh, accMesh].forEach(flushInst);
+        // a slab's names: head 1's always, another's while it is held
+        slabNames.forEach((ls, h) => { const on = h === 0 || hot.has(h); for (const o of ls) o.visible = on; });
       }
       function pick(px, py, proj) {
+        idx();
         let best = null;
         const test = (p, spec, zoff) => {
           const q = proj(tp.set(p.x, p.y, p.z + zoff), CUBE / 2);
@@ -1302,21 +1628,19 @@ export function install(ctx) {
           if (c.kind === 'W') return c.edge ? { kind: 'edge', id: c.edge } : null;
           return c.node ? { kind: 'node', id: c.node } : null;
         };
-        cells.forEach(c => { const s = tokenOf(c); if (s) test(c.p, { ...s, node: c.node || null }, CUBE / 2); });
+        cells.forEach(c => { const s = tokenOf(c); if (s) test(c.p, { ...s, node: c.node || null }, TD / 2); });
         bars.forEach(b => test(b.p, { kind: 'token', layer: l, t: b.i, ...(H > 1 ? { h: b.h } : {}), cell: true }, 0));
         return best?.spec || null;
       }
       const points = () => [...cells.map(c => c.p), ...bars.map(b => V3(b.p.x, b.p.y, b.p.z + 1.2)),
-        V3(secX - 3.2, yS(0), zOf(0)), V3(0, yA + T / 2 + 1.1, zMid), V3(X.Zc, yC - T / 2 - 1.1, zMid), V3(X.Zc, top(yC) + 1.8, zMid),
-        V3(x0 - 2.2, yS(H - 1), zOf(H - 1)), V3(0, yS(H - 1) - T / 2 - 0.6, zOf(H - 1))];
+        V3(x0 - 0.4, yS(0), zOf(0)), V3(0, yA + T / 2 + 1.1, zMid), V3(X.Zc, yC - T / 2 - 1.1, zMid), V3(X.Zc, top(yC) + 0.4, zMid),
+        V3(x0 - 0.4, yS(H - 1), zOf(H - 1)), V3(0, yS(H - 1) - T / 2 - 0.6, zOf(H - 1))];
+      C.ground(new THREE.Box3().setFromPoints([...cells.map(c => c.p), ...bars.map(b => b.p)]));
       const sc = Math.abs(a.scale - 1 / Math.sqrt(dh)) < 1e-9 ? (dh === 1 ? '' : `/\\sqrt{${dh}}`) : `\\cdot ${M.fmt(a.scale, 2)}`;
       function declutter() {
-        let changed = false;
-        for (const o of [...numLabs, ...barLabs]) {
-          o.userData.face = faceW(o.position, CUBE / 2);
-          changed = showNum(o) || changed;
-        }
-        return changed;
+        const all = [...numLabs, ...barLabs];
+        for (const o of all) o.userData.face = faceW(o.position, CUBE / 2);
+        return occlude(all);
       }
       const cap = `<b>${H > 1 ? `${H} heads, each on ${dh} of the ${d} columns` : `1 head on all ${d} columns: set heads to split them`}</b>`
         + `<span class="nn3d-tex">${katexHtml(`Z_h = \\operatorname{softmax}\\big(Q_h K_h^{\\top}${sc}${a.causal ? ' + M' : ''}\\big)\\, V_h`)}</span>`
@@ -1388,13 +1712,15 @@ export function install(ctx) {
 
     // ================================================================ mode: tensor
     function buildTensor(v) {
-      const net = store.net, I = index(net), C = newContent(), list = attnLayers(net);
+      const net = store.net, C = newContent(), list = attnLayers(net);
+      let I = index(net);
+      const idx = () => (stale(I, net) ? (I = index(net)) : I);
       const l = list.includes(I.li.get(v.layer)) ? I.li.get(v.layer) : list[0] ?? -1;
       const src = v.src || (l >= 0 && I.att[l].heads > 1 ? 'net' : 'example');
       const useNet = src === 'net' && l >= 0;
       const spec = useNet ? I.att[l] : null;
       const T = useNet ? spec.T : EXAMPLE.T, d = useNet ? spec.d : EXAMPLE.d, H = useNet ? spec.heads : v.h, dh = d / H;
-      const wo = useNet ? projOf(net, l) : null, ex = useNet ? null : exampleQKV();
+      const wo = useNet ? projOf(net, l) : null, ex = useNet ? null : exampleQKV(), woAt = woReader(wo, I);
       const proj = useNet ? !!wo && wo.W.length === d && wo.W[0].length === d : true;
       const steps = tensorSteps({ bug: v.bug, proj });
       // Q and K side by side on top, V below; within a block rows are tokens and columns features.
@@ -1430,15 +1756,14 @@ export function install(ctx) {
       const plates = [];
       for (const b of [0, 1, 2]) for (let h = 0; h < H; h++) plates.push({ b, h });
       const { mesh, halo } = cellSet(C, cubes.length);
-      const barMesh = C.inst(GEO.box, MAT.shade, bars.length);
-      const plateMesh = C.inst(GEO.plane, MAT.plate, plates.length, -2);
+      const barMesh = C.inst(GEO.bar, MAT.lit, bars.length);
+      // neutral plates behind a head's chunk or slab, the head colour on a strip at their left edge
+      const PW = dh + 0.24, PH = T + 0.3;
+      const plateMesh = C.inst(C.plateGeo(PW, PH, 0.2), MAT.plate, plates.length, -2);
+      const accMesh = C.inst(GEO.plane, MAT.flat, plates.length);
       const nums = cubes.length <= 230 ? cubes.map(() => C.label('nn3d-num', '', V3(), 0.5, 0.5)) : [];
       const blockLabs = [0, 1, 2].map(() => ({ name: C.label('nn3d-name side', '', V3(), 1, 0.5), shape: C.label('nn3d-shape', '', V3(), 0.5, 0) }));
-      const headLabs = Array.from({ length: H }, (_, h) => {
-        const o = C.label('nn3d-headlab top', H > 3 ? String(h + 1) : `head ${h + 1}`, V3(), 0.5, 1);
-        o.element.style.color = `var(${HEAD_VARS[h % HEAD_VARS.length]})`;   // follows the theme
-        return o;
-      });
+      const headLabs = Array.from({ length: H }, (_, h) => C.label('nn3d-headlab top', `${headSw(h)}${H > 3 ? String(h + 1) : `head ${h + 1}`}`, V3(), 0.5, 1));
 
       // the numbers
       let story = null, maxV = 1, maxWO = 1, cmp = null;
@@ -1447,7 +1772,7 @@ export function install(ctx) {
         let Q, K, V, WO;
         if (useNet) {
           const R = M.reshape(net, l - 1, fwd?.a?.[l - 1]);
-          Q = R.Q; K = R.K; V = R.V; WO = proj ? wo.W : null;
+          Q = R.Q; K = R.K; V = R.V; WO = proj ? wo.W.map((r, i) => r.map((_, j) => woAt(idx, i, j))) : null;
         } else ({ Q, K, V, WO } = ex);
         const scale = useNet ? spec.scale : 1 / Math.sqrt(dh), causal = !!spec?.causal;
         story = tensorStory({ Q, K, V, h: H, scale, causal, WO, bug: v.bug });
@@ -1488,9 +1813,10 @@ export function install(ctx) {
         });
         // a head's plate sits behind its chunk (THD) or its slab (HTD, BUG); Q's and K's go with
         // their cubes at attend, V's stays behind Z until the heads merge
-        const plateAt = (form, b, hh) => (form === 'THD' ? V3(BP[b].x + hh * (dh + GH) + (dh - 1) / 2 - (wTHD - 1) / 2, by(b), -0.46)
-          : deep(form) ? V3(BP[b].x, by(b), zOf(hh) - 0.46)
-            : V3(BP[b].x + hh * dh + (dh - 1) / 2 - (d - 1) / 2, by(b), -0.46));
+        const bz = TD / 2 + 0.12;
+        const plateAt = (form, b, hh) => (form === 'THD' ? V3(BP[b].x + hh * (dh + GH) + (dh - 1) / 2 - (wTHD - 1) / 2, by(b), -bz)
+          : deep(form) ? V3(BP[b].x, by(b), zOf(hh) - bz)
+            : V3(BP[b].x + hh * dh + (dh - 1) / 2 - (d - 1) / 2, by(b), -bz));
         plates.forEach(q => {
           keys.plates.push(steps.map(st => {
             const mine = st.show === 'qkv' || (q.b === 2 && st.show === 'z');
@@ -1503,7 +1829,7 @@ export function install(ctx) {
       const nSteps = steps.length;
       let shown = clamp(v.step, 0, nSteps - 1), anim = null;
       let now = null;   // the drawn state per object
-      const colorOf = (k, mode) => (mode === 'token' && k.tok >= 0 ? P.toks[k.tok % P.toks.length] : over(k.val, k.max, P.node));
+      const colorOf = (k, mode) => (mode === 'token' && k.tok >= 0 ? P.toks[k.tok % P.toks.length] : over(k.val, k.max, P.node, CELL_A));
       function target(stepI, mode) {
         return {
           cubes: keys.cubes.map(ks => { const k = ks[stepI]; return { p: k.p, s: k.s, rgb: colorOf(k, mode), val: k.val, head: k.head }; }),
@@ -1517,11 +1843,11 @@ export function install(ctx) {
       function draw(state, hl) {
         const vv = cur(), byTok = vv?.color === 'token';   // token colours: no numbers
         state.cubes.forEach((k, i) => {
-          setBox(mesh, i, k.p, CUBE * k.s);
+          setBox(mesh, i, k.p, CUBE * k.s, CUBE * k.s, k.s);
           setCol(mesh, i, hl.has(i) ? mix(k.rgb, P.hi, 0.35) : k.rgb);
           const o = nums[i];
           if (o) {
-            o.position.set(k.p.x, k.p.y, k.p.z + (CUBE / 2) * k.s);
+            o.position.set(k.p.x, k.p.y, k.p.z + (TD / 2) * k.s);
             Object.assign(o.userData, { txt: num(k.val), nums: !!vv?.nums, on: hl.has(i) || i === peekI, want: true, no: byTok || k.s <= 0.7, s: k.s });
             showNum(o);
           }
@@ -1529,19 +1855,23 @@ export function install(ctx) {
         flushInst(mesh);
         const lit = state.cubes.map((k, i) => ((hl.has(i) || i === peekI) && k.s > 0.5 ? k.p : null)).filter(Boolean);
         halo.count = lit.length;
-        lit.forEach((p, i) => setBox(halo, i, tp.set(p.x, p.y, p.z + CUBE / 2 + 0.01), CUBE, CUBE, 1));
+        lit.forEach((p, i) => setBox(halo, i, tp.set(p.x, p.y, p.z + TD / 2 + 0.01), CUBE, CUBE, 1));
         flushInst(halo);
+        const bb = mix(P.bg, P.node, 0.5);
         state.bars.forEach((k, i) => {
           const depth = k.depth * k.s;
-          setBox(barMesh, i, tp.set(k.p.x, k.p.y, k.p.z - CUBE / 2 + depth / 2), CUBE * ap * k.s, CUBE * ap * k.s, Math.max(1e-3, depth));
-          setCol(barMesh, i, bars[i].masked ? mix(P.node, P.line, 0.1) : mix(P.node, P.att, 0.1 + 0.9 * k.u));
+          setBox(barMesh, i, tp.set(k.p.x, k.p.y, k.p.z - TD / 2 + depth / 2), CUBE * ap * k.s, CUBE * ap * k.s, Math.max(1e-3, depth));
+          setCol(barMesh, i, bars[i].masked ? mix(P.bg, P.node, 0.25) : mix(bb, P.att, 0.1 + 0.9 * k.u));
         });
         flushInst(barMesh);
         state.plates.forEach((k, i) => {
-          setBox(plateMesh, i, k.p, (dh + 0.24) * k.s, (T + 0.3) * k.s, 1);
-          setCol(plateMesh, i, P.heads[plates[i].h % P.heads.length]);
+          setBox(plateMesh, i, k.p, k.s, k.s, 1);
+          setCol(plateMesh, i, P.plate);
+          setBox(accMesh, i, tp.set(k.p.x - (PW / 2 - 0.06) * k.s, k.p.y, k.p.z + 0.004), 0.08 * k.s, (PH - 0.2) * k.s, 1);
+          setCol(accMesh, i, P.heads[plates[i].h % P.heads.length]);
         });
         flushInst(plateMesh);
+        flushInst(accMesh);
       }
       // labels: a block's name at its left, its shape under it, head labels over chunks / slabs
       const shapeTxt = form => (form === 'TD' ? `[${T}, ${d}]` : form === 'THD' ? `[${T}, ${H}, ${dh}]` : `[${H}, ${T}, ${dh}]`);
@@ -1644,7 +1974,7 @@ export function install(ctx) {
         if (px != null && now) {
           now.cubes.forEach((k, i) => {
             if (k.s < 0.5) return;
-            const q = proj(tp.set(k.p.x, k.p.y, k.p.z + (CUBE / 2) * k.s), (CUBE / 2) * k.s);
+            const q = proj(tp.set(k.p.x, k.p.y, k.p.z + (TD / 2) * k.s), (CUBE / 2) * k.s);
             if (q && Math.abs(q.x - px) <= q.r && Math.abs(q.y - py) <= q.r && q.z < bz) { best = i; bz = q.z; }
           });
         }
@@ -1654,12 +1984,8 @@ export function install(ctx) {
         return true;
       }
       function declutter() {
-        let changed = false;
-        for (const o of nums) {
-          o.userData.face = faceW(o.position, (CUBE / 2) * (o.userData.s ?? 1));
-          changed = showNum(o) || changed;
-        }
-        return changed;
+        for (const o of nums) o.userData.face = faceW(o.position, (CUBE / 2) * (o.userData.s ?? 1));
+        return occlude(nums);
       }
       function pick(px, py, proj) {
         if (!useNet || !now) return null;
@@ -1668,7 +1994,7 @@ export function install(ctx) {
         now.cubes.forEach((k, i) => {
           const c = cubes[i];
           if (c.b > 2 || k.s < 0.5) return;
-          const q = proj(tp.set(k.p.x, k.p.y, k.p.z + CUBE / 2), CUBE / 2);
+          const q = proj(tp.set(k.p.x, k.p.y, k.p.z + TD / 2), CUBE / 2);
           if (!q || Math.abs(q.x - px) > q.r || Math.abs(q.y - py) > q.r || (best && q.z > best.z)) return;
           const id = c.b === 2 && zStep ? I.tokNode(l, 0, c.t, c.f)?.id : I.tokNode(l - 1, G3[c.b], c.t, c.f)?.id;
           if (id) best = { z: q.z, spec: { kind: 'node', id } };
@@ -1708,6 +2034,7 @@ export function install(ctx) {
         if (proj) pts.push(V3(BP[1].x, (d - 1) / 2 + 0.5, 0), V3(BP[1].x, -(d - 1) / 2 - 1.2, 0));
         return pts;
       };
+      C.ground(new THREE.Box3().setFromPoints(points()));
       return {
         ...C, paint, frame, pick, peek, points, declutter, dir: DIRS.tensor, fov: 15,
         tensor: { steps, go, get shown() { return shown; }, caption, src, useNet, H, T, d, hasNet: l >= 0, animating: () => !!anim },
@@ -1730,11 +2057,15 @@ export function install(ctx) {
     function size() {
       const w = root.clientWidth, h = root.clientHeight;
       if (!w || !h) return false;
+      const px = dpr();
+      if (px !== renderer.getPixelRatio()) { renderer.setPixelRatio(px); SW = 0; }
       if (w !== SW || h !== SH) {
         SW = w; SH = h;
         renderer.setSize(w, h);
         labelR.setSize(w, h);
         camera.aspect = w / h;
+        MAT.line.uniforms.uRes.value.set(w * px, h * px);
+        MAT.line.uniforms.uPx.value = px;
         applyOffset();
       }
       return true;
@@ -1796,6 +2127,12 @@ export function install(ctx) {
       cam2.setViewOffset(SW, SH, SW / 2 - o.cx, SH / 2 - o.cy, SW, SH);
       cam2.updateProjectionMatrix();
       const pad = clamp(Math.min(A.w, A.h) * 0.06, 16, 44);
+      // labels marked fit (a layer's header, a block's name) are kept in frame at their drawn size:
+      // [anchor, width, height, cx, cy] in px, measured once they are on the page
+      const boxes = (content?.labs || []).filter(o => o.userData.fit && o.visible).map(o => {
+        const e = o.element, w = e.offsetWidth || 8 * (e.textContent || '').length + 12, h = e.offsetHeight || 20;
+        return [o.position, w, h, o.center.x, o.center.y];   // content groups sit at the origin
+      });
       const fits = D => {
         cam2.position.copy(target).addScaledVector(d, D);
         cam2.lookAt(target);
@@ -1804,6 +2141,11 @@ export function install(ctx) {
           tv.copy(p).project(cam2);
           const px = ((tv.x + 1) / 2) * SW, py = ((1 - tv.y) / 2) * SH;
           if (tv.z > 1 || px < A.x + pad || px > A.x + A.w - pad || py < A.y + pad || py > A.y + A.h - pad) return false;
+        }
+        for (const [p, w, h, cx, cy] of boxes) {
+          tv.copy(p).project(cam2);
+          const x0 = ((tv.x + 1) / 2) * SW - cx * w, y0 = ((1 - tv.y) / 2) * SH - (1 - cy) * h;
+          if (tv.z > 1 || x0 < A.x + 6 || x0 + w > A.x + A.w - 6 || y0 < A.y + 6 || y0 + h > A.y + A.h - 6) return false;
         }
         return true;
       };
@@ -1814,14 +2156,34 @@ export function install(ctx) {
       return { p: target.clone().addScaledVector(d, hi), t: target, D: hi, off: o };
     }
     const reOffset = () => { const pose = fitPose(null); if (pose) { off = pose.off; applyOffset(); } return pose; };
+    // Zoom stays within a range of the fit, so the content can't be lost off into the fog.
+    const limits = D => { controls.minDistance = D * 0.12; controls.maxDistance = D * 5; };
     function fit(ms = 400, dir = null) {
       const pose = fitPose(dir);
       if (!pose) return;
       off = pose.off;
       applyOffset();
+      limits(pose.D);
       userMoved = false;
       if (!ms) { camera.position.copy(pose.p); controls.target.copy(pose.t); controls.update(); flight = null; camDirty = true; needRender = true; nudgeCards(); return; }
       flight = { t0: performance.now(), ms, p0: camera.position.clone(), q0: controls.target.clone(), p1: pose.p, q1: pose.t };
+    }
+    // A new view comes in calmly: framed from a little further out and turned a few degrees, it
+    // eases into its fit while the stage fades in (none of it with reduced motion).
+    function settle(dir) {
+      fit(0, dir);
+      fadeIn();
+      if (calm() || !content?.points) return;
+      const t = controls.target.clone(), rel = camera.position.clone().sub(t);
+      const p0 = t.clone().add(rel.applyAxisAngle(UP, -0.14).multiplyScalar(1.16));
+      flight = { t0: performance.now(), ms: SETTLE_MS, p0, q0: t.clone(), p1: camera.position.clone(), q1: t, out: true };
+      camera.position.copy(p0);
+      controls.update();
+    }
+    let fade = null;
+    function fadeIn() {
+      fade?.cancel();
+      fade = calm() ? null : gl.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 320, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' });
     }
     function flyTo(pose, ms) {
       flight = { t0: performance.now(), ms, p0: camera.position.clone(), q0: controls.target.clone(), p1: V3(...pose.p), q1: V3(...pose.t) };
@@ -1866,7 +2228,8 @@ export function install(ctx) {
     controls.addEventListener('change', () => { camDirty = true; needRender = true; });
 
     // ================================================================ build and apply
-    let needPaint = true, needRender = true;
+    let needPaint = true, needRender = true, relabel = true;   // relabel: re-measure the labels after the next render
+    let camMoves = 0;   // bumped whenever the camera (or the stage size) changes: the stack's rest layout of headers
     function invalidate() { needPaint = true; }
     function modeKey(v) {
       return JSON.stringify([v.mode, v.mode === 'stack' ? null : v.layer, v.mode === 'tensor' ? [v.src, v.h, v.bug] : null]);
@@ -1888,14 +2251,32 @@ export function install(ctx) {
       builds++;
       needPaint = true;
       renderBar(v, true);   // first: the fit keeps clear of the bar
+      depthCues();
+      if (size()) { scene.updateMatrixWorld(); labelR.render(scene, camera); }   // the labels go on the page, so the fit can measure them
       if (audience && v.camera) {
         const c = camFrom(v.camera);
         camera.position.copy(c.p);
         controls.target.copy(c.t);
         controls.update();
         follow = null;
-      } else if (!keepCamera) fit(0, content.dir);
+        if (!keepCamera) fadeIn();
+      } else if (!keepCamera) settle(content.dir);
       else if (!userMoved && !audience) fit(300);
+      relabel = true;
+    }
+    // The fog's range (and the lines' and the ground's) follows the camera's distance to the
+    // content, so the back of it falls off by about a third at any zoom.
+    let cueC = V3(), cueR = 1;
+    function depthCues() {
+      const pts = content?.points?.() || [];
+      if (pts.length) { const s = new THREE.Box3().setFromPoints(pts).getBoundingSphere(new THREE.Sphere()); cueC = s.center; cueR = Math.max(1, s.radius); }
+      updateFog();
+    }
+    function updateFog() {
+      const dd = camera.position.distanceTo(cueC), near = Math.max(0.1, dd - cueR * 0.4), far = dd + cueR * 3.2;
+      scene.fog.near = near;
+      scene.fog.far = far;
+      fogU.value.set(near, far);
     }
     let barKey = '';
     function apply(v) {
@@ -1929,8 +2310,10 @@ export function install(ctx) {
     }
 
     // ================================================================ the bar
+    let barList = null, barListKey = null;   // attnLayers for the built net (the bar asks on every net event)
     function renderBar(v, force = false) {
-      const net = store.net, list = attnLayers(net), T = content?.tensor;
+      if (barListKey !== builtNetKey) { barListKey = builtNetKey; barList = attnLayers(store.net); }
+      const net = store.net, list = barList, T = content?.tensor;
       const key = JSON.stringify([v.mode, v.step, v.src, v.h, v.bug, v.color, v.nums, v.layer, list, content?.heads, content?.d, T?.src, T?.shown, playing, !!content?.empty]);
       if (!force && key === barKey) return;
       barKey = key;
@@ -2124,6 +2507,17 @@ export function install(ctx) {
 
     // ================================================================ loop
     let raf = 0, visible = document.body.dataset.view === 'nn', alive = true, lastT = 0, declT = -1e9, declDue = false;
+    const camWas = new Float64Array(32);   // the camera's world and projection matrices at the last render
+    function camChanged() {
+      const a = camera.matrixWorld.elements, b = camera.projectionMatrix.elements;
+      let ch = false;
+      for (let i = 0; i < 16; i++) {
+        if (Math.abs(a[i] - camWas[i]) > 1e-6) { camWas[i] = a[i]; ch = true; }
+        if (Math.abs(b[i] - camWas[16 + i]) > 1e-7) { camWas[16 + i] = b[i]; ch = true; }
+      }
+      if (ch) camMoves++;
+      return ch;
+    }
     function loop(t) {
       raf = 0;
       if (!alive || !visible) return;
@@ -2132,7 +2526,7 @@ export function install(ctx) {
       size();
       let moving = false;
       if (flight) {
-        const u = clamp((t - flight.t0) / flight.ms, 0, 1), e = u < 0.5 ? 4 * u * u * u : 1 - (-2 * u + 2) ** 3 / 2;
+        const u = clamp((t - flight.t0) / flight.ms, 0, 1), e = flight.out ? 1 - (1 - u) ** 3 : u < 0.5 ? 4 * u * u * u : 1 - (-2 * u + 2) ** 3 / 2;
         camera.position.lerpVectors(flight.p0, flight.p1, e);
         controls.target.lerpVectors(flight.q0, flight.q1, e);
         if (u >= 1) { flight = null; camDirty = true; nudgeCards(); }
@@ -2148,14 +2542,20 @@ export function install(ctx) {
       if (controls.update()) moving = true;
       if (needPaint && content?.paint) { needPaint = false; paints++; try { content.paint(); } catch (err) { console.error('[nn/view3d] paint:', err); } needRender = true; }
       if (content?.frame) { try { if (content.frame(t)) needRender = true; } catch (err) { console.error('[nn/view3d] frame:', err); } }
+      if (content?.tensor?.animating()) relabel = true;   // the cubes' faces change size as they move
       if (moving || needRender) {
         needRender = false;
+        updateFog();
+        scene.updateMatrixWorld();
         renderer.render(scene, camera);
         labelR.render(scene, camera);
-        declDue = true;
+        // Labels are re-measured only when what they depend on changed: the camera (or the stage),
+        // a header that opened or closed, a new build. Never on a repaint alone, so nothing shifts
+        // while training.
+        if (camChanged() || relabel) { relabel = false; declDue = true; }
       }
-      // Labels are measured after a render: at most every 150 ms, and once more after the last one.
-      // A declutter that shows or hides a label asks for a render (CSS2D applies visibility there).
+      // At most every 150 ms, and once more after the last change. A declutter that shows or hides
+      // a label asks for a render (CSS2D applies visibility there).
       if (declDue && content?.declutter && t - declT > 150) {
         declT = t;
         declDue = false;
@@ -2165,9 +2565,16 @@ export function install(ctx) {
       raf = requestAnimationFrame(loop);
     }
     const kick = () => { if (!raf && alive && visible) raf = requestAnimationFrame(loop); };
-    // Refit when the free area changes (a panel opens, folds or moves), unless the user moved.
-    let areaKey = '';
-    const areaObs = new ResizeObserver(() => areaCheck());
+    // Refit when the free area changes (a panel opens, folds or moves), unless the user moved: once
+    // the panels have settled (140 ms), and only when the framing would change noticeably, so a
+    // panel that grows a line while training doesn't nudge the camera.
+    let areaKey = '', areaT = 0;
+    const areaSoon = () => { if (!alive) return; placeBar(); clearTimeout(areaT); areaT = setTimeout(areaCheck, 140); };
+    const areaObs = new ResizeObserver(areaSoon);
+    const samePose = pose => {
+      const D = camera.position.distanceTo(controls.target);
+      return !!off && Math.abs(pose.D - D) < 0.035 * D && Math.abs(pose.off.cx - off.cx) < 10 && Math.abs(pose.off.cy - off.cy) < 10 && pose.t.distanceTo(controls.target) < 0.02 * D;
+    };
     function areaCheck() {
       if (!alive || !size()) return;
       placeBar();
@@ -2175,8 +2582,10 @@ export function install(ctx) {
       if (k === areaKey) return;
       const first = !areaKey;
       areaKey = k;
-      if (!first && !userMoved && !audience) fit(300);
-      else if (!first) {
+      if (!first && !userMoved && !audience) {
+        const pose = flight ? null : fitPose(null);
+        if (!pose || !samePose(pose)) fit(300);
+      } else if (!first) {
         if (audience && lastIn) follow = camFrom(lastIn);   // the same view, framed for this window
         else { reOffset(); camDirty = true; }   // k changed with the free area: tell the audience
         needRender = true;
@@ -2186,7 +2595,7 @@ export function install(ctx) {
     const mo = new MutationObserver(watch);
     mo.observe(stage, { childList: true });
     watch();
-    const onUp = () => requestAnimationFrame(areaCheck);   // a panel dragged (not resized) moves the free area too
+    const onUp = () => requestAnimationFrame(areaSoon);   // a panel dragged (not resized) moves the free area too
     stage.addEventListener('pointerup', onUp, true);
 
     retheme();
@@ -2197,6 +2606,8 @@ export function install(ctx) {
       alive = false;
       setPlay(false);
       cancelAnimationFrame(raf);
+      clearTimeout(areaT);
+      fade?.cancel();
       areaObs.disconnect();
       mo.disconnect();
       stage.removeEventListener('pointerup', onUp, true);

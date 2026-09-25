@@ -20,28 +20,43 @@ views; the bar at the bottom right switches them too.
   (z, token 1 in front). So a tokenwise (tied) layer stays in its token's plane and only attention
   edges cross between planes. A dense layer is a column up to 4 neurons, and past that a grid with
   its columns in depth (row-major: neuron k is row ⌊k / c⌋, column k mod c).
-- **Neurons** are spheres filled like the canvas: `colorFor(a, max)` over the node colour, on the
-  shared activations scale (every entry of `fwd.a` and `fwd.z`). **Weight edges** are cylinders
-  coloured by `colorFor(w, maxW)` (the alpha blended onto the background) and 0.013 + 0.05·|w|/maxW
-  thick; skip edges arc over the sheets they skip (the headers move up to clear them). Fixed edges
-  (a residual, a pooling weight) are not parameters: thin, dashed and in the muted text colour
-  (--text-3) at 45%, as on the canvas, at full strength while hovered, selected or lit.
-  **Attention edges** run V_j,f → Z_i,f in the canvas's violet, as thick and as opaque as A_ij;
-  causally masked pairs have none. Each attention sheet has an n × n tile of A per head in front of
-  it, as bars as tall as A_ij, masked cells flat.
-- **Labels** (CSS2D): text with one halo, as on the canvas. A header per layer (name, and shape or
-  activation · count), plain text, with a pill and a HI ring while the layer is hovered or selected
-  and a neutral ring for the lens's focus (neighbours that would touch on screen drop the second
-  line, then every other one moves up); Q / K / V beside their
-  groups, token names (or t₁…) under the first token layer, an A beside each tile. The 1.2 button
-  puts values under the neurons (off by default in this view). The hovered, else the selected,
-  neuron shows its label and value in a tip; the shown row of A gets its A_ij on the edges.
+- **Neurons** are matte spheres filled like the canvas: `colorFor(a, max)` over the neutral node
+  base (`--n3-node`), on the shared activations scale (every entry of `fwd.a` and `fwd.z`). There
+  are no sheet plates at rest: the neurons' columns are the structure. A held layer (hovered or
+  selected, or the lens's focus) shows a faint rounded plate, as the canvas's lanes do.
+- **Weight edges** are screen-space lines (a width in px at any zoom) coloured by `colorFor(w, maxW)`
+  blended onto the page, and **faint at rest**: the colour at K0 of its strength and
+  (0.55 + 2.2·|w|/maxW) px × WS wide, where K0 (0.62 down to 0.16) and WS (1 down to 0.5) fall with
+  the number of weight edges, so a 6000-edge net is a light haze. The edges of the hovered or
+  selected neuron (or into a selected layer) come forward at full strength, 0.9 + 2.6·|w|/maxW px;
+  while something is hovered the rest fade further. The hovered or selected edge and its tie group
+  add HI. Skip edges arc over the sheets they skip (the headers move up to clear them). Fixed edges
+  (a residual, a pooling weight) are not parameters: 1 px, dashed, in the muted text colour
+  (--text-3) at 34%, as on the canvas, at full strength while hovered, selected or lit.
+  **Attention edges** run V_j,f → Z_i,f in the canvas's violet, their strength and width from
+  A_ij (at 75% at rest, full on a shown row); causally masked pairs have none. Each attention sheet
+  has an n × n tile of A per head in front of it, as bars as tall as A_ij over faint neutral cells,
+  masked cells flat.
+- **Labels** (CSS2D): text with one halo, as on the canvas, and sparse. One header per layer: its
+  name. Its second line (shape, or activation · count) opens while the layer is held (the layer, or
+  one of its neurons, hovered, selected or stepped) or is the lens's focus. The header gets a pill
+  and a HI ring while the layer is hovered or selected, and a neutral ring for the lens's focus.
+  At rest, headers that would touch on screen drop the second line, then each takes the lowest of
+  three rows where it touches no header placed before it, and one that fits in none hides (a deep
+  net in a small window). A held header keeps its second line and goes in on top of that rest
+  layout, in the row where it hides the fewest others, so hovering never reshuffles the rest
+  (measured when the camera moves or a header opens, never on a repaint; the rest layout only
+  when the camera moves). Q / K / V beside their groups; token names (or t₁…) under the first token
+  layer, a name that would touch the one before it hidden. The 1.2 button puts values under the
+  neurons (off by default in this view). The hovered, else the selected, neuron shows its label
+  and value in a tip; the shown row of A gets its A_ij on the edges.
 - **Hover, selection, step-through, lens**, by the canvas's rules (view.js `resolve`,
   `resolveAnim`, `attFoci`): the selected neuron gets a thick ring, the hovered one a thin ring, the
   step-through's a pulsing one and pulses along its lit edges (reversed for backward). While
-  something is hovered or stepped, unrelated neurons fade to 0.42, edges to 0.13 and attention edges
-  to 0.1. The lens (focus.js `emphasis`) sets opacity 0.1 + 0.9·v, drops numbers below v = 0.25 and
-  hides what `show` and the thresholds remove; a followed token shows its row of A on the tile.
+  something is hovered or stepped, unrelated neurons fade to 0.42, and unrelated edges and attention
+  edges to 0.35 and 0.25 of their rest strength. The lens (focus.js `emphasis`) sets opacity
+  0.1 + 0.9·v, drops numbers below v = 0.25 and hides what `show` and the thresholds remove; a
+  followed token shows its row of A on the tile.
 - **Input.** Moving over a neuron hovers it (`{ kind: 'node' }`), over an edge the edge, over an
   attention edge or an A cell its row (`{ kind: 'token', layer, t, h? }`). A click selects the
   neuron or edge (so the inspector opens its card), an A cell selects the attention layer, empty
@@ -49,19 +64,24 @@ views; the bar at the bottom right switches them too.
 
 ### Heads: one attention layer, a slab per head
 
-Cells are cubes in x-y planes, rows = tokens, coloured like the matrix panel (value colour on the
-front face, the other faces shaded). From the top:
+Cells are rounded, matte tiles in x-y planes, rows = tokens, coloured like the matrix panel
+(`colorFor` over the neutral node base, its alpha eased above 0.5 to at most 0.72, so the value
+colour reads on the face turned to you and a number on it stays legible). The plates are neutral;
+a head's colour (the attention panel's: violet, green, amber, then more) sits only on a thin accent
+beside what belongs to that head, and on the swatch of its label. From the top:
 
-1. **Q | K | V** as whole T × d matrices from `fwd.a` of the Q, K, V layer. Each head's column chunk
-   sits on a plate in that head's colour (the attention panel's: violet, green, amber, then more).
-2. **split by columns**: a line per head and matrix runs from its chunk to its slab.
-3. **One slab per head**, each a plate in the head's colour, stepping down and back in depth:
-   `Q_h K_h → A_h · V_h = Z_h`, with Q_h, K_h, V_h, A_h and Z_h the real `fwd.attn[l].heads[h]`
-   numbers. A_h is a T × T tile of bars as tall as A_ij (violet; masked cells flat).
+1. **Q | K | V** as whole T × d matrices from `fwd.a` of the Q, K, V layer, each on one plate, with
+   an accent in the head's colour under each head's column chunk.
+2. **split by columns**: a thin neutral line per head and matrix runs from its chunk to its slab.
+3. **One slab per head**, each on a plate with an accent along its left edge, stepping down and
+   back in depth: `Q_h K_h → A_h · V_h = Z_h`, with Q_h, K_h, V_h, A_h and Z_h the real
+   `fwd.attn[l].heads[h]` numbers. A_h is a T × T tile of bars as tall as A_ij (violet; masked
+   cells flat). The slab's names show on head 1, and on another head while one of its cells is held.
 4. **concat**: a line per head from Z_h to its chunk of `Z = [Z_1 … Z_h]` (the attention layer's
    `fwd.a`), right of the slabs; then, when the next layer is a tied tokenwise matrix from this one
    (`projOf`: the transformer's W_O), `× W_O = Z W_O` (the projection alone: the residual and b_O of
-   H = X + Z W_O + b_O are left out).
+   H = X + Z W_O + b_O are left out). W_O is read from its tied edges at every paint, so it trains
+   live.
 
 The caption in the bar gives `Z_h = softmax(Q_h K_hᵀ/√d_h) V_h` and `Z = [Z_1 … Z_h] → Z W_O` for
 this layer. The **heads** chips set the attention layer's `heads` (any divisor of d; one
@@ -75,7 +95,8 @@ this layer. The **heads** chips set the attention layer's `heads` (any divisor o
 - **Hover out**: a token of the attention layer lights row t of Q_h, A_h, Z_h, Z and Z W_O (one head
   or all); a query token of the Q, K, V layer lights its rows and its row of A, a key or value
   token its rows and its column of A; a neuron lights its cells; a tied W_O edge its cell. Lit cells
-  get a frame in the hover colour, the rest fades to 0.42.
+  get a frame in the hover colour, the rest fades to 0.42; the held head's split and concat lines
+  come forward.
 - **Step-through** on the attention layer: `scores` lights q_i and the keys, `softmax` row i of A,
   `sum` row i of A with V and z_i; backward all of them. On another layer, the neuron's cells.
 - **Lens**: E.node for cells that stand for a neuron, E.attn for bars, E.edge for W_O; a kept head
@@ -83,7 +104,9 @@ this layer. The **heads** chips set the attention layer's `heads` (any divisor o
 - **Numbers** (the 1.2 button, off by default here): on a lit or hovered cell or bar always; with
   the button on, on every cell and bar the lens keeps, at full size once its face is at least 28 px
   wide on screen (`NUM_PX`, measured as the camera moves) and below that without the leading 0 and
-  shrunk to fit the face (7.5 px at the least), so turning them on always shows them.
+  shrunk to fit the face (7.5 px at the least), so turning them on always shows them, except where
+  a cell sits behind a nearer one on screen or its text would touch a nearer cell's number: labels
+  ignore depth, so those hide (`occlude`), and only the faces you see carry numbers.
 
 ### Tensor: the reshape, as moving cubes
 
@@ -111,13 +134,17 @@ glance that a buggy "head" holds pieces of one or two tokens rather than a chunk
   confirms that step 6 matches the layer's Z) or the fixed **4×6 example** (T = 4, d = 6, seeded
   numbers, h = 1, 2, 3 or 6, scale 1/√(d/h), and a random W_O), which works for any net, attention
   or not. The default is `net` when the net has an attention layer with 2+ heads.
-- **Colour**: `values` (colorFor over the node colour, one scale for Q, K, V, Z and Z W_O; W_O on its
-  own) or `tokens` (the token each number came from; numbers hidden). Shape labels under each
-  block, head labels over each chunk or slab.
+- **Colour**: `values` (colorFor over the node base, capped as in heads, one scale for Q, K, V, Z
+  and Z W_O; W_O on its own) or `tokens` (the token each number came from; numbers hidden). The
+  cubes are the heads view's rounded tiles. A head's chunk or slab sits on a neutral plate with an
+  accent in the head's colour at its left edge. Shape labels under each block, head labels (with
+  the head's swatch) over each chunk or slab.
 - **Numbers** (the 1.2 button, on by default here, `values` only): only on the step's matrices
   (the cubes it shows, not those shrinking away): on every one of them, sized as in heads (full size
-  from a 28 px face, `NUM_PX`, and shrunk to the face below that). With the button off, only on a
-  lit cube. The cube under the mouse (either source) is framed and shows its number.
+  from a 28 px face, `NUM_PX`, and shrunk to the face below that), and hidden, as in heads, where
+  a nearer slab covers the cube or a nearer number would touch it. With the button off, only on a
+  lit cube. The cube under the mouse (either source) is framed and shows its number. W_O is read
+  from its tied edges at every paint.
 - **Playback**: the previous / next arrows and the step chips, ← → while the view shows, play runs
   one step every 2.6 s (presenter only; the audience follows `step`).
 - **Hover** (net source): hovering a cube hovers its neuron (Q, K, V, or Z from step 4); a hovered
@@ -161,8 +188,17 @@ v3d = null | {
   The SVG is hidden (`visibility`), not removed; the 2D view keeps its pan and zoom.
 - **Framing** follows view.js's fit: the largest free rectangle of the stage clear of the Train,
   Attention and other floating panels and of this bar, above the lens bar; the orbit target sits at
-  its centre (a camera view offset) and the distance fits every drawn point. It refits when a panel
-  opens, folds, moves or closes, unless the user has orbited, panned or zoomed since.
+  its centre (a camera view offset) and the distance fits every drawn point, and the layer headers
+  and block names at their size on screen (measured once they are on the page). It refits when a
+  panel opens, folds, moves or closes, unless the user has orbited, panned or zoomed since: once
+  the panels have been still for 140 ms, and only when the fit would change by more than about
+  3.5% in distance or 10 px in place, so a panel that grows a line while training leaves the
+  camera alone.
+- **Camera.** Orbit, pan and zoom are damped (0.08); zoom stays between 0.12 and 5 times the fit
+  distance, and the camera stays above about 20° under the horizon (the ground stays a floor). A
+  new view (D, another mode, another source) comes in from a little further out and a few degrees
+  round, easing into its fit over 800 ms while the stage fades in (320 ms); neither with
+  `prefers-reduced-motion`.
 - The bar sits at the bottom right (a strip along the bottom in heads and tensor views, with the
   caption), lifted above the lens bar when that one reaches under it. The clean view (H) and the
   audience keep only the caption.
@@ -184,15 +220,36 @@ before.
 
 ## Rendering
 
-- Instanced meshes throughout (spheres, cubes, bars, cylinder edges, plates, rings, pulses), with
-  the shading baked into vertex colours on unlit materials, so a value's colour is exact on the
-  face turned to the camera, in both themes. Dimming blends toward the page background instead of
-  using transparency.
+- **Look.** The background is `--bg`. Soft, matte light: Lambert materials (no specular) under a
+  hemisphere light and one gentle key light that rides with the camera, up and to the left of it,
+  so the face turned to the viewer is lit about fully (a value's colour reads as in the matrix
+  panel) and the rest shades off softly (sides about 0.85, undersides about 0.6). Light fog toward
+  `--bg` follows the camera's distance to the content, so the back of it falls off by about a
+  third at any zoom. A faint dot grid (`--n3-ground`) lies on a disc under the content and fades
+  out toward its rim and with the fog: one point sprite per dot (so it costs only the dots' pixels),
+  on world multiples of its step, and a dot smaller than a pixel fades instead of sparkling.
+  Antialiasing is on and the pixel ratio is capped at 1.5.
+- **Colour is for data** (the value pair, attention, the heads, HI). Structure is neutral and its
+  tokens live in view3d.css: `--n3-node` (the base of neurons and cells), `--n3-plate` (plates)
+  and `--n3-ground`, literal hex or rgba, read with `getComputedStyle`; fixed edges and the heads'
+  fans are `--text-3`.
+- Instanced meshes throughout (spheres, fewer-sided past 300 neurons; tiles and bars, a hand-built
+  66-vertex rounded tile; plates, accents, rings, pulses), and the lines
+  (weights, attention, fans) as one instanced quad per segment expanded in screen space by a small
+  shader, a constant width in px; a line under 1 px is drawn 1 px wide and fainter, so thin weights
+  stay crisp instead of shimmering. Dimming blends toward the page background instead of using
+  transparency, so thousands of faint edges read as a haze rather than piling up.
 - A structural change, a new layer shape (tokens, groups, heads, causal, names) or another view or
   source rebuilds; everything else (training at full speed, hover, lens, theme) repaints colours and
-  matrices in place. The loop renders only when something changed or moves, and stops while the
-  Net tab is hidden. Turning the view off disposes the content, geometries, materials, the
-  renderer (its WebGL context is released) and the DOM.
+  matrices in place: the edges' colours and widths, never their positions, and with numbers rather
+  than parsed `rgba()` strings (checked against store.js `colorFor` on every retheme). Undo, redo
+  and the audience mirror swap in new node and edge objects under the same ids, so a mode re-indexes
+  the net when its arrays change. Labels are re-measured only when the camera moves, a header opens
+  or closes, or the tensor cubes move, never on a repaint alone, so nothing shifts while training.
+  The loop renders only when something changed or moves, and stops while the Net tab is hidden.
+  Turning the view off disposes the content (its instanced buffers, line, plate and ground geometries),
+  the shared geometries and materials (the line and ground shaders too), the renderer (its WebGL
+  context is released) and the DOM.
 
 ## Pure exports (tests: `tests/nn_view3d.test.mjs`)
 

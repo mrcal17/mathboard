@@ -2,13 +2,24 @@
    the WebGL canvas, the CSS2D label layer over it, and the bar at the bottom right. The Train and
    Attention panels, the lens bar, the cards and the Explain card still float over it. */
 
+/* Structure tokens, read by view3d.js (literal hex / rgba, never color-mix): the neutral base of
+   neurons and cells (a value's colour is laid over it), the plates behind heads and chunks (and,
+   stronger, a held layer's), and the ground's dots. Colour is only for data. */
 .nn3d {
+  --n3-node: #4e585f;
+  --n3-plate: rgba(255, 255, 255, 0.045);
+  --n3-ground: rgba(255, 255, 255, 0.12);
   --n3-hi: var(--hi);
   --n3-att: var(--att);
   --n3-muted: var(--text-3);
   --n3-halo: 0 0 3px var(--bg);
   position: absolute; inset: 0; z-index: 4; overflow: hidden;
   background: var(--bg);
+}
+[data-theme="light"] .nn3d {
+  --n3-node: #e2e5e3;
+  --n3-plate: rgba(0, 0, 0, 0.04);
+  --n3-ground: rgba(0, 0, 0, 0.11);
 }
 .nn3d-gl { position: absolute; inset: 0; }
 .nn3d-gl canvas { display: block; touch-action: none; outline: none; cursor: grab; }
@@ -26,20 +37,21 @@
 }
 .nn3d-lab sub { font-size: 0.72em; vertical-align: -0.28em; line-height: 0; }
 .nn3d-lab sup { font-size: 0.72em; line-height: 0; }
-/* a layer's header, as on the canvas: plain text; a pill only while the layer is hovered or
+/* a layer's header, as on the canvas: plain text, its name only; the second line (activation and
+   shape) opens while the layer is held (.open); a pill only while the layer is hovered or
    selected (a HI ring) or is the lens's focus (a neutral ring) */
 .nn3d-head {
-  margin-bottom: 6px; padding: 3px 10px 4px; text-align: center;
+  padding: 3px 10px 4px; text-align: center;
   border-radius: var(--r-md); transition: background-color var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease);
 }
 .nn3d-head b { display: block; font-size: 14px; font-weight: var(--fw-strong); color: var(--text-1); }
-.nn3d-head span { display: block; margin-top: 1px; font-size: 12px; color: var(--text-3); }
+.nn3d-head span { display: none; margin-top: 1px; font-size: 12px; color: var(--text-3); }
+.nn3d-head.open span { display: block; }
 .nn3d-head.foc { background: var(--float); box-shadow: inset 0 0 0 1px var(--text-3); text-shadow: none; }
 .nn3d-head.hov { background: var(--float); box-shadow: inset 0 0 0 1.5px var(--n3-hi); text-shadow: none; }
-.nn3d-grp { font: italic 17px var(--font-math); color: var(--text-3); padding-bottom: 3px; }
-.nn3d-grp.att { color: var(--n3-att); font-size: 16px; }
-.nn3d-tok { font: italic 14px var(--font-math); color: var(--text-3); padding-right: 4px; }
-.nn3d-tok.name { font: var(--fw-medium) 12.5px var(--font-ui); color: var(--text-2); }
+.nn3d-grp { font: italic 14px var(--font-math); color: var(--text-3); padding: 0 2px 2px 0; }
+.nn3d-tok { font: italic 13px var(--font-math); color: var(--text-3); padding-right: 4px; }
+.nn3d-tok.name { font: 12px var(--font-ui); color: var(--text-3); }
 .nn3d-val { font-size: 12.5px; font-weight: var(--fw-medium); color: var(--text-2); font-variant-numeric: tabular-nums; padding-top: 1px; }
 .nn3d-al { font-size: 12px; font-weight: var(--fw-strong); color: var(--text-1); font-variant-numeric: tabular-nums; }
 /* the hovered (else selected) neuron's label and value: the tooltip recipe */
@@ -49,21 +61,23 @@
   font-size: 13px; line-height: 1.35;
 }
 .nn3d-tip > span { margin-left: 5px; font-weight: var(--fw-strong); font-variant-numeric: tabular-nums; }
-/* heads and tensor modes */
-.nn3d-name { font: italic 18px var(--font-math); padding-bottom: 5px; }
-.nn3d-name.side { padding: 0 6px 0 0; font-size: 20px; }
+/* heads and tensor modes: a name per block (math italic), a head's label with its swatch (the
+   colour on the mark, the words in text colours) */
+.nn3d-name { font: italic 16px var(--font-math); color: var(--text-1); padding-bottom: 5px; }
+.nn3d-name.side { padding: 0 8px 0 0; font-size: 18px; }
 .nn3d-name.tex { font-style: normal; font-size: 14px; }
-.nn3d-name.att { color: var(--n3-att); font-size: 16px; }
-.nn3d-name.att i, .nn3d-name.att sub, .nn3d-name.att sup { font-family: inherit; }
 .nn3d-name .op { font-style: normal; margin: 0 1px; }
 .nn3d-shape { font: 12px var(--font-mono); color: var(--text-3); padding-top: 5px; }
-.nn3d-headlab { font-size: 12.5px; font-weight: var(--fw-strong); padding-right: 8px; }
-.nn3d-headlab.top { padding: 0 0 3px; font-size: 12px; }
-.nn3d-sec { font-size: 12px; font-weight: var(--fw-medium); color: var(--text-3); padding-bottom: 6px; }
-.nn3d-num { font-size: 11.5px; font-weight: var(--fw-strong); color: var(--text-1); font-variant-numeric: tabular-nums; }
-.nn3d-op { font: 18px "KaTeX_Main", "Times New Roman", serif; color: var(--text-3); }
+.nn3d-headlab { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: var(--fw-medium); color: var(--text-2); padding-right: 10px; }
+.nn3d-headlab.top { padding: 0 0 4px; }
+.nn3d-num { font-size: 11.5px; font-weight: var(--fw-medium); color: var(--text-1); font-variant-numeric: tabular-nums; text-shadow: none; }
+.nn3d-op { font: 16px "KaTeX_Main", "Times New Roman", serif; color: var(--text-3); }
+/* declutter (view3d.js): headers that would touch drop their second line, then take a row up
+   (an absolutely placed label moves with margin-top, not margin-bottom) */
 .nn3d-head.compact span { display: none; }
-.nn3d-head.up { margin-bottom: 40px; }
+.nn3d-head.up { margin-top: -30px; }
+.nn3d-head.up2 { margin-top: -60px; }
+.nn3d-head.gone { visibility: hidden; }   /* no room in any row: shows while its layer is held */
 
 /* ---------------------------------------------------------------- the bar */
 /* The floating panel recipe: a row of controls (the mode as a segmented control, then the view's
