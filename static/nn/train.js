@@ -1013,7 +1013,7 @@ export function install(ctx) {
   if (!ro && ctx.addButton) {
     try {
       toolBtn = ctx.addButton({
-        label: 'Train', group: 'train',
+        label: 'Train', icon: '&#8711;', group: 'train',
         title: 'Training panel (Space: play/pause, T: one step)',
         onClick: () => { ui.open = !ui.open; saveUi(); applyUi(); dirty = true; kick(); },
       });

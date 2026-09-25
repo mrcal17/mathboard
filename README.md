@@ -456,13 +456,13 @@ the right edge, to hide the panel; double-click again to bring it back. The firs
 
 | | |
 |---|---|
-| **New net…** | Start from a [preset](#presets) or **Blank**. Undoable |
+| **New net** | A menu of every [preset](#presets) by group, plus **Blank** (N). Type to search, arrows and Enter to pick. Undoable |
 | **+ Layer** | Inserts a fully connected hidden layer of 3 after the selected layer (or the selected neuron's layer, or just before the outputs), moving later columns right if there is no room. The direct edges between its neighbours are removed. It says so and adds nothing next to a token layer or right before an attention layer |
 | **Layout**, **Fit** | Evenly spaced columns; zoom to fit |
 | **Randomize** | New weights (He when a layer uses ReLU, Xavier otherwise) and biases back to 0. Shift+click gives small weights |
 | **↶ ↷** | Undo / redo |
-| **Export**, **Import** | The net as a `.json` file, training settings included. Import repairs what it can and is undoable |
-| **PNG**, **To board** | Download a picture of the network, or drop it on the current board page (like the 3D tab's To board) |
+| **File** → **Export**, **Import** | The net as a `.json` file, training settings included. Import repairs what it can and is undoable |
+| **File** → **PNG**, **To board** | Download a picture of the network, or drop it on the current board page (like the 3D tab's To board) |
 | **Weights** | Numbers on the edges (W) |
 | **Lens** | Shows or hides the [lens bar](#lens) (L). A dot on the button means the lens is dimming or hiding something |
 | **Train** | Shows or hides the [Train panel](#train-panel) (open by default) |
@@ -473,7 +473,7 @@ the right edge, to hide the panel; double-click again to bring it back. The firs
 
 **Keys** (ignored while typing): Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z) undo / redo, Delete (or
 Backspace) removes the selected neuron, edge or layer, Esc ends Explain, else closes the cheat
-sheet or deselects, F fits, H hides the UI, ? cheat sheet, W weight labels, S / Shift+S matrix
+sheet or deselects, F fits, N opens the New net menu, H hides the UI, ? cheat sheet, W weight labels, S / Shift+S matrix
 step-through, B bias trick, Space play / pause training, T one training step. 1–9 follow token n
 (on nets with tokens) and 0 stops, [ / ] focus the previous / next stage, L shows or hides the
 lens bar, A opens or closes the Attention panel, M / Shift+M switch its view, and E starts or ends

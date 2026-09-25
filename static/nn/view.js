@@ -1495,7 +1495,7 @@ export function install(ctx) {
   if (audience) return;
 
   // ================================================================ editing (presenter only)
-  wBtn = ctx.addButton?.({ label: 'Weights', title: 'Numbers on the edges: weights, and ∂L/∂w once targets are set (W)', onClick: () => toggleW(), group: 'view' }) || null;
+  wBtn = ctx.addButton?.({ label: 'Weights', icon: '&#8649;', title: 'Numbers on the edges: weights, and ∂L/∂w once targets are set (W)', onClick: () => toggleW(), group: 'view' }) || null;
   window.addEventListener('keydown', e => {
     if (e.key !== 'w' && e.key !== 'W') return;
     if (e.ctrlKey || e.metaKey || e.altKey || e.repeat || !(ctx.active ? ctx.active(e) : true)) return;

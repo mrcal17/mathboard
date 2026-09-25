@@ -2182,7 +2182,7 @@ export function install(ctx) {
   if (!ro && ctx.addButton) {
     try {
       toolBtn = ctx.addButton({
-        label: '3D plots', group: 'surf3d',
+        label: '3D plots', icon: '&#8779;', group: 'surf3d',
         title: '3D plots: a neuron as a surface over the inputs, the loss landscape with the training path, the data through the layers, the softmax simplex (P: open / close, Shift+P: next plot)',
         onClick: () => toggle(),
       });

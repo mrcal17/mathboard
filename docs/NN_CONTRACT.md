@@ -418,7 +418,8 @@ store.load(net | json, { history = true })   // swap in a whole net (normalized)
 ```js
 ctx = {
   store, model, el: { root, bar, stage, matrix },
-  addButton({ label, title, onClick, group = 'modules' }) -> <button>,   // into #nn-bar; label is HTML
+  addButton({ label, title, onClick, group = 'modules', icon }) -> <button>,   // into #nn-bar (see Toolbar below);
+                          //   label and icon are HTML, the icon goes before the label
   toast(msg, ms?), theme() -> 'dark' | 'light', onTheme(fn(theme)) -> off, onShow(fn(visible)) -> off,
   active(e?) -> bool,     // Net tab visible, not the audience window, and e (if given) is not typing into a text
                           //   input, textarea, select or contenteditable (range / checkbox / radio / button inputs don't count)
@@ -456,14 +457,27 @@ ctx.matrix = { step(±1), toggle(key), opt, render(), update(), reveal(layer, pa
                //   open (a string, so the audience mirror compares it by value)
 ```
 
-- Toolbar: the shell's groups `net` (New net…, + Layer, Layout, Fit, Randomize), `edit` (↶ ↷) and
-  `file` (Export, Import, PNG, To board) come first, then module groups in the order they are
-  first used (`view`: Weights and lens.js's Lens; train's `train`: Train; `attnviz`: Attention;
-  `tour`: Explain), then a spacer, **Audience** and `?` (the cheat sheet: the keys below and most
-  toolbar buttons, Lens, Attention and Explain included). Audience calls
-  `window.mathboardGraph.audience.open()` (set by `graph/features/lecture.js`), the same window the 3D tab's Audience button opens; it is lit
-  while that window is open (`audience.isOpen`, checked every second while the tab is shown).
-  Toolbar buttons never take focus, so Space stays with training.
+- Toolbar: three rounded clusters in the board toolbar's style, level with the Board / 3D / Net
+  tabs, each made of divider-separated sections (`BAR` in nn.js). **build**: `new` (New net),
+  `net` (+ Layer, Layout, Fit, Randomize), `edit` (↶ ↷). **show**: `view` (Weights, lens.js's Lens,
+  view3d's 3D), `panels` (the groups `train`, `attnviz` and `surf3d`: Train, Attention, 3D plots),
+  `tour` (Explain). **tail**, at the right end: `file` (the File menu), `tail` (**Audience** and `?`,
+  the cheat sheet: the keys below and the toolbar buttons). A group joins the section of the same
+  name (or `panels`, as above) whatever the install order; any other group gets a section of its
+  own at the end of show, in the order first used. Short of room the bar drops the icons
+  (`.nn-compact`), then some padding (`.nn-tight`), and only then wraps (below about 1100 px).
+  Audience calls `window.mathboardGraph.audience.open()` (set by `graph/features/lecture.js`), the
+  same window the 3D tab's Audience button opens; it is lit while that window is open
+  (`audience.isOpen`, checked every second while the tab is shown). Toolbar buttons never take
+  focus, so Space stays with training.
+- Menus: **New net** (also **N**) and **File** open a popover under their button, inside `#nn-bar`
+  (so H and the audience window hide it too); one at a time, closed by Esc, a click outside or on
+  the button, or leaving the tab. New net lists `PRESETS` in sections by `p.group` (in `PRESETS`
+  order), in columns, then **Blank net**; a search field filters on label, key, group and note
+  (every word must match), and the line at the bottom shows the active preset's note (also its
+  tooltip). Typing filters, ↑ ↓ (or Tab) move, ← → change column while the field is empty, Enter
+  opens the preset (Ctrl+Z goes back), and while it is open no other shortcut sees a key. File holds
+  Export, Import, PNG and To board (↑ ↓ Enter; any other key closes it and goes on as usual).
 - train.js sets `ctx.train` (its test handle, below). Its named exports are
   `readSettings(net, model)`, `netShape`, `defaultDataset`, `forwardMany(net, model, X, n, from, M)`,
   `datasetLoss(P, Y, n, K, loss, outAct, segments = 1)`, `wordAccuracy(P, targetWords, n, K, ds)` and
@@ -491,7 +505,7 @@ ctx.matrix = { step(±1), toggle(key), opt, render(), update(), reveal(layer, pa
 
 | owner | keys |
 |---|---|
-| shell | Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z) undo/redo, Delete/Backspace remove selection, Esc close the cheat sheet or deselect, F fit, H hide UI, ? cheat sheet |
+| shell | Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z) undo/redo, Delete/Backspace remove selection, Esc close the cheat sheet or deselect, F fit, N the New net menu, H hide UI, ? cheat sheet. An open toolbar menu takes the keys first (capture phase) |
 | view | W: weight labels on edges |
 | matrix | S: step, Shift+S: step back, B: bias-trick toggle |
 | train | Space: play/pause training, T: single training step |

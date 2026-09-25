@@ -1154,7 +1154,7 @@ export function install(ctx) {
   if (!ro && ctx.addButton) {
     try {
       toolBtn = ctx.addButton({
-        label: 'Attention', group: 'attnviz',
+        label: 'Attention', icon: '&#8978;', group: 'attnviz',
         title: 'Attention panel: who reads whom, the dot products, the weighted sum, the heatmaps (A: open / close, M: next mode)',
         onClick: () => toggle(),
       });

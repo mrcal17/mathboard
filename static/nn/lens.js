@@ -41,7 +41,7 @@ export function install(ctx) {
   // Its buttons never take focus, so Space stays with training (as the shell's toolbar).
   bar.addEventListener('mousedown', e => { if (e.target.closest('button')) e.preventDefault(); });
 
-  const btn = ctx.addButton?.({ label: 'Lens', title: 'Lens bar: focus one stage, follow a token or a head, hide edges (L)', group: 'view', onClick: () => toggle() }) || null;
+  const btn = ctx.addButton?.({ label: 'Lens', icon: '&#9678;', title: 'Lens bar: focus one stage, follow a token or a head, hide edges (L)', group: 'view', onClick: () => toggle() }) || null;
 
   function toggle(on = !open) {
     open = on;

@@ -166,7 +166,7 @@ export function install(ctx) {
   let G = null, gen = 0, threeP = null;
 
   const btn = audience ? null : ctx.addButton?.({
-    label: '3D', group: 'view', onClick: () => toggle(),
+    label: '3D', icon: '&#11041;', group: 'view', onClick: () => toggle(),
     title: '3D view (D): the net in depth, attention heads as slabs, or the multi-head reshape as moving cubes. Shift+D: next view',
   }) || null;
 

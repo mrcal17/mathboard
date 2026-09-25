@@ -852,7 +852,7 @@ export function install(ctx) {
   });
 
   toolBtn = ctx.addButton?.({
-    label: 'Explain', title: 'Walk through this net step by step (E). ← → move, Esc ends', group: 'tour',
+    label: 'Explain', icon: '&#9655;', title: 'Walk through this net step by step (E). ← → move, Esc ends', group: 'tour',
     onClick: () => toggle(),
   }) || null;
 
