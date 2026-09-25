@@ -432,14 +432,20 @@ store.load(net | json, { history = true })   // swap in a whole net (normalized)
 
 | scale | max over | used by |
 |---|---|---|
-| weights | \|w\| of every edge | view edge colour and width (1.2 + 5·\|w\|/max px); inspector weight sliders; matrix W cells (also in `[W \| b]` and the Collapse chain) |
+| weights | \|w\| of every edge | view edge strength (colour, opacity and width: below); inspector weight sliders; matrix W cells (also in `[W \| b]` and the Collapse chain) |
 | biases | \|b\| of every node | inspector bias sliders; matrix b cells (and the b column of `[W \| b]`). The view doesn't colour biases |
 | activations | every entry of `fwd.a` and `fwd.z` | view neuron fill; matrix x, a, z, ŷ and y cells. Batch cells keep the live sample's scale and saturate |
-| gradients | every entry of `bwd.dZ` and `bwd.dA`, and max\|dZ[l]\|·max\|a[k]\| for every term k of every layer l | view δ ring (colour, width 1.5 + 4·\|δ\|/max); matrix δ, ∂L/∂a, ∂L/∂W and ∂L/∂b cells |
+| gradients | every entry of `bwd.dZ` and `bwd.dA`, and max\|dZ[l]\|·max\|a[k]\| for every term k of every layer l | view δ ring (`colorFor` colour, width 1 + 2.5·\|δ\|/max px; detail only: hover, selection, the step-through, W on or zoomed in); matrix δ, ∂L/∂a, ∂L/∂W and ∂L/∂b cells |
 
 - Other scales: matrix σ'(z) cells use max 1 and W_eff / b_eff their own max; inspector
   input-value sliders use the activations scale. The inspector's `solid(v)` is the full-strength sign colour
   (weights in its KaTeX, slider accents).
+- View edges don't take `colorFor`'s alpha: the sign picks `--pos` / `--neg`, and t = |w|/max|w|
+  (A_ij for an attention edge, in `--att`) picks one of 16 levels (attention 12) whose opacity
+  steps in equal ΔE against `--bg` up to 0.9, and whose width is 1 to 2.25 screen px (attention 1
+  to 3). Below t = 0.03 a weight edge is a neutral 10% hairline, and an attention edge below 0.02 is
+  not drawn. Fixed edges are dotted `--text-3` at 45%. View neurons take `colorFor` as it is,
+  blended onto `--float` into one opaque fill (docs/DESIGN.md, Net 2D view).
 - Matrix panel cells take `colorFor` with its alpha eased above 0.5 to at most 0.72, so their
   digits are always the text colour; a value that reads as zero has no fill, and a fixed edge's
   cell none either (fixed edges are neutral, as on the canvas). Attention weights A_ij are filled

@@ -22,9 +22,16 @@
 // layers whole: a double-click adds a feature to every token (or says why it can't), and a new edge
 // between tokenwise-tied layers becomes a new shared entry, added for every token.
 //
-// Look (docs/DESIGN.md section 7 A): no lane or header boxes by default. A lane tints while its
-// header is hovered and takes an HI outline when selected; edges get a crisp HI outline and
-// neurons an HI ring on hover and selection. Headers that would collide drop a sub line first.
+// Look (docs/DESIGN.md section 7 A and "Net 2D view"): data first, structure recedes. Edges are
+// thin screen-px strokes whose opacity follows |w| / max|w| on a perceptual curve (equal steps of
+// ΔE against the canvas), batched into one <path> per colour, strength level and lens level, so a
+// net of thousands of edges is a few dozen elements. Near-zero weights fade to a faint neutral
+// hairline. The edges of what is hovered, selected or stepped come forward as their own paths
+// (the overlay), over the dimmed rest. Neurons show their activation as fill; their labels and
+// numbers follow a level of detail (zoom): far, only the fills; middle, the inputs' and outputs'
+// labels and numbers; near, all of them; hover, selection and the step-through always show theirs.
+// A layer has one quiet label (name and shape, on one line, stacked or name only when it would
+// collide). Edge hover is hit-tested here (edges have no DOM of their own).
 //
 // Lens (docs/NN_LENS.md, rules in focus.js): what state.lens leaves out of its story is dimmed
 // (opacity --le, about 0.1, and no numbers); what its show toggles and thresholds remove is not
@@ -38,10 +45,10 @@ const NS = 'http://www.w3.org/2000/svg';
 const XHTML = 'http://www.w3.org/1999/xhtml';
 const R = 26;                          // neuron radius, world px (CSS px at zoom 1)
 // The HI ring's radius: a 3 px gap outside the rim, or outside the δ ring (r R + 4, up to 5.5 wide).
-const HL_R = R + 4.5, HL_R_D = R + 10;
-const MIN_K = 0.15, MAX_K = 4, FIT_MAX_K = 1.6;
-const HEAD_UP = R + 50;                // header centre sits this far above the topmost neuron's centre
-const LANE_TOP = 27;                   // lanes start this far below the header centre (clear of its pill)
+const HL_R = R + 4.5, HL_R_D = R + 8;
+const MIN_K = 0.05, MAX_K = 4, FIT_MAX_K = 1.6;
+const HEAD_UP = R + 34;                // a header's (bottom) baseline sits this far above the topmost neuron's centre
+const LANE_TOP = 12;                   // lanes start this far below that baseline (clear of its pill)
 const LANE_DOWN = R + 30;              // lanes end this far below the lowest neuron's centre
 const COL = 160;                       // column spacing for empty layers (as model.js)
 const SNAP = 10;                       // a dragged neuron snaps onto its column within this (Alt: off)
@@ -55,17 +62,33 @@ const ROW = 80;                        // neuron spacing in a column (as model.j
 const TOK = { l: 8, r: 8, t: 6, b: 24, gap: 5 };
 const GRP = { l: 6, r: 6, t: 6, b: 6 };
 const TOK_LAB = 7;
-// Headers (in header px, before the text boost): the name's and the sub line's baselines, the
-// pill's padding round the text, the heatmap's gap to the name, and the air between two pills.
-const HEAD = { name: -3, sub: 13, top: -20, bot: 20, botName: 7, padX: 10, hmGap: 8, air: 4 };
-const HM_H = 26;                       // the heatmap of A is about this tall: two lines of header text
+// Headers (header px, before the boost; y = 0 is the bottom baseline): the gap between name and
+// shape on one line, the upper line's baseline when stacked, the pill round the text (its top on
+// one line and stacked, its bottom), its side padding, the heatmap's gap to the text, the air
+// between two pills.
+const HEAD = { gap: 6, up: -16, top: -16, topStack: -32, bot: 6, padX: 8, hmGap: 7, air: 6 };
+const HM_H = 22;                       // the heatmap of A is about this tall
+const HEAD_MAX = 10;                   // headers grow further than other text when zoomed out (neighbours still limit them)
 const VARS = ['--nnv-bg', '--nnv-text', '--nnv-text-2', '--nnv-muted', '--nnv-line', '--nnv-line-3', '--nnv-hover',
-  '--nnv-hi', '--nnv-hi-text', '--nnv-att', '--nnv-bad', '--nnv-node', '--nnv-rim', '--nnv-dot', '--nnv-tok'];
+  '--nnv-hi', '--nnv-hi-text', '--nnv-att', '--nnv-bad', '--nnv-node', '--nnv-rim', '--nnv-dot', '--nnv-tok',
+  '--nnv-pos', '--nnv-neg', '--nnv-zero'];
 const MARKS = ['sel', 'hov', 'rel', 'lit', 'bias', 'show', 'drop', 'tie', 'foc'];
 // The dot grid goes once text grows past this (zoomed out).
 const FAR_TS = 1.3;
 // Lens: a dimmed thing is drawn at DIM + (1 - DIM)·emphasis; below NUM_MIN it also loses its numbers.
-const DIM = 0.1, NUM_MIN = 0.25;
+// Batched edges quantize the emphasis to LZ levels (0 = full, LZ - 1 = DIM).
+const DIM = 0.1, NUM_MIN = 0.25, LZ = 5;
+// Level of detail by zoom: below LOD1_K only fills (no labels or numbers), below LOD2_K the labels
+// and numbers of the input and output layers, from LOD2_K all of them.
+const LOD1_K = 0.42, LOD2_K = 1.1;
+const SPECK_K = 0.3;                   // below this the token row labels and group letters go too (.speck)
+// Edge strength: |w| / max|w| (A_ij for attention) in NW (NA) levels. Below W0 (A0) a weight is a
+// neutral hairline (an attention edge is not drawn). Stroke widths are screen px; the opacity of
+// the strongest level is AW (AA), the rest step down in equal ΔE against the canvas.
+const NW = 16, NA = 12, W0 = 0.03, A0 = 0.02, AW = 0.9, AA = 0.9;
+const EW = [1, 2.25], EA = [1, 3];     // stroke width px, weakest to strongest level
+// Hit test for edges (they have no DOM of their own): within this many screen px, clamped in world px.
+const HIT_PX = 5, HIT_MIN = 3.5, HIT_MAX = 9;
 // Token names: at most NAME_MAX characters beside the box (the full name is the box's tooltip).
 const NAME_MAX = 8;
 // Fit: the panels floating over the stage that the net fits beside (px of air around each), the
@@ -111,6 +134,49 @@ function maxAbs(...xs) {   // as matrix.js: nested arrays, non-finite entries sk
   return m;
 }
 
+// ---------------------------------------------------------------- colour (perceptual edge opacity)
+// '#rgb', '#rrggbb' or 'rgb(a)(r, g, b[, a])' -> [r, g, b, a], or null.
+function parseColor(s) {
+  s = String(s || '').trim();
+  let m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(s);
+  if (m) {
+    const h = m[1].length === 3 ? [...m[1]].map(c => c + c).join('') : m[1];
+    return [0, 2, 4].map(i => parseInt(h.slice(i, i + 2), 16)).concat(1);
+  }
+  m = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)(?:[\s,/]+([\d.]+))?\s*\)$/i.exec(s);
+  return m ? [+m[1], +m[2], +m[3], m[4] === undefined ? 1 : +m[4]] : null;
+}
+function toLab([r, g, b]) {
+  const lin = c => { c /= 255; return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
+  const R_ = lin(r), G_ = lin(g), B_ = lin(b);
+  const f = t => (t > 216 / 24389 ? Math.cbrt(t) : (24389 / 27 * t + 16) / 116);
+  const x = f((0.4124 * R_ + 0.3576 * G_ + 0.1805 * B_) / 0.95047);
+  const y = f(0.2126 * R_ + 0.7152 * G_ + 0.0722 * B_);
+  const z = f((0.0193 * R_ + 0.1192 * G_ + 0.9505 * B_) / 1.08883);
+  return [116 * y - 16, 500 * (x - y), 200 * (y - z)];
+}
+const mixRgb = (bg, fg, a) => [0, 1, 2].map(i => bg[i] + a * (fg[i] - bg[i]));
+const dE = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]);
+// Opacity per strength level 1..n of colour fg stroked over bg, so that each level adds the same
+// ΔE: the strongest is aMax, and weak ones get faint quickly (as the eye reads them). [0] unused.
+function alphaLevels(bg, fg, n, aMax) {
+  const L0 = toLab(bg), at = a => dE(L0, toLab(mixRgb(bg, fg, a))), top = at(aMax), out = [0];
+  for (let i = 1; i <= n; i++) {
+    const want = (top * i) / n;
+    let lo = 0, hi = aMax;
+    for (let k = 0; k < 24; k++) { const mid = (lo + hi) / 2; if (at(mid) < want) lo = mid; else hi = mid; }
+    out.push(Math.round(hi * 1000) / 1000);
+  }
+  return out;
+}
+// Squared distance from (px, py) to the segment (ax, ay)-(bx, by).
+function segD2(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+  const u = l2 ? clamp(((px - ax) * dx + (py - ay) * dy) / l2, 0, 1) : 0;
+  const x = ax + u * dx - px, y = ay + u * dy - py;
+  return x * x + y * y;
+}
+
 function mk(tag, attrs, parent) {
   const e = document.createElementNS(NS, tag);
   if (attrs) for (const a in attrs) e.setAttribute(a, attrs[a]);
@@ -142,17 +208,19 @@ function toward(p, q, d) {
   const dx = q.x - p.x, dy = q.y - p.y, l = Math.hypot(dx, dy) || 1;
   return { x: p.x + (dx / l) * d, y: p.y + (dy / l) * d };
 }
+// A geometry: its path data d, a point at u (0..1), and seg, how many straight pieces the hit test
+// samples it in.
 function straight(a, b, rb = R) {
   const s = toward(a, b, R), t = toward(b, a, rb);
   return {
-    d: `M${r1(s.x)},${r1(s.y)}L${r1(t.x)},${r1(t.y)}`,
+    d: `M${r1(s.x)},${r1(s.y)}L${r1(t.x)},${r1(t.y)}`, seg: 1,
     at: u => ({ x: s.x + (t.x - s.x) * u, y: s.y + (t.y - s.y) * u }),
   };
 }
 function curve(a, c, b) {
   const s = toward(a, c, R), t = toward(b, c, R);
   return {
-    d: `M${r1(s.x)},${r1(s.y)}Q${r1(c.x)},${r1(c.y)} ${r1(t.x)},${r1(t.y)}`,
+    d: `M${r1(s.x)},${r1(s.y)}Q${r1(c.x)},${r1(c.y)} ${r1(t.x)},${r1(t.y)}`, seg: 12,
     at: u => {
       const v = 1 - u;
       return { x: v * v * s.x + 2 * v * u * c.x + u * u * t.x, y: v * v * s.y + 2 * v * u * c.y + u * u * t.y };
@@ -218,8 +286,12 @@ export function install(ctx) {
   const gBands = mk('g', { class: 'nnv-bands' }, content);
   const gGroups = mk('g', { class: 'nnv-grps' }, content);
   const gToks = mk('g', { class: 'nnv-toks' }, content);
-  const gEdges = mk('g', { class: 'nnv-edges' }, content);
-  const gAtt = mk('g', { class: 'nnv-atts' }, content);
+  // Edges are batched: one path per colour, strength level and lens level (buckets, below), weight
+  // edges and attention edges in their own groups (hover dims them apart). The overlay holds the
+  // edges that come forward, one path each.
+  const gEdges = mk('g', { class: 'nnv-eb nnv-edges' }, content);
+  const gAtt = mk('g', { class: 'nnv-eb nnv-atts' }, content);
+  const gFore = mk('g', { class: 'nnv-fore' }, content);
   const pairEl = mk('path', { class: 'nnv-pair', display: 'none' }, content);
   const gPulses = mk('g', { class: 'nnv-pulses' }, content);
   const gLabels = mk('g', { class: 'nnv-wls' }, content);
@@ -245,7 +317,7 @@ export function install(ctx) {
   let dirty = { build: true }, raf = 0;
   let shown = document.body.dataset.view === 'nn';
   let needFit = 0, everFit = false, userMoved = false, fitAnim = 0;   // needFit: false | ms of the pending fit
-  let showW = false, marked = [], pulseKey = '', pairIds = null, dropId = null, textScale = 1;
+  let showW = false, marked = [], pulseKey = '', pairIds = null, dropId = null, textScale = 1, headScale = 1, lod = -1;
   let focus = [];     // the shown attention rows (or column)
   let E = null;       // the lens's emphasis (focus.js), or null without a lens
 
@@ -334,13 +406,14 @@ export function install(ctx) {
     for (const [id, r] of map) if (!seen.has(id)) { drop(r); map.delete(id); }
   }
 
+  // A neuron is one circle (its activation as fill, blended over --nnv-node; the rim is its stroke),
+  // the HI ring and the δ ring round it, its KaTeX label (rendered once it can show: see
+  // ensureLabels) and its numbers. The bias label is made the first time something points at it.
   function makeNode(n) {
     const g = mk('g', { class: 'nnv-node', 'data-kind': 'node', 'data-id': n.id }, gNodes);
     const hl = mk('circle', { class: 'nnv-hl', r: HL_R }, g);
-    const gring = mk('circle', { class: 'nnv-gring', r: R + 4 }, g);
-    mk('circle', { class: 'nnv-base', r: R }, g);
-    const fill = mk('circle', { class: 'nnv-fill', r: R }, g);
-    mk('circle', { class: 'nnv-rim', r: R }, g);
+    const gring = mk('circle', { class: 'nnv-gring', r: R + 3.5 }, g);
+    const body = mk('circle', { class: 'nnv-body', r: R }, g);
     const fo = mk('foreignObject', { class: 'nnv-lab', x: -R - 14, y: -R, width: 2 * R + 28, height: 2 * R }, g);
     const div = document.createElementNS(XHTML, 'div');
     div.className = 'nnv-tex';
@@ -348,43 +421,58 @@ export function install(ctx) {
     const val = mk('text', { class: 'nnv-val', y: R + 8 }, g);
     const grad = mk('text', { class: 'nnv-grad', x: R + 9, y: -R * 0.5 }, g);
     const tgt = mk('text', { class: 'nnv-tgt', x: R + 9, y: R * 0.5 }, g);
-    const bias = mk('text', { class: 'nnv-bias', x: -R - 9, y: -R * 0.5 }, g);
-    const bn = mk('tspan', { class: 'nnv-wl-n' }, bias), bs = mk('tspan', { class: 'nnv-wl-s' }, bias), bv = mk('tspan', null, bias);
     if (!audience) mk('circle', { class: 'nnv-handle', 'data-kind': 'handle', 'data-id': n.id, cx: R + 1, r: 5 }, g);
-    const r = { id: n.id, g, hl, gring, fill, fo, div, val, grad, tgt, bias, bn, bs, bv, img: null, label: undefined, x: NaN, y: NaN };
+    const r = { id: n.id, g, hl, gring, body, fo, div, val, grad, tgt, bias: null, img: null, rim: null, label: undefined, want: undefined, x: NaN, y: NaN };
     if (images.has(n.id)) applyImage(r, images.get(n.id));
     return r;
   }
+  function biasOf(r) {
+    if (r.bias) return r.bias;
+    const bias = mk('text', { class: 'nnv-bias', x: -R - 9, y: -R * 0.5 }, r.g);
+    r.bias = bias;
+    r.bn = mk('tspan', { class: 'nnv-wl-n' }, bias);
+    r.bs = mk('tspan', { class: 'nnv-wl-s' }, bias);
+    r.bv = mk('tspan', null, bias);
+    return bias;
+  }
+  // An edge is a record: its geometry (sd, the path data it adds to its bucket), its strength
+  // level, sign and lens level, and the bucket it is in. Its label (W, hover) is made on demand.
   function makeEdge(e) {
-    const g = mk('g', { class: 'nnv-edge', 'data-kind': 'edge', 'data-id': e.id }, gEdges);
-    const hit = mk('path', { class: 'nnv-hit' }, g);
-    const ol = mk('path', { class: 'nnv-ol' }, g);        // the HI outline, under the line
-    const line = mk('path', { class: 'nnv-line' }, g);
+    return { id: e.id, att: false, G: null, sd: '', P: null, bb: null, lp: null, kind: '', t: 0, sg: 0, lv: 0, lz: 0, le: 1, gone: false, bk: -1, lab: null };
+  }
+  function labOf(r) {
+    if (r.lab) return r.lab;
     const lab = mk('text', { class: 'nnv-wl' }, gLabels);
-    const t1 = mk('tspan', { x: 0 }, lab);
-    const tn = mk('tspan', { class: 'nnv-wl-n' }, t1);   // a tied edge's matrix, e.g. W
-    const ts = mk('tspan', { class: 'nnv-wl-s' }, t1);   // its subscript, e.g. Q
-    const tv = mk('tspan', null, t1);                     // (i,j) = value
-    const t2 = mk('tspan', { x: 0, dy: '1.2em', class: 'nnv-wl-g' }, lab);
-    return { id: e.id, g, hit, ol, line, lab, t1, tn, ts, tv, t2, G: null, kind: '' };
+    r.lab = lab;
+    r.t1 = mk('tspan', { x: 0 }, lab);
+    r.tn = mk('tspan', { class: 'nnv-wl-n' }, r.t1);   // a tied edge's matrix, e.g. W
+    r.ts = mk('tspan', { class: 'nnv-wl-s' }, r.t1);   // its subscript, e.g. Q
+    r.tv = mk('tspan', null, r.t1);                     // (i,j) = value
+    r.t2 = mk('tspan', { x: 0, dy: '1.2em', class: 'nnv-wl-g' }, lab);
+    if (r.lp) put(lab, 'transform', `translate(${r1(r.lp.x)},${r1(r.lp.y)})`);
+    setLe(lab, r.le);
+    cls(lab, 'lz-gone', r.gone);
+    cls(lab, 'lz-dim', r.le < NUM_MIN);
+    return lab;
   }
   function makeLayer(l) {
     const band = mk('rect', { class: 'nnv-band', rx: 18 }, gBands);
     const g = mk('g', { class: 'nnv-head', 'data-kind': 'layer', 'data-id': l.id }, gHeads);
-    const tip = mk('title', null, g);                   // the whole header, while its sub line gives way
+    const tip = mk('title', null, g);                   // the whole header, while its shape gives way
     const gi = mk('g', { class: 'nnv-head-in' }, g);   // carries the text boost (see placeHead)
-    if (textScale !== 1) put(gi, 'transform', `scale(${textScale})`);
-    const bg = mk('rect', { class: 'nnv-head-bg', rx: 8, y: HEAD.top, height: HEAD.bot - HEAD.top }, gi);   // the pill: hit area, hover, selection
-    const name = mk('text', { class: 'nnv-head-name', y: HEAD.name }, gi);
-    const sub = mk('text', { class: 'nnv-head-sub', y: HEAD.sub }, gi);
+    if (headScale !== 1) put(gi, 'transform', `scale(${headScale})`);
+    const bg = mk('rect', { class: 'nnv-head-bg', rx: 8 }, gi);   // the pill: hit area, hover, selection
+    const name = mk('text', { class: 'nnv-head-name' }, gi);
+    const sub = mk('text', { class: 'nnv-head-sub' }, gi);
     return { id: l.id, band, g, tip, gi, bg, name, sub, nameS: null, subS: null, nameW: 0, subW: 0, measured: false };
   }
-  const drop = r => { r.g.remove(); r.lab?.remove(); r.band?.remove(); r.hm = null; };
+  const drop = r => { r.g.remove(); r.band?.remove(); r.hm = null; };
+  const dropEdge = r => { unbucket(r); r.lab?.remove(); dropFore(r.id); };
 
   function rebuild() {
     const net = store.net, before = new Set(nodes.keys());
     diff(nodes, net.nodes, makeNode, drop);
-    diff(edges, net.edges, makeEdge, drop);
+    diff(edges, net.edges, makeEdge, dropEdge);
     diff(layers, net.layers, makeLayer, drop);
     for (const id of images.keys()) if (!nodes.has(id)) images.delete(id);
     // Keep paint order = net order, so later layers draw over earlier ones.
@@ -466,8 +554,8 @@ export function install(ctx) {
     const q = { key, head, lines: [], labs: [], hm: null };
     for (let i = 0; i < a.T; i++) for (let j = 0; j < a.T; j++) for (let f = 0; f < a.d; f++) {
       const h = Math.floor(f / a.dh), lid = `att:${id}:${i}:${j}:${f}`;
-      const g = mk('g', { class: 'nnv-att', 'data-kind': 'attedge', 'data-id': id, 'data-i': i, 'data-j': j, 'data-h': h }, gAtt);
-      const rec = { id: lid, g, hit: mk('path', { class: 'nnv-att-hit' }, g), line: mk('path', { class: 'nnv-att-line' }, g), i, j, f, h, G: null };
+      // batched like the weight edges (no DOM of its own); hit-tested as { kind: 'attedge', id, i, j, h }
+      const rec = { id: lid, att: true, layer: id, i, j, f, h, G: null, sd: '', P: null, bb: null, lv: 0, lz: 0, gone: false, bk: -1 };
       q.lines.push(rec);
       attLines.set(lid, rec);
     }
@@ -475,8 +563,8 @@ export function install(ctx) {
       q.labs.push({ el: mk('text', { class: 'nnv-al' }, gAttLabs), h, i, j });
     }
     if (head) {
-      // About as tall as the header's two lines of text; cells 1 px apart, no frame.
-      const cell = clamp(Math.floor(HM_H / a.T), 4, 13), n = a.T * cell - 1, gap = 5;
+      // About as tall as the header's text; cells 1 px apart, no frame.
+      const cell = clamp(Math.floor(HM_H / a.T), 4, 11), n = a.T * cell - 1, gap = 4;
       const g = mk('g', { class: 'nnv-hm' }, head.gi);   // left of the header's name, placed by placeHead
       const hm = { g, cell, n, W: a.heads * n + (a.heads - 1) * gap, H: n, cells: [], hl: [] };
       for (let h = 0; h < a.heads; h++) {
@@ -493,7 +581,7 @@ export function install(ctx) {
     return q;
   }
   function dropAtt(q) {
-    for (const r of q.lines) { r.g.remove(); attLines.delete(r.id); }
+    for (const r of q.lines) { unbucket(r); dropFore(r.id); attLines.delete(r.id); }
     for (const t of q.labs) t.el.remove();
     q.hm?.g.remove();
     if (q.head && q.head.hm === q.hm) q.head.hm = null;
@@ -508,9 +596,27 @@ export function install(ctx) {
     try { k.render(String(tex), r.div, { throwOnError: false, output: 'html' }); }
     catch { r.div.textContent = tex; }
   }
-  // A header is its name over a sub line (act · size), with an attention layer's heatmap of A left
-  // of both, and a pill round them that shows only on hover and selection. Widths are header px,
-  // before the text boost; the sub line is measured while hidden too (visibility, not display).
+  // KaTeX labels render once they can show (view.css: the level of detail, or a mark), so a big net
+  // zoomed out never pays for hundreds of them. forLod: png() asks for its own level.
+  // hot: the neurons highlight() marked hovered, selected, lit or related, whose labels and numbers
+  // always show. Numbers (value, δ, target) are painted only where they can show too (numbersShow:
+  // the labels' rule, or W's δ numbers), and caught up here when they come into view.
+  const LABEL_MARKS = new Set(['hov', 'sel', 'lit', 'rel']);
+  let hot = new Set();
+  function labelShows(r, L = lod) {
+    return L >= 2 || (L === 1 && r.io) || hot.has(r.id) || dropId === r.id;
+  }
+  const numbersShow = (r, L = lod) => labelShows(r, L) || (showW && L >= 1);
+  function ensureLabels(L = lod) {
+    for (const r of nodes.values()) {
+      if (r.label !== r.want && labelShows(r, L)) renderLabel(r, r.want);
+      if (r.stale && numbersShow(r, L)) paintNums(r);
+    }
+  }
+  // A header is its name and shape (act · size) on one line, with an attention layer's heatmap of A
+  // left of them, and a pill round it that shows only on hover and selection. Short of room it
+  // stacks the two (mode 1), then shows the name alone (mode 2: the shape moves to its tooltip).
+  // Widths are header px, before the boost; the shape is measured while hidden too (visibility).
   function measureHead(r) {
     let a = 0, b = 0;
     try { a = r.name.getComputedTextLength(); b = r.sub.getComputedTextLength(); } catch { /* not rendered */ }
@@ -519,7 +625,8 @@ export function install(ctx) {
     r.nameW = a;
     r.subW = b;
   }
-  const headW = (r, sub) => (r.hm ? r.hm.W + HEAD.hmGap : 0) + Math.max(24, r.nameW, sub ? r.subW : 0) + 2 * HEAD.padX;
+  const textW = (r, mode) => (mode === 0 ? r.nameW + (r.subW ? HEAD.gap + r.subW : 0) : mode === 1 ? Math.max(r.nameW, r.subW) : r.nameW);
+  const headW = (r, mode) => (r.hm ? r.hm.W + HEAD.hmGap : 0) + Math.max(24, textW(r, mode)) + 2 * HEAD.padX;
   function headSub(l, i, count) {
     const s = ix().tok[i], act = model.ACTS?.[l.act]?.label || l.act || 'Identity';
     if (!s) return i === 0 ? `${count} input${count === 1 ? '' : 's'}` : `${act} · ${count}`;
@@ -535,14 +642,16 @@ export function install(ctx) {
     let heads = false;
     for (const n of net.nodes) {
       const r = nodes.get(n.id);
-      if (r && r.label !== n.label) renderLabel(r, n.label);
+      if (!r || r.want === n.label) continue;
+      r.want = n.label;
+      if (labelShows(r)) renderLabel(r, n.label);
     }
-    for (const e of net.edges) {   // fixed (dashed) and tied edges: plain fields, so no structural event
-      const r = edges.get(e.id), kind = e.fixed ? 'fixed' : typeof e.tie === 'string' && e.tie ? 'tied' : '';
+    for (const e of net.edges) {   // fixed (dotted, neutral) edges: a plain field, so no structural event
+      const r = edges.get(e.id), kind = e.fixed ? 'fixed' : '';
       if (!r || r.kind === kind) continue;
       r.kind = kind;
-      r.g.classList.toggle('fixed', kind === 'fixed');
-      r.g.classList.toggle('tied', kind === 'tied');
+      rebucket(r);
+      if (fore.has(r.id)) paintFore(fore.get(r.id));
     }
     net.layers.forEach((l, i) => {
       const r = layers.get(l.id);
@@ -555,8 +664,8 @@ export function install(ctx) {
       txt(r.name, name); txt(r.sub, sub);
       r.g.setAttribute('aria-label', `${name}: ${sub}`);
       r.measured = false;
-      r.nameW = name.length * 8.2;   // until measured
-      r.subW = sub.length * 6.6;
+      r.nameW = name.length * 7.6;   // until measured
+      r.subW = sub.length * 6.4;
       r.band.classList.toggle('empty', !count);
       heads = true;
     });
@@ -610,19 +719,18 @@ export function install(ctx) {
     for (const e of net.edges) {
       const r = edges.get(e.id), a = I.nodeById.get(e.from), b = I.nodeById.get(e.to);
       if (!r || !a || !b) continue;
-      r.G = geom(a, b);
-      put(r.line, 'd', r.G.d);
-      put(r.hit, 'd', r.G.d);
-      if (r.olOn) put(r.ol, 'd', r.G.d);   // the outline follows only while it shows (see outline())
+      setGeom(r, geom(a, b));
       // The number sits about 40% along from the source, where the edges fanning out of it have
       // parted (a skip edge's halfway, on its bow, clear of the columns it jumps); the edges into one
       // target are staggered by source row, so their numbers don't stack.
       const la = I.li.get(a.layer), n = I.byLayer[la]?.length || 1, u0 = Math.abs(I.li.get(b.layer) - la) >= 2 ? 0.5 : 0.4;
-      const p = r.G.at(u0 + 0.3 * (((I.rank.get(a.id) ?? 0) + 0.5) / n - 0.5));
-      put(r.lab, 'transform', `translate(${r1(p.x)},${r1(p.y)})`);
+      r.lp = r.G.at(u0 + 0.3 * (((I.rank.get(a.id) ?? 0) + 0.5) / n - 0.5));
+      if (r.lab) put(r.lab, 'transform', `translate(${r1(r.lp.x)},${r1(r.lp.y)})`);
     }
     const ext = layoutTokens();
     layoutAtt();
+    flushBuckets();
+    for (const f of fore.values()) paintFore(f);
     const top = (I.box ? I.box.minY : I.cy) - HEAD_UP;
     const bottom = (I.box ? I.box.maxY : I.cy) + LANE_DOWN;
     net.layers.forEach((l, i) => {
@@ -643,57 +751,71 @@ export function install(ctx) {
     placeAttLabels();
   }
   const pathOf = id => (edges.get(id) || attLines.get(id))?.G?.d;
-  // Headers get the text boost (ts), and may be wider than their lane, but never run into a
-  // neighbour. Two headers that would touch first drop a sub line where that makes one narrower
-  // (the narrower header's alone, else the other's, else both), and only then shrink by one factor
-  // (long layer names, columns packed close). Returns layer id -> { s: scale, sub: sub line shown }.
-  function headFit(ts) {
+  // Headers get the boost (hs), and may be wider than their lane, but never run into a neighbour.
+  // Two headers that would touch first narrow the wider one (one line, then stacked, then the name
+  // alone), and only then shrink by one factor (long layer names, columns packed close).
+  // Returns layer id -> { s: scale, mode: 0 one line | 1 stacked | 2 name only }.
+  function headFit(hs0) {
     const I = ix(), out = new Map();
-    const hs = store.net.layers.map((l, i) => ({ r: layers.get(l.id), x: I.cols[i].x, sub: true, s: ts }))
+    const hs = store.net.layers.map((l, i) => ({ r: layers.get(l.id), x: I.cols[i].x, mode: 0, s: hs0 }))
       .filter(h => h.r).sort((a, b) => a.x - b.x);
-    const W = h => headW(h.r, h.sub);
+    const W = (h, m = h.mode) => headW(h.r, m);
+    const next = h => { for (let m = h.mode + 1; m <= 2; m++) if (W(h, m) < W(h) - 0.5) return m; return -1; };
     for (let k = 0; k + 1 < hs.length; k++) {
       const a = hs[k], b = hs[k + 1], room = b.x - a.x - HEAD.air;
-      const fits = () => ((W(a) + W(b)) * ts) / 2 <= room;
-      if (fits()) continue;
-      const can = (W(a) <= W(b) ? [a, b] : [b, a]).filter(h => h.sub && h.r.subW > h.r.nameW);
-      const tries = can.length === 2 ? [[can[0]], [can[1]], can] : [can];
-      for (const t of tries) {
-        for (const h of t) h.sub = false;
-        if (fits()) break;
-        if (t !== tries[tries.length - 1]) for (const h of t) h.sub = true;
+      const fits = () => (W(a) * a.s + W(b) * b.s) / 2 <= room;
+      while (!fits()) {
+        const c = [a, b].filter(h => next(h) >= 0).sort((p, q) => W(q) * q.s - W(p) * p.s)[0];
+        if (!c) break;
+        c.mode = next(c);
       }
       if (fits()) continue;
       const s = (2 * room) / (W(a) + W(b));
       a.s = Math.min(a.s, s);
       b.s = Math.min(b.s, s);
     }
-    for (const h of hs) out.set(h.r.id, { s: Math.round(Math.max(0.6, h.s) * 100) / 100, sub: h.sub });
+    for (const h of hs) out.set(h.r.id, { s: Math.round(Math.max(0.6, h.s) * 100) / 100, mode: h.mode });
     return out;
   }
   function fitHeads() {
-    for (const [id, f] of headFit(textScale)) placeHead(layers.get(id), f);
+    for (const [id, f] of headFit(headScale)) placeHead(layers.get(id), f);
   }
-  // Lay out one header for fit f: the boost, the sub line, the heatmap left of the text (centred on
-  // the two lines), and the pill round it all. el: a png() clone's elements instead of the live ones.
+  // Lay out one header for fit f: the boost, the name and shape (one line, stacked or the name
+  // alone), the heatmap left of the text (centred on it), and the pill round it all. Everything
+  // sits on the bottom baseline, so a boost or a second line grows upward, away from the neurons.
+  // el: a png() clone's elements instead of the live ones.
   function placeHead(r, f, el = null) {
     const E = el || { g: r.g, gi: r.gi, bg: r.bg, name: r.name, sub: r.sub, tip: r.tip, hm: r.hm?.g };
-    const sub = f.sub, tw = Math.max(24, r.nameW, sub ? r.subW : 0), w = headW(r, sub);
+    const mode = f.mode, tw = Math.max(24, textW(r, mode)), w = headW(r, mode);
     const cx = r.hm ? (r.hm.W + HEAD.hmGap) / 2 : 0;   // the text's centre: the whole header is centred on the column
     put(E.gi, 'transform', f.s === 1 ? null : `scale(${f.s})`);
-    if (E.g.__nosub !== !sub) { E.g.__nosub = !sub; E.g.classList.toggle('nosub', !sub); }
-    if (E.tip) txt(E.tip, sub ? '' : `${r.nameS}: ${r.subS}`);
-    put(E.name, 'x', cx ? r1(cx) : null);
-    put(E.sub, 'x', cx ? r1(cx) : null);
-    let bot = sub ? HEAD.bot : HEAD.botName;
+    if (E.g.__mode !== mode) {
+      E.g.__mode = mode;
+      E.g.classList.toggle('line', mode === 0);
+      E.g.classList.toggle('nosub', mode === 2);
+    }
+    if (E.tip) txt(E.tip, mode === 2 ? `${r.nameS}: ${r.subS}` : '');
+    if (mode === 0) {   // left to right from the text's left edge
+      const x0 = cx - tw / 2;
+      put(E.name, 'x', r1(x0));
+      put(E.sub, 'x', r1(x0 + r.nameW + HEAD.gap));
+      put(E.name, 'y', null);
+    } else {
+      put(E.name, 'x', cx ? r1(cx) : null);
+      put(E.sub, 'x', cx ? r1(cx) : null);
+      put(E.name, 'y', mode === 1 ? HEAD.up : null);
+    }
+    let top = mode === 1 ? HEAD.topStack : HEAD.top, bot = HEAD.bot;
     if (r.hm && E.hm) {
-      const capTop = HEAD.name - 10, y = capTop + (HEAD.sub - capTop - r.hm.H) / 2;
+      const y = (top + 4 + bot - 4) / 2 - r.hm.H / 2;
       put(E.hm, 'transform', `translate(${r1(cx - tw / 2 - HEAD.hmGap - r.hm.W)},${r1(y)})`);
-      bot = Math.max(bot, y + r.hm.H + 6);
+      top = Math.min(top, y - 4);
+      bot = Math.max(bot, y + r.hm.H + 4);
     }
     put(E.bg, 'x', r1(-w / 2));
+    put(E.bg, 'y', r1(top));
     put(E.bg, 'width', r1(w));
-    put(E.bg, 'height', r1(bot - HEAD.top));
+    put(E.bg, 'height', r1(bot - top));
   }
 
   // Token boxes around each token's neurons, group bands around each group's boxes. Returns each
@@ -771,9 +893,7 @@ export function install(ctx) {
       const l = I.li.get(id), a = I.att[l];
       for (const rec of q.lines) {
         const v = a && tokNode(l - 1, a.vG, rec.j, rec.f), z = a && tokNode(l, 0, rec.i, rec.f);
-        rec.G = v && z ? straight(v, z) : null;
-        put(rec.line, 'd', rec.G?.d ?? '');
-        put(rec.hit, 'd', rec.G?.d ?? '');
+        setGeom(rec, v && z ? straight(v, z) : null);
       }
     }
   }
@@ -838,40 +958,64 @@ export function install(ctx) {
       ks.forEach((set, l) => { for (const k of set) maxD = Math.max(maxD, maxAbs(bwd.dZ?.[l]) * maxAbs(fwd.a?.[k])); });
     }
     maxD ||= 1;
+    numScale = { maxD, th };
+    if (!pal || pal.theme !== th || (!pal.ok && performance.now() - pal.t > 400)) readTheme();
+    const labels = showW && lod >= 1;   // W on: every edge's number (not when zoomed out that far)
     for (const n of net.nodes) {
       const r = nodes.get(n.id);
       if (!r) continue;
       const l = I.li.get(n.layer), a = act(n);
-      put(r.fill, 'fill', colorFor(a, maxA, th));
-      txt(r.val, num(a));
+      r.io = l === 0 || l === L - 1;   // the input and output layers: labelled from the middle level of detail
+      cls(r.g, 'io', r.io);
+      put(r.body, 'fill', nodeFill(colorFor(a, maxA, th)));
       const d = l > 0 ? bwd?.node?.[n.id]?.dz : undefined;
-      if (isNum(d)) {
-        put(r.gring, 'stroke', colorFor(d, maxD, th));
-        put(r.gring, 'stroke-width', r1(1.5 + 4 * Math.min(1, Math.abs(d) / maxD)));
-        txt(r.grad, `δ ${numg(d)}`);
-      } else {
-        put(r.gring, 'stroke', 'none');
-        txt(r.grad, '');
-      }
+      r.va = a;
+      r.vd = d;
+      r.vt = L > 1 && l === L - 1 && isNum(n.target) ? `y = ${num(n.target)}` : '';
       put(r.hl, 'r', isNum(d) ? HL_R_D : HL_R);   // outside the δ ring when there is one
-      txt(r.tgt, L > 1 && l === L - 1 && isNum(n.target) ? `y = ${num(n.target)}` : '');
-      paintBias(r, n, l > 0 && !I.tok[l]?.att);
+      if (numbersShow(r)) paintNums(r);
+      else r.stale = true;
+      if (r.bias) paintBias(r, n, l > 0 && !I.tok[l]?.att);
     }
     for (const e of net.edges) {
       const r = edges.get(e.id);
       if (!r) continue;
-      const w = isNum(e.w) ? e.w : 0;
-      r.sw = r1(1.2 + 5 * Math.min(1, Math.abs(w) / maxW));
-      put(r.line, 'stroke', colorFor(w, maxW, th));
-      put(r.line, 'stroke-width', r.sw);
-      if (r.olOn) put(r.ol, 'stroke-width', r1(r.sw + 3));
-      if (showW || r.lab.__show) paintLabel(r, e);
+      const w = isNum(e.w) ? e.w : 0, t = Math.min(1, Math.abs(w) / maxW);
+      r.t = t;
+      r.sg = w < 0 ? 1 : 0;
+      r.lv = t < W0 ? 0 : 1 + Math.round(((t - W0) / (1 - W0)) * (NW - 1));
+      if (labels) labOf(r);
+      if (r.lab && (showW || r.lab.__show)) paintLabel(r, e);
     }
     paintAtt();
     paintLens();
   }
+  // A neuron's numbers from its last paint: the value, the δ ring and number, the target.
+  let numScale = { maxD: 1, th: 'dark' };
+  function paintNums(r) {
+    const d = r.vd;
+    r.stale = false;
+    txt(r.val, num(r.va));
+    if (isNum(d)) {
+      put(r.gring, 'stroke', colorFor(d, numScale.maxD, numScale.th));
+      put(r.gring, 'stroke-width', r1(1 + 2.5 * Math.min(1, Math.abs(d) / numScale.maxD)));
+      txt(r.grad, `δ ${numg(d)}`);
+    } else {
+      put(r.gring, 'stroke', 'none');
+      txt(r.grad, '');
+    }
+    txt(r.tgt, r.vt || '');
+  }
+  // A neuron's fill: colorFor's rgba blended over --nnv-node, so one opaque circle is the whole body.
+  function nodeFill(c) {
+    const m = /^rgba\((\d+),(\d+),(\d+),([\d.]+)\)$/.exec(c), bg = pal?.node;
+    if (!m || !bg) return c;
+    const a = +m[4], f = i => Math.round(bg[i] + a * (+m[i + 1] - bg[i]));
+    return `rgb(${f(0)},${f(1)},${f(2)})`;
+  }
   // b = 0.12, or a shared bias by name: b_Q(2) = 0.12 (node.tie 'b_Q:2').
   function paintBias(r, n, on) {
+    biasOf(r);
     const m = on && typeof n.tie === 'string' && n.tie ? /^(.*?)(?::(\d+))?$/.exec(n.tie) : null;
     const [base, lo] = m ? tiePlain(m[1]) : [on ? 'b' : '', ''];
     txt(r.bn, base);
@@ -891,10 +1035,10 @@ export function install(ctx) {
     for (const [id, q] of atts) {
       const l = I.li.get(id), a = I.att[l];
       if (!a) continue;
-      for (const rec of q.lines) {
-        const v = attA(l, rec.h, rec.i, rec.j), u = isNum(v) ? clamp(v, 0, 1) : 0;
-        put(rec.line, 'stroke-width', r1(0.8 + 6.4 * u));
-        put(rec.line, 'stroke-opacity', isNum(v) ? (0.06 + 0.88 * u).toFixed(3) : '0.12');
+      for (const rec of q.lines) {   // A_ij in NA levels; none before a forward pass: the faintest, as structure
+        const v = attA(l, rec.h, rec.i, rec.j);
+        rec.t = isNum(v) ? clamp(v, 0, 1) : 0;
+        rec.lv = !isNum(v) ? 1 : v < A0 ? 0 : 1 + Math.round(((rec.t - A0) / (1 - A0)) * (NA - 1));
       }
       for (const c of q.hm?.cells || []) {
         const v = attA(l, c.h, c.i, c.j), masked = a.causal && c.j > c.i;
@@ -942,20 +1086,23 @@ export function install(ctx) {
     for (const e of net.edges) {
       const r = edges.get(e.id);
       if (!r) continue;
-      const gone = hides && E.hidden.edge(e.id), v = dim ? E.edge(e.id) : 1;
-      put(r.g, 'display', gone ? 'none' : null);
-      setLe(r.g, v);
+      const gone = !!(hides && E.hidden.edge(e.id)), v = dim ? E.edge(e.id) : 1;
+      r.gone = gone;
+      r.le = v;
+      r.lz = lzOf(v);
+      rebucket(r);
+      if (!r.lab) continue;
       setLe(r.lab, v);
       cls(r.lab, 'lz-gone', gone);
       cls(r.lab, 'lz-dim', v < NUM_MIN);
     }
     for (const [id, q] of atts) {
       const l = I.li.get(id), a = I.att[l];
-      if (!a) continue;
+      if (!a) { for (const rec of q.lines) { rec.gone = true; rebucket(rec); } continue; }
       for (const rec of q.lines) {
-        const gone = (a.causal && rec.j > rec.i) || (hides && E.hidden.attn(l, rec.i, rec.j, rec.h));
-        put(rec.g, 'display', gone ? 'none' : null);
-        setLe(rec.g, dim ? E.attn(l, rec.i, rec.j, rec.h) : 1);
+        rec.gone = !!((a.causal && rec.j > rec.i) || (hides && E.hidden.attn(l, rec.i, rec.j, rec.h)));
+        rec.lz = lzOf(dim ? E.attn(l, rec.i, rec.j, rec.h) : 1);
+        rebucket(rec);
       }
       for (const t of q.labs) cls(t.el, 'lz-gone', hides && E.hidden.attn(l, t.i, t.j, t.h));   // A moved under minA
       // The heatmap dims with its header; within it, the followed token's row and the kept head.
@@ -983,6 +1130,206 @@ export function install(ctx) {
       cls(r.g, 'lz-foc', fl === l.id);
       cls(r.band, 'lz-foc', fl === l.id);
     });
+    flushBuckets();
+    for (const f of fore.values()) paintFore(f);
+  }
+
+  // ---------------------------------------------------------------- edges: buckets and the overlay
+  // Every drawn edge is in one bucket: a <path> holding all the edges of one colour (positive,
+  // negative, near zero, fixed, attention), strength level and lens level, so they share a stroke
+  // width and opacity. A bucket's key is a number: kind·10000 + level·10 + lens level; -1 = not
+  // drawn (hidden by the lens, no geometry, an attention edge near 0). Only buckets whose members
+  // or geometry changed rebuild their path data (flushBuckets), so a training frame that moves a
+  // few edges across a level touches a few paths.
+  const K_FIX = 0, K_ZERO = 1, K_POS = 2, K_NEG = 3, K_ATT = 4, KIND = ['fix', 'zero', 'pos', 'neg', 'att'];
+  const buckets = new Map();
+  let pal = null;   // the theme's palette: node base colour and opacity per level (readTheme)
+  const lzOf = v => (v >= 0.995 ? 0 : Math.round((1 - clamp(v, 0, 1)) * (LZ - 1)));
+  const lensF = lz => 1 - (lz * (1 - DIM)) / (LZ - 1);
+  function keyOf(r) {
+    if (r.gone || !r.G) return -1;
+    if (r.att) return r.lv ? K_ATT * 10000 + r.lv * 10 + r.lz : -1;
+    if (r.kind === 'fixed') return K_FIX * 10000 + r.lz;
+    if (!r.lv) return K_ZERO * 10000 + r.lz;
+    return (r.sg ? K_NEG : K_POS) * 10000 + r.lv * 10 + r.lz;
+  }
+  function rebucket(r) {
+    const k = keyOf(r);
+    if (k === r.bk) return;
+    const old = buckets.get(r.bk);
+    if (old) { old.set.delete(r); old.dirty = true; }
+    r.bk = k;
+    if (k < 0) return;
+    let b = buckets.get(k);
+    if (!b) {
+      const kind = Math.floor(k / 10000), lv = Math.floor(k / 10) % 1000, lz = k % 10;
+      const parent = kind === K_ATT ? gAtt : gEdges;
+      // Paint order: the lens's dimmest first, then fixed and near-zero edges, then by strength.
+      const order = (LZ - lz) * 10000 + (kind === K_FIX ? 0 : kind === K_ZERO ? 1 : 10 + lv * 2 + (kind === K_NEG ? 1 : 0));
+      const el = mk('path', { class: `nnv-b ${KIND[kind]}` });
+      el.__order = order;
+      let next = null;
+      for (const c of parent.children) if (c.__order > order) { next = c; break; }
+      parent.insertBefore(el, next);
+      b = { el, set: new Set(), dirty: true, kind, lv, lz };
+      buckets.set(k, b);
+      styleBucket(b);
+    }
+    b.set.add(r);
+    b.dirty = true;
+  }
+  function unbucket(r) {
+    const b = buckets.get(r.bk);
+    if (b) { b.set.delete(r); b.dirty = true; }
+    r.bk = -1;
+  }
+  // A new geometry (layout): its bucket rebuilds; a hit test resamples it.
+  function setGeom(r, G) {
+    const had = !!r.G;
+    r.G = G;
+    const d = G ? G.d : '';
+    if (d === r.sd && had === !!G) return;
+    r.sd = d;
+    r.P = null;
+    if (had !== !!G) rebucket(r);
+    else { const b = buckets.get(r.bk); if (b) b.dirty = true; }
+  }
+  function flushBuckets() {
+    for (const b of buckets.values()) {
+      if (!b.dirty) continue;
+      b.dirty = false;
+      let d = '';
+      for (const r of b.set) d += r.sd;
+      put(b.el, 'd', d || null);
+    }
+  }
+  // Stroke width (screen px) and opacity of a strength level: weights and attention on their own
+  // perceptual scales (pal), near-zero weights and fixed edges neutral.
+  function levelStyle(kind, lv) {
+    if (kind === K_FIX) return { w: 1.25, a: 0.45 };
+    if (kind === K_ZERO) return { w: 1, a: 0.1 };
+    const n = kind === K_ATT ? NA : NW, u = n > 1 ? (lv - 1) / (n - 1) : 1, span = kind === K_ATT ? EA : EW;
+    const a = pal ? pal[KIND[kind]][lv] : AW * u;
+    return { w: span[0] + (span[1] - span[0]) * u, a };
+  }
+  // Widths are screen px: set in world px (÷ the zoom) on the few bucket and overlay paths when the
+  // zoom moves by 2% (restyleEdges), not by vector-effect: non-scaling-stroke, which costs Chromium
+  // a fresh stroke of every path on every paint (two thirds of tiny_lm's frame rate).
+  // Zoomed out far (fills only) the strokes go under a pixel (FAR_EDGE of their width): lighter, as a
+  // texture should be, and drawn on the rasterizer's cheap hairline path (tiny_lm's thousands of edges).
+  let ek = 1, ef = 1;   // the zoom the edge widths are set for; the far factor
+  const FAR_EDGE = 0.4;
+  const wpx = (w, far = true) => Math.round(((w * (far ? ef : 1)) / ek) * 1000) / 1000;   // far false: the overlay keeps its width
+  function styleBucket(b) {
+    const s = levelStyle(b.kind, b.lv);
+    put(b.el, 'stroke-width', wpx(s.w));
+    put(b.el, 'stroke-opacity', (s.a * lensF(b.lz)).toFixed(3));
+    if (b.kind === K_FIX) put(b.el, 'stroke-dasharray', `${wpx(1.5)} ${wpx(4.5)}`);
+  }
+  function restyleEdges(k) {
+    ek = k;
+    ef = k < LOD1_K ? FAR_EDGE : 1;
+    for (const b of buckets.values()) styleBucket(b);
+    for (const f of fore.values()) paintFore(f);
+  }
+  // The palette: read from the canvas's variables (view.css), which may load after install, so
+  // paint() retries until they resolve; again on a theme change.
+  function readTheme() {
+    const cs = getComputedStyle(svg), col = v => parseColor(cs.getPropertyValue(v));
+    const bg = col('--nnv-bg'), pos = col('--nnv-pos'), neg = col('--nnv-neg'), att = col('--nnv-att'), node = col('--nnv-node');
+    const ok = !!(bg && pos && neg && att && node);
+    const B = bg || [29, 35, 39];
+    pal = {
+      theme: theme(), ok, t: performance.now(), node: node || [38, 46, 51],
+      pos: alphaLevels(B, pos || [74, 163, 255], NW, AW),
+      neg: alphaLevels(B, neg || [255, 122, 89], NW, AW),
+      att: alphaLevels(B, att || [183, 148, 255], NA, AA),
+    };
+    for (const b of buckets.values()) styleBucket(b);
+  }
+
+  // The overlay: the edges that come forward (hovered, selected, lit, a tie group, and the edges of
+  // a hovered or selected neuron or layer), one path each at the edge's own colour and a stronger
+  // opacity, with the HI outline under it when hovered, selected, tied or lit.
+  const fore = new Map();   // edge or attention-edge id -> { g, line, ol, r, c }
+  const OUTLINED = /\b(hov|sel|tie|lit)\b/;
+  function syncFore(want) {
+    for (const [id, f] of fore) {
+      if (want.has(id)) continue;
+      if (!fadeOut(f.g)) f.g.remove();
+      fore.delete(id);
+    }
+    for (const [id, set] of want) {
+      const r = edges.get(id) || attLines.get(id);
+      if (!r?.G || r.gone) { dropFore(id); continue; }
+      let f = fore.get(id);
+      if (!f) {
+        const g = mk('g', { class: 'nnv-fe' }, gFore);
+        f = { g, line: mk('path', { class: 'nnv-fe-line' }, g), ol: null, r, c: null, k: '' };
+        fore.set(id, f);
+      }
+      const c = [...set].sort().join(' ');
+      if (c !== f.c) {
+        f.c = c;
+        if (OUTLINED.test(c) && !f.ol) f.ol = f.g.insertBefore(mk('path', { class: 'nnv-fe-ol' }), f.line);
+        else if (!OUTLINED.test(c) && f.ol) { f.ol.remove(); f.ol = null; }
+      }
+      paintFore(f);
+    }
+    // Hovered and selected on top of their neighbours.
+    for (const f of fore.values()) if (/\b(hov|sel)\b/.test(f.c)) gFore.appendChild(f.g);
+  }
+  function dropFore(id) {
+    const f = fore.get(id);
+    if (f) { f.g.remove(); fore.delete(id); }
+  }
+  // An overlay edge that is no longer wanted fades out (view.css .out) rather than popping; a few
+  // hundred at most, and none while covered or snapping. true when it took care of the removal.
+  function fadeOut(el) {
+    if (covered() || svg.classList.contains('nnv-snap') || gFore.childElementCount > 600) return false;
+    el.classList.add('out');
+    setTimeout(() => el.remove(), 200);
+    return true;
+  }
+  // A lens change moves edges between buckets at once, while neurons fade (--dur-2): cross-fade the
+  // edge layers instead, a copy of the old ones fading out over the new ones fading in. A few dozen
+  // paths; only on lens changes (Explain steps, the lens bar), never on a training frame.
+  let lastXf = 0;
+  function crossfade() {
+    if (!shown || covered() || svg.classList.contains('nnv-snap') || typeof svg.animate !== 'function') return;
+    const now = performance.now();
+    if (now - lastXf < 250) return;   // a threshold slider being dragged: fade the first change only
+    lastXf = now;
+    for (const g of [gEdges, gAtt]) {
+      if (!g.childElementCount) continue;
+      const old = g.cloneNode(true);
+      old.classList.add('nnv-xf');
+      g.after(old);
+      const dur = 160;
+      try {
+        old.animate([{ opacity: 0 }], { duration: dur, easing: 'ease', fill: 'forwards' });
+        g.animate([{ opacity: 0, offset: 0 }], { duration: dur, easing: 'ease' });
+      } catch { /* no animations: the swap is instant */ }
+      setTimeout(() => old.remove(), dur + 40);
+    }
+  }
+  function paintFore(f) {
+    const r = f.r, kind = r.att ? K_ATT : r.kind === 'fixed' ? K_FIX : r.sg ? K_NEG : K_POS;
+    const k = `nnv-fe ${KIND[kind]} ${f.c}`;
+    if (f.k !== k) { f.k = k; f.g.setAttribute('class', k); }
+    put(f.line, 'd', r.sd || null);
+    if (f.ol) put(f.ol, 'd', r.sd || null);
+    let w = 1.5, a = 1;
+    if (kind === K_ATT || kind === K_POS || kind === K_NEG) {
+      // Forward, an edge keeps its weight's width and reads stronger: a floor, so a weak one still shows.
+      const s = levelStyle(kind, Math.max(1, r.lv)), top = kind === K_ATT ? AA : AW;
+      w = s.w + 0.25;
+      a = r.lv ? 0.3 + 0.7 * Math.min(1, s.a / top) : 0.3;
+    }
+    put(f.line, 'stroke-width', wpx(w, false));
+    put(f.line, 'stroke-opacity', kind === K_FIX ? null : a.toFixed(3));
+    put(f.line, 'stroke-dasharray', kind === K_FIX ? `${wpx(1.5, false)} ${wpx(4.5, false)}` : null);
+    if (f.ol) put(f.ol, 'stroke-width', wpx(w + 3, false));
   }
 
   // ---------------------------------------------------------------- highlight (sel, hover, anim)
@@ -1172,22 +1519,22 @@ export function install(ctx) {
     const fs = st.sel?.kind === 'node' && focusOfNode(st.sel.id);
     return fs ? [fs] : [];
   }
-  function highlightAtt(foci, mark, onNode) {
+  function highlightAtt(foci, mark, onNode, onEdge) {
     for (const q of atts.values()) {
       for (const t of q.labs) t.on = false;
       for (const hl of q.hm?.hl || []) put(hl.el, 'display', 'none');
     }
-    for (const F of foci) showAtt(F, mark, onNode);
+    for (const F of foci) showAtt(F, mark, onNode, onEdge);
     placeAttLabels();
   }
-  function showAtt(F, mark, onNode) {
+  function showAtt(F, mark, onNode, onEdge) {
     const I = ix(), a = F && I.att[F.l], q = a && atts.get(store.net.layers[F.l].id);
     if (!q) return;
     const row = F.dir === 'row', inHead = h => F.h == null || h === F.h;
     const hit = rec => (row ? rec.i : rec.j) === F.t && inHead(rec.h) && (F.f == null || rec.f === F.f) && !(a.causal && rec.j > rec.i);
     for (const rec of q.lines) {
       if (F.labels === false || F.lens || !hit(rec)) continue;   // labels false: the scores step, before A exists
-      mark(rec.g, 'rel');
+      onEdge(rec.id, 'rel');
       if (F.hover) {
         onNode(tokNode(F.l - 1, a.vG, rec.j, rec.f)?.id, 'rel');
         onNode(tokNode(F.l, 0, rec.i, rec.f)?.id, 'rel');
@@ -1240,33 +1587,33 @@ export function install(ctx) {
       }
     }
   }
-  // The edges whose HI outline can show (hovered, selected, tied to those, lit): only these keep
-  // their outline's path and width current, so training and dragging don't pay for the rest.
-  let outlined = [];
-  function outline(ids) {
-    for (const r of outlined) r.olOn = false;
-    outlined = [];
-    for (const id of ids) {
-      const r = edges.get(id);
-      if (!r || r.olOn) continue;
-      r.olOn = true;
-      outlined.push(r);
-      put(r.ol, 'd', r.G?.d ?? '');
-      put(r.ol, 'stroke-width', r1((r.sw ?? 1.2) + 3));
-    }
-  }
   function highlight() {
     for (const [e, c] of marked) { e.classList.remove(c); if (c === 'show') e.__show = false; }
     marked = [];
+    const want = new Map();   // the overlay: edge id -> its marks
+    hot = new Set();
     const mark = (e, c) => { if (e) { e.classList.add(c); marked.push([e, c]); } };
-    const onNode = (id, c) => mark(nodes.get(id)?.g, c);
-    const onEdge = (id, c) => { const r = edges.get(id) || attLines.get(id); if (r) { mark(r.g, c); mark(r.lab, c); } };
+    const onNode = (id, c) => {
+      const r = nodes.get(id);
+      if (!r) return;
+      mark(r.g, c);
+      if (LABEL_MARKS.has(c)) hot.add(id);
+    };
+    const onEdge = (id, c) => {
+      const r = edges.get(id) || attLines.get(id);
+      if (!r) return;
+      if (!want.has(id)) want.set(id, new Set());
+      want.get(id).add(c);
+      mark(r.lab, c);
+    };
     const onLayer = (id, c) => { const r = layers.get(id); if (r) { mark(r.g, c); mark(r.band, c); } };
     const I = ix(), S = resolve(store.state.sel), H = resolve(store.state.hover), A = resolveAnim(store.state.anim);
-    outline([...S.edges, ...S.ties, ...H.edges, ...H.ties, ...A.edges]);
+    // The hovered or selected edge (and its tie group) shows its number: its label, made on demand.
+    for (const id of [...S.edges, ...H.edges, ...S.ties, ...H.ties]) { const r = edges.get(id); if (r) labOf(r); }
     S.nodes.forEach(id => onNode(id, 'sel'));
     S.edges.forEach(id => onEdge(id, 'sel'));
     S.ties.forEach(id => onEdge(id, 'tie'));
+    S.relEdges.forEach(id => onEdge(id, 'sn'));   // a selected neuron's or layer's edges come forward
     S.layers.forEach(id => onLayer(id, 'sel'));
     H.nodes.forEach(id => onNode(id, 'hov'));
     H.edges.forEach(id => onEdge(id, 'hov'));
@@ -1279,25 +1626,34 @@ export function install(ctx) {
       mark(b?.el, 'hov');
       mark(b?.lab, 'hov');
     }
-    if (H.bias) H.bias.forEach((id, k) => { onNode(id, 'bias'); if (k) onNode(id, 'rel'); });
+    if (H.bias) {
+      H.bias.forEach((id, k) => {
+        const r = nodes.get(id), n = I.nodeById.get(id), l = n && I.li.get(n.layer);
+        if (r && n && !r.bias) paintBias(r, n, l > 0 && !I.tok[l]?.att);
+        onNode(id, 'bias');
+        if (k) onNode(id, 'rel');
+      });
+    }
     if (A.node) {
       A.nodes.forEach(id => onNode(id, 'lit'));
       A.edges.forEach(id => onEdge(id, 'lit'));
       A.rel.forEach(id => onNode(id, 'rel'));
     }
     focus = attFoci(A);
-    highlightAtt(focus, mark, onNode);
+    highlightAtt(focus, mark, onNode, onEdge);
+    syncFore(want);
     // The hovered / selected edge shows its numbers even with W off; the rest of its tie group its value.
     const shows = [...S.edges, ...H.edges].map(id => [id, true]).concat([...S.ties, ...H.ties].map(id => [id, 'tie']));
     for (const [id, mode] of shows) {
       const r = edges.get(id), e = I.edgeById.get(id);
-      if (!r || !e || r.lab.__show) continue;
+      if (!r?.lab || !e || r.lab.__show) continue;
       mark(r.lab, 'show');
       r.lab.__show = mode;
       paintLabel(r, e, mode);
     }
     // Labels that just lost 'show' drop the tie name (with W on they stay, as plain numbers).
-    if (showW) for (const e of store.net.edges) { const r = edges.get(e.id); if (r && !r.lab.__show) paintLabel(r, e, false); }
+    if (showW) for (const e of store.net.edges) { const r = edges.get(e.id); if (r?.lab && !r.lab.__show) paintLabel(r, e, false); }
+    ensureLabels();
     svg.classList.toggle('focus', H.any || !!A.node || !!focus[0]?.hover);
     pairIds = H.pair;
     layoutPair();
@@ -1346,9 +1702,11 @@ export function install(ctx) {
     const retitled = (d.build || d.meta) && syncMeta();
     const moved = d.build || d.layout || reshaped || retitled || (d.meta && posChanged());
     if (moved) layoutAll();
+    if (d.lens && !d.build && !reshaped) crossfade();
     if (d.build || d.paint || reshaped) paint();
     else if (d.lens) paintLens();
     if (d.build || d.hl || d.lens || reshaped) highlight();
+    else if (d.lod || retitled) ensureLabels();
     if (audience && moved && shown && needFit === false && outOfView()) needFit = 300;
     if (needFit !== false && shown && stage.clientWidth && stage.clientHeight) fit(everFit ? needFit : 0);
   }
@@ -1408,11 +1766,29 @@ export function install(ctx) {
     world.setAttribute('transform', t);
     pat.setAttribute('patternTransform', t);
     placeHint();
-    const ts = Math.round(clamp(TEXT_K / V.k, 1, TEXT_MAX) * 20) / 20;
-    if (ts === textScale) return;
-    textScale = ts;
-    svg.style.setProperty('--nnv-ts', ts);
-    svg.classList.toggle('far', ts > FAR_TS);   // zoomed out: no dot grid
+    // Level of detail (view.css): which labels and numbers show at this zoom.
+    const L = V.k < LOD1_K ? 0 : V.k < LOD2_K ? 1 : 2;
+    if (L !== lod) {
+      svg.classList.remove(`lod${lod}`);
+      svg.classList.add(`lod${L}`);
+      lod = L;
+      invalidate('lod', ...(showW ? ['paint'] : []));   // labels to render; W's numbers to make
+    }
+    if (Math.abs(V.k - ek) > ek * 0.02 || (V.k < LOD1_K) !== (ef < 1)) restyleEdges(V.k);   // edge widths stay screen px
+    cls(svg, 'speck', V.k < SPECK_K);
+    setScales(textAt(V.k), headAt(V.k));
+  }
+  // Text sizes at zoom k: labels and numbers grow up to TEXT_MAX, headers up to HEAD_MAX.
+  const textAt = k => Math.round(clamp(TEXT_K / k, 1, TEXT_MAX) * 20) / 20;
+  const headAt = k => Math.round(clamp(TEXT_K / k, 1, HEAD_MAX) * 20) / 20;
+  function setScales(ts, hs) {
+    if (ts === textScale && hs === headScale) return;
+    if (ts !== textScale) {
+      textScale = ts;
+      svg.style.setProperty('--nnv-ts', ts);
+      svg.classList.toggle('far', ts > FAR_TS);   // zoomed out: no dot grid
+    }
+    headScale = hs;
     fitHeads();
   }
   function moveTo(k, x, y, ms = 0) {
@@ -1501,8 +1877,15 @@ export function install(ctx) {
     needFit = false;                     // before contentBox(): it flushes, and a flush may fit
     userMoved = false;
     everFit = true;
-    const b = contentBox(), A = fitArea(b);
-    const k = clamp(fitScale(A, b), MIN_K, FIT_MAX_K);
+    let b = contentBox(), A = fitArea(b), k = clamp(fitScale(A, b), MIN_K, FIT_MAX_K);
+    // Text and headers grow as the zoom shrinks: measure again with the new zoom's sizes (put back
+    // at once, before anything draws; the move grows them as it goes).
+    if (textAt(k) !== textScale || headAt(k) !== headScale) {
+      const ts0 = textScale, hs0 = headScale;
+      setScales(textAt(k), headAt(k));
+      b = contentBox(); A = fitArea(b); k = clamp(fitScale(A, b), MIN_K, FIT_MAX_K);
+      setScales(ts0, hs0);
+    }
     moveTo(k, A.x + A.w / 2 - (b.x + b.w / 2) * k, A.y + A.h / 2 - (b.y + b.h / 2) * k, ms);
   }
   // Stage px box of the whole net (lanes and headers included), e.g. to place a card beside it.
@@ -1522,14 +1905,17 @@ export function install(ctx) {
   function applyImage(r, url) {
     if (!url) {
       r.img?.remove();
-      r.img = null;
+      r.rim?.remove();
+      r.img = r.rim = null;
       r.g.classList.remove('img');
       return;
     }
     if (!r.img) {
       r.img = mk('image', { class: 'nnv-img', x: -R, y: -R, width: 2 * R, height: 2 * R,
         preserveAspectRatio: 'xMidYMid slice', 'clip-path': 'url(#nnv-clip)' });
-      r.fill.after(r.img);
+      r.body.after(r.img);
+      r.rim = mk('circle', { class: 'nnv-rim', r: R });   // the body's rim, over the picture
+      r.img.after(r.rim);
       r.g.classList.add('img');
     }
     put(r.img, 'href', url);
@@ -1546,10 +1932,16 @@ export function install(ctx) {
     const b = contentBox(), pad = 24;
     const W = Math.ceil(b.w + 2 * pad), H = Math.ceil(b.h + 2 * pad);
     const cs = getComputedStyle(svg);
+    const L1 = 1 >= LOD2_K ? 2 : 1;   // the level of detail of zoom 1, what the image is drawn at
+    ensureLabels(L1);
+    const k0 = ek;
+    restyleEdges(1);   // the image is drawn at zoom 1: its edge widths too (put back below, before anything draws)
     const clone = svg.cloneNode(true);
-    for (const e of clone.querySelectorAll('.nnv-grid, pattern, .nnv-pulses, .nnv-ghost, .nnv-pair, .nnv-handle, .nnv-hint, .nnv-hm-hl')) e.remove();
+    restyleEdges(k0);
+    for (const e of clone.querySelectorAll('.nnv-grid, pattern, .nnv-pulses, .nnv-ghost, .nnv-pair, .nnv-handle, .nnv-hint, .nnv-hm-hl, .nnv-fe')) e.remove();
     for (const c of MARKS) for (const e of clone.querySelectorAll(`.${c}`)) e.classList.remove(c);
-    clone.classList.remove('focus', 'panning', 'wiring', 'dragging', 'far');
+    clone.classList.remove('focus', 'panning', 'wiring', 'dragging', 'far', 'speck', 'on-edge', 'lod0', 'lod1', 'lod2');
+    clone.classList.add(`lod${L1}`);
     const fit1 = headFit(1);   // headers drawn at zoom 1, still fitted between neighbours
     for (const h of clone.querySelectorAll('.nnv-head')) {
       const r = layers.get(h.dataset.id), f = r && fit1.get(r.id);
@@ -1601,9 +1993,9 @@ export function install(ctx) {
     set weights(on) { toggleW(!!on); },
   };
 
+  applyView();   // the level of detail first, so the first build renders the labels it shows
   dirty = { build: true };
   flush();
-  applyView();
   if (audience) return;
 
   // ================================================================ editing (presenter only)
@@ -1627,20 +2019,63 @@ export function install(ctx) {
   // Hover: set on entering a node / edge / header; on leaving, clear it only if it is still ours.
   // A token box, heatmap cell or attention edge hovers a token, { kind: 'token', layer, t, g?, h? }:
   // a box its token (g: its group), a cell or attention edge A_ij's row, token i of head h.
+  // Edges have no DOM of their own: the pointer finds the nearest drawn one within HIT_PX screen px
+  // (attention edges and weight edges lie over token boxes and under neurons and headers, as before).
+  function sample(r) {
+    const n = r.G.seg || 1, P = new Float64Array(2 * (n + 1));
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (let k = 0; k <= n; k++) {
+      const p = r.G.at(k / n);
+      P[2 * k] = p.x; P[2 * k + 1] = p.y;
+      x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y);
+    }
+    r.P = P;
+    r.bb = [x0, y0, x1, y1];
+  }
+  function edgeAt(w) {
+    const tol = clamp(HIT_PX / V.k, HIT_MIN, HIT_MAX);
+    let best = null, bd = tol * tol;
+    const test = r => {
+      if (r.bk < 0 || !r.G) return;   // not drawn: hidden by the lens, masked, an attention weight near 0
+      if (!r.P) sample(r);
+      const b = r.bb, P = r.P;
+      if (w.x < b[0] - tol || w.x > b[2] + tol || w.y < b[1] - tol || w.y > b[3] + tol) return;
+      for (let k = 0; k + 3 < P.length; k += 2) {
+        const d = segD2(w.x, w.y, P[k], P[k + 1], P[k + 2], P[k + 3]);
+        if (d < bd) { bd = d; best = r; }
+      }
+    };
+    for (const r of attLines.values()) test(r);
+    for (const r of edges.values()) test(r);
+    return best;
+  }
+  // What a pointer event is on: { kind, id, ds } (ds as an element's dataset): a neuron, its handle,
+  // a header, a heatmap cell, else an edge, else a token box, else null.
+  function pick(e) {
+    const h = hitOf(e.target);
+    if (h && h.dataset.kind !== 'token') return { kind: h.dataset.kind, id: h.dataset.id, ds: h.dataset };
+    if (!e.target || !svg.contains(e.target)) return null;
+    const r = edgeAt(toWorld(pt(e)));
+    if (r?.att) return { kind: 'attedge', id: r.layer, ds: { id: r.layer, i: r.i, j: r.j, h: r.h } };
+    if (r) return { kind: 'edge', id: r.id, ds: { id: r.id } };
+    return h ? { kind: 'token', id: h.dataset.id, ds: h.dataset } : null;
+  }
+
   let hoverKey = '', myHover = null;
   const TOKEN = new Set(['token', 'attcell', 'attedge']);
-  function tokenHover(h) {
-    const I = ix(), l = I.li.get(h.dataset.id), ds = h.dataset;
+  function tokenHover(p) {
+    const I = ix(), l = I.li.get(p.id), ds = p.ds;
     if (l === undefined) return null;
-    if (ds.kind === 'token') return { kind: 'token', layer: l, t: +ds.t, ...(I.tok[l]?.groups ? { g: +ds.g } : {}) };
+    if (p.kind === 'token') return { kind: 'token', layer: l, t: +ds.t, ...(I.tok[l]?.groups ? { g: +ds.g } : {}) };
     return { kind: 'token', layer: l, t: +ds.i, ...(I.att[l]?.heads > 1 ? { h: +ds.h } : {}) };
   }
-  function hoverFrom(target) {
-    const h = hitOf(target), kind = h?.dataset.kind === 'handle' ? 'node' : h?.dataset.kind, ds = h?.dataset;
-    const key = h ? `${kind}:${ds.id}:${ds.t ?? ds.i ?? ''}:${ds.g ?? ds.h ?? ''}` : '';
+  function hoverFrom(p) {
+    const kind = p?.kind === 'handle' ? 'node' : p?.kind, ds = p?.ds;
+    const key = p ? `${kind}:${p.id}:${ds.t ?? ds.i ?? ''}:${ds.g ?? ds.h ?? ''}` : '';
     if (key === hoverKey) return;
     hoverKey = key;
-    const spec = !h ? null : TOKEN.has(kind) ? tokenHover(h) : { kind, id: ds.id };
+    svg.classList.toggle('on-edge', kind === 'edge' || kind === 'attedge');   // the pointer cursor
+    const spec = !p ? null : TOKEN.has(kind) ? tokenHover(p) : { kind, id: p.id };
     if (spec) { myHover = spec; store.set('hover', spec); }
     else if (myHover && store.state.hover === myHover) { myHover = null; store.set('hover', null); }
   }
@@ -1658,7 +2093,11 @@ export function install(ctx) {
     if (id === dropId) return;
     if (dropId) nodes.get(dropId)?.g.classList.remove('drop');
     dropId = id;
-    if (id) nodes.get(id)?.g.classList.add('drop');
+    const r = id && nodes.get(id);
+    if (!r) return;
+    r.g.classList.add('drop');
+    if (r.label !== r.want) renderLabel(r, r.want);   // the drop target shows its label and number
+    if (r.stale) paintNums(r);
   }
   // What a wire from a to b would do: { why } refuses; { tie, pairs } adds one shared entry of a
   // tokenwise tied matrix, for every token; else a plain edge. Between the same two groups of two
@@ -1897,7 +2336,7 @@ export function install(ctx) {
   let drag = null;
   svg.addEventListener('pointerdown', e => {
     if (drag || (e.button !== 0 && e.button !== 1)) return;
-    const h = e.button === 0 ? hitOf(e.target) : null, kind = h?.dataset.kind, id = h?.dataset.id;
+    const h = e.button === 0 ? pick(e) : null, kind = h?.kind, id = h?.id;
     const base = { pid: e.pointerId, p0: pt(e), moved: false };
     const n = kind === 'node' ? model.node(store.net, id) : null;
     if (kind === 'handle') drag = { ...base, type: 'wire', from: id };
@@ -1907,13 +2346,13 @@ export function install(ctx) {
     } else if (kind === 'layer' || kind === 'attcell') drag = { ...base, type: 'layer', id, start: layerNodes(id).map(m => [m.id, m.x, m.y]) };
     else if (kind === 'token') {
       // A token box drags its token's neurons (of its group); a click selects the layer.
-      const s = ix().tok[ix().li.get(id)], g = +h.dataset.g, t = +h.dataset.t;
+      const s = ix().tok[ix().li.get(id)], g = +h.ds.g, t = +h.ds.t;
       const mine = s?.d ? layerNodes(id).slice((g * s.T + t) * s.d, (g * s.T + t + 1) * s.d) : [];
       drag = { ...base, type: 'layer', id, token: true, start: mine.map(m => [m.id, m.x, m.y]) };
     } else drag = { ...base, type: 'pan', x0: V.x, y0: V.y, edge: kind === 'edge' ? id : null, click: e.button === 0 };
   });
   svg.addEventListener('pointermove', e => {
-    if (!drag) { hoverFrom(e.target); return; }
+    if (!drag) { hoverFrom(pick(e)); return; }
     if (e.pointerId !== drag.pid) return;
     const p = pt(e), dx = p.x - drag.p0.x, dy = p.y - drag.p0.y;
     if (!drag.moved) {
@@ -1983,5 +2422,5 @@ export function install(ctx) {
     userMoved = true;
     applyView();
   }, { passive: false });
-  svg.addEventListener('contextmenu', e => { if (hitOf(e.target)) e.preventDefault(); });
+  svg.addEventListener('contextmenu', e => { if (pick(e)) e.preventDefault(); });
 }

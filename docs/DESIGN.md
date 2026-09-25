@@ -298,6 +298,34 @@ Canvas, P2:
 - **A12 Empty-net hint.** 15 px `--text-3` on one line, with `<kbd>`-like chips for N and the
   double-click.
 
+#### Net 2D view (the canvas overhaul)
+
+Data first, structure recedes. Where this differs from A2, A4 to A7 and A9, this wins.
+- **Edges.** Screen px strokes (world px set as px ÷ zoom; not `vector-effect: non-scaling-stroke`,
+  which costs Chromium a fresh stroke of every path each paint), 1 to 2.25 px by |w| / max|w|
+  (attention 1 to 3 px by A_ij). Opacity follows the same ratio on a perceptual curve: 16 levels
+  (attention 12) with equal ΔE steps against `--bg`, the strongest at 0.9. Below 3% of the largest
+  weight an edge is a neutral hairline (`--nnv-zero`, 10%): structure, not data. An attention edge
+  under A = 0.02 is not drawn. Fixed edges are dotted `--text-3` at 45%.
+- **Batched.** Edges have no DOM of their own: one `<path>` per colour, level and lens level
+  (`.nnv-b` in `.nnv-eb` groups), hit-tested in view.js. What is hovered, selected or stepped, a tie
+  group, and the edges of a hovered or selected neuron or layer come forward as their own paths
+  (`.nnv-fe`) at a stronger opacity (a floor of 0.3), with the HI outline under the marked ones. Hover
+  dims the rest to 13% (attention 10%), selection does not.
+- **Neurons.** One circle: the activation as fill (colorFor over `--nnv-node`) and a 1 px rim at 20%
+  (16% light). The δ ring is detail, like the δ numbers.
+- **Level of detail by zoom.** Below 0.42: fills only (no labels, numbers or δ rings; W labels
+  wait; edges under a pixel); below 0.3 the token row labels and group letters go too. Below 1.1:
+  the input and output layers' labels, numbers and targets. From 1.1: all. The hovered, selected and stepped neurons, and a hovered neuron's
+  neighbours, always show theirs. KaTeX labels render the first time they can show.
+- **Headers.** One label per layer: the name (13 px 600 `--text-2`) and the shape (12 px `--text-3`),
+  tabular, on one line; stacked, then the name alone (shape in the tooltip) where a neighbour is
+  close. They grow up to 10 times when zoomed out, as far as the neighbours allow.
+- **No boxes.** Token boxes are hit areas: a `--nnv-tok` tint on hover, the `--att` ring when
+  followed. The lens-focused lane is a `--hover` tint, not an outline.
+- **Motion.** Overlay edges fade in and out over `--dur-2`; a lens change cross-fades the edge layers
+  (so Explain steps glide); nothing animates per training frame.
+
 Inspector, P1 (today a node card is a full screen tall):
 - **A13 Card chrome.** Use the `.ui-float` recipe. The 38 px head holds the title (KaTeX 15 px)
   and the kind (12 px `--text-3`). Pin and close are `.ui-btn.xs.icon` (icons `pin`, `close`),
