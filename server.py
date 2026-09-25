@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hmac
 import io
 import json
 import math
@@ -26,9 +27,11 @@ import subprocess
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
 import zlib
+from http.cookies import SimpleCookie
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -46,6 +49,12 @@ DEFAULT_MODEL = os.environ.get("MATHBOARD_MODEL", "qwen3-vl:8b-instruct")
 DEFAULT_OLLAMA = os.environ.get("MATHBOARD_OLLAMA", "http://127.0.0.1:11434")
 DEFAULT_BACKEND = os.environ.get("MATHBOARD_BACKEND", "qwen")
 DEFAULT_UNIMUMER = os.environ.get("MATHBOARD_UNIMUMER", "")  # llama-server URL, e.g. http://127.0.0.1:8792
+
+# Remote access through a tunnel (README, Remote access): with MATHBOARD_TOKEN set, a request that came
+# through one (a forwarding header, or a Host that isn't this machine) needs the token, once as ?token=
+# and then from a cookie. Requests made on this machine never do.
+ACCESS_TOKEN = os.environ.get("MATHBOARD_TOKEN", "")
+LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]")
 
 MODES = ("qwen", "unimumer", "ensemble")
 # In ensemble mode both models read the image; when they disagree, `latex` is this one's answer.
@@ -763,7 +772,42 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _remote(self) -> bool:
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0].lower()
+        forwarded = any(self.headers.get(h) for h in ("Cf-Connecting-Ip", "X-Forwarded-For", "Forwarded"))
+        return forwarded or host not in LOCAL_HOSTS
+
+    def _gate(self) -> bool:
+        """True if the request may go on; otherwise the answer (a redirect or a refusal) has been sent."""
+        if not ACCESS_TOKEN or not self._remote():
+            return True
+        jar = SimpleCookie(self.headers.get("Cookie") or "")
+        if "mb_token" in jar and hmac.compare_digest(jar["mb_token"].value, ACCESS_TOKEN):
+            return True
+        url = urllib.parse.urlsplit(self.path)
+        given = urllib.parse.parse_qs(url.query).get("token", [""])[0]
+        if self.command == "GET" and given and hmac.compare_digest(given, ACCESS_TOKEN):
+            self.send_response(303)  # set the cookie and drop the token from the address bar
+            self.send_header("Location", url.path or "/")
+            self.send_header("Set-Cookie", f"mb_token={ACCESS_TOKEN}; Path=/; Max-Age=2592000; HttpOnly; Secure; SameSite=Lax")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return False
+        body = b"Mathboard: this link needs its access token.\n"
+        self.send_response(401)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        return False
+
+    def do_HEAD(self):
+        if self._gate():
+            super().do_HEAD()
+
     def do_GET(self):
+        if not self._gate():
+            return
         eng = self.engine
         if self.path == "/api/status":
             eng.heartbeat()
@@ -780,6 +824,8 @@ class Handler(SimpleHTTPRequestHandler):
         return super().do_GET()
 
     def do_POST(self):
+        if not self._gate():
+            return
         try:
             length = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(length) or b"{}")

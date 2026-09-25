@@ -149,7 +149,8 @@ The loss `L(θ₀ + α δ₁ + β δ₂)` over the plane through the weights θ�
   cells), so HI stays the ●'s. 8 contour lines on the surface and faintly on the floor.
 - **The path**: recorded by the presenter from the Train panel's `train` events whatever the panel
   shows (at most every 60 ms while running, and at each pause or step; 400 points, halved when
-  full): the full parameter vector and its loss. Undoing training cuts it back to the current step;
+  full): the full parameter vector and its loss. A point's loss is over the whole dataset, so while
+  running a big net's points are spaced further, until they take at most 10% of the time. Undoing training cuts it back to the current step;
   a Reset starts it again. Its least-squares coordinates in the plane go into `trail`. It is drawn
   as a tube at its **true loss**, so where the net left the plane it floats above or sinks below the
   slice; a faint copy shows through the surface, and its shadow runs on the floor. The note gives

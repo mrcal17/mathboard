@@ -136,6 +136,25 @@ test('unknown functions look like calls; tall arguments get growing brackets', (
   assert.equal(tex('foo(A u)'), '\\mathrm{foo}(A\\vec{u})');
 });
 
+test('names from f(x) = ... rows typeset as calls; restrictions follow the expression', () => {
+  const fns = new Set(['nll', 'H']);
+  const t = (src, kinds = {}) => rowLatex(src, { kinds, fns })?.tex;
+  assert.equal(t('y = nll(x) / ln(2)'), 'y = \\frac{\\mathrm{nll}(x)}{\\operatorname{ln}(2)}');
+  assert.equal(t("nll'"), "\\mathrm{nll}'"); // without fns this row stays raw
+  assert.equal(rowLatex("nll'", {}), null);
+  assert.equal(t('point(q, H(q))'), '\\operatorname{point}(q, H(q))');
+  assert.equal(t('y = -ln(x) {0 < x <= 1}'), 'y = -\\operatorname{ln}(x)\\ \\{0 < x \\le 1\\}');
+  assert.equal(t('z = x y {x > 0, y >= 1}'), 'z = xy\\ \\{x > 0,\\ y \\ge 1\\}');
+  assert.deepEqual(rowLatex('y = x {|y| <= 2} @ (0, 0, 1)', {}), { tex: 'y = x\\ \\{\\left|y\\right| \\le 2\\}', at: '(0, 0, 1)', note: '' });
+});
+
+test('a control word never runs into the next name; a call keeps its own brackets under .x', () => {
+  assert.equal(tex('eta a', {}), '\\eta a');
+  assert.equal(tex('2 pi s^2', {}), '2\\pi s^{2}');
+  assert.equal(tex('softmax(u).x'), '\\operatorname{softmax}(\\vec{u})_{x}');
+  assert.equal(tex('cross(u, v).x'), '(\\vec{u} \\times \\vec{v})_{x}');
+});
+
 test('exprLatex works on a bare AST node', () => {
   assert.equal(exprLatex(parseLine('a u + v').body, { kinds: KINDS }), 'a\\vec{u} + \\vec{v}');
   assert.equal(exprLatex(parseLine('(1, 2)').body, { inline: true }), '(1, 2)');
@@ -147,7 +166,7 @@ test('everything produced is valid KaTeX', () => {
     'u / |u|', '1/2 u', 'a^(1/2)', 'proj(u + w, v)', 'span(u, v, w)', 'matrix(u, v, w)', 'inv(A) transpose(A)',
     'i + 2j - k', 'theta = 0.5', 'vel t', 'λ_max u', 'x_old.y', 'sqrt(dot(u,u))', 'unit(v_old)', '1.5e20 u',
     'plane(cross(u, v)) @ point(1,1,1)', 'u × (v × w) · u', '(u + v).y', '-(-a)^2', 'null_vec',
-    'Ω = 2', 'ϑ ϕ', 'u = (1, 2, 3) # note',
+    'Ω = 2', 'ϑ ϕ', 'u = (1, 2, 3) # note', 'eta a x', 'y = -ln(x) {0 < x <= 1}', 'z = -ln(softmax((x, y, 0)).x)',
   ];
   for (const line of lines) {
     const r = rowLatex(line, { kinds: KINDS });

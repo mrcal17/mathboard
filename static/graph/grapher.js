@@ -14,7 +14,7 @@ const { evaluate, formatValue, formatNumber } = lang;
 const $ = id => document.getElementById(id);
 const uid = () => Math.random().toString(36).slice(2, 10);
 const PALETTE = ['#e05a4f', '#4a90e2', '#43b05c', '#9b6ade', '#f5a623', '#26b5b5', '#e056a0', '#a1887f'];
-const FEATURES = ['plots', 'transform', 'fields', 'combos', 'systems', 'dual', 'lecture', 'present', 'bridge', 'drag'];
+const FEATURES = ['plots', 'transform', 'fields', 'combos', 'systems', 'dual', 'lecture', 'present', 'bridge', 'drag', 'presets'];
 const STORE = 'mathboard.graph';
 // Different speeds let two playing sliders sweep out an area instead of retracing one line.
 const SPEEDS = [1, 1.618, 2, 0.5, 0.25];
@@ -29,6 +29,8 @@ const EXAMPLE = [
   'w = a u + b v',
   'span(u, v)',
 ];
+// A row's trailing comment, with the space before it.
+const COMMENT = /\s*(?:#|\/\/).*$/;
 // Right-hand sides that are plain literals don't need an "= value" echo underneath.
 const LITERAL = /^\s*(?:[([]\s*-?[\d.]+(?:e-?\d+)?\s*(?:,\s*-?[\d.]+(?:e-?\d+)?\s*){1,2}[)\]]|-?[\d.]+)\s*$/;
 
@@ -158,10 +160,13 @@ function sliderRange(r, x) {
   return min < max ? [min, max] : [min, min + 1];
 }
 
+// `name = value`, keeping the row's trailing comment (eta = 0.1  # learning rate).
+const sliderSource = (r, name, x) => `${name} = ${formatNumber(x)}${COMMENT.exec(r.src)?.[0] ?? ''}`;
+
 function setSlider(r, x) {
   const res = results[rows.indexOf(r)];
   if (!res?.name) return;
-  r.src = `${res.name} = ${formatNumber(x)}`;
+  r.src = sliderSource(r, res.name, x);
   r.el.src.value = r.src;
   recompute();
 }
@@ -183,7 +188,7 @@ function animate(t) {
     let x = res.slider + r.dir * (mx - mn) * (r.speed ?? 1) * dt / 4; // full sweep in 4 s at 1x, ping-pong
     if (x >= mx) { x = mx; r.dir = -1; }
     if (x <= mn) { x = mn; r.dir = 1; }
-    r.src = `${res.name} = ${formatNumber(x)}`;
+    r.src = sliderSource(r, res.name, x);
     r.el.src.value = r.src;
   });
   if (any) { recompute(); requestAnimationFrame(animate); }
@@ -233,9 +238,10 @@ function paintRows() {
       }
     }
 
+    const rhs = r.src.replace(COMMENT, '').split('@')[0].split('=').pop();
     if (res.error) el.out.textContent = res.error;
     else if (res.value == null || isSlider) el.out.textContent = '';
-    else if (res.value.type === 'mat' && /^\s*\[[\d\s.,;eE+\-[\]]*$/.test(r.src.split('@')[0].split('=').pop())) {
+    else if (res.value.type === 'mat' && /^\s*\[[\d\s.,;eE+\-[\]]*$/.test(rhs)) {
       el.out.textContent = ''; // a literal matrix is already visible in the row itself
     } else if (res.value.type === 'mat') {
       const body = res.value.m.map(row => row.map(formatNumber).join(' & ')).join(' \\\\ ');
@@ -247,7 +253,6 @@ function paintRows() {
     } else if (lang.valueLatex?.(res.value)) {
       el.out.innerHTML = katex.renderToString(`= ${lang.valueLatex(res.value)}`, { throwOnError: false });
     } else {
-      const rhs = r.src.split('@')[0].split('=').pop();
       el.out.textContent = LITERAL.test(rhs) && res.value.type !== 'span' ? '' : `= ${formatValue(res.value)}`;
     }
     for (const fn of hooks.rowDecor) safe(fn, r, res, el);

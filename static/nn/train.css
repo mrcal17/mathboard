@@ -17,7 +17,10 @@ body.clean .nn-train { display: none; }
 .nn-train.folded .nt-body { display: none; }
 
 /* ---------------------------------------------------------------- body: 8 px between rows, 12 between groups */
-.nt-body { display: flex; flex-direction: column; gap: var(--sp-8); }
+/* The body scrolls when the stage is short. Its scrollbar's room is kept even when it isn't needed:
+   otherwise the scrollbar narrowed the plot, the narrower (shorter) plot then fitted, the scrollbar
+   went away, the plot widened again and overflowed, and the panel twitched every frame. */
+.nt-body { display: flex; flex-direction: column; gap: var(--sp-8); scrollbar-gutter: stable; }
 .nt-data .ui-field { width: 100%; }
 
 .nt-grid { display: grid; gap: var(--sp-8) var(--sp-6); align-items: end; }

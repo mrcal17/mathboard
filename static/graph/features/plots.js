@@ -18,6 +18,7 @@ const HELP = `
 <p><code>x^2</code> or <code>y = sin(x)</code> a curve &middot; <code>x = y^2</code> &middot; <code>z = x^2 - y^2</code> a surface</p>
 <p><code>f(x) = x^3 - x</code> defines and draws f; then <code>f(2)</code>, <code>f'(x)</code> or a bare <code>f'</code> for its slope</p>
 <p><code>c(t) = (cos(t), sin(t), t/4)</code> a curve through space &middot; <code>a = 2</code> then <code>y = a x^2</code> to animate</p>
+<p><code>y = -ln(x) {0 &lt; x &lt;= 1}</code> a restriction: drawn only where it holds &middot; <code>{x &gt; 0, |y| &lt;= 2}</code></p>
 <p><code>sigmoid</code> <code>tanh</code> <code>relu</code> <code>leakyrelu</code> <code>gelu</code> <code>softplus</code> <code>silu</code> <code>elu</code>: type one alone to draw it, <code>sigmoid'</code> for its derivative</p>
 <p><code>softmax</code> the probability triangle and where the logit grid lands on it &middot; <code>softmax(T)</code> with a temperature &middot; <code>softmax(v)</code> a vector of logits</p>`;
 

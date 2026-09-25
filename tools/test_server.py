@@ -217,5 +217,53 @@ class EngineRouting(unittest.TestCase):
         self.assertEqual([b["state"] for b in st["backends"]], ["ready", "idle", "idle"])
 
 
+class RemoteAccess(unittest.TestCase):
+    """MATHBOARD_TOKEN: requests through a tunnel need the token; requests on this machine don't."""
+
+    @classmethod
+    def setUpClass(cls):
+        import http.client
+        import threading
+        cls.http = http.client
+        cls.saved = S.ACCESS_TOKEN
+        S.ACCESS_TOKEN = "s3cret-token"
+        S.Handler.engine = None  # only static files are fetched here
+        cls.server = S.BoardServer(("127.0.0.1", 0), S.Handler)
+        cls.port = cls.server.server_address[1]
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        S.ACCESS_TOKEN = cls.saved
+
+    def get(self, path, headers=None, method="GET", body=None):
+        c = self.http.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        c.request(method, path, body=body, headers=headers or {})
+        r = c.getresponse()
+        r.read()
+        c.close()
+        return r
+
+    def test_local_requests_need_nothing(self):
+        self.assertEqual(self.get("/index.html").status, 200)
+
+    def test_tunnel_requests_need_the_token(self):
+        tunnel = {"Host": "board.example.com", "Cf-Connecting-Ip": "203.0.113.7"}
+        self.assertEqual(self.get("/index.html", tunnel).status, 401)
+        self.assertEqual(self.get("/?token=wrong", tunnel).status, 401)
+        self.assertEqual(self.get("/api/recognize", tunnel, "POST", b"{}").status, 401)
+        r = self.get("/?token=s3cret-token", tunnel)
+        self.assertEqual(r.status, 303)
+        self.assertEqual(r.getheader("Location"), "/")
+        self.assertIn("mb_token=s3cret-token", r.getheader("Set-Cookie"))
+        self.assertIn("HttpOnly", r.getheader("Set-Cookie"))
+        self.assertEqual(self.get("/index.html", {**tunnel, "Cookie": "mb_token=s3cret-token"}).status, 200)
+        self.assertEqual(self.get("/index.html", {**tunnel, "Cookie": "mb_token=nope"}).status, 401)
+        # a forwarded request is remote even if it claims a local Host
+        self.assertEqual(self.get("/index.html", {"Host": "127.0.0.1", "X-Forwarded-For": "203.0.113.7"}).status, 401)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

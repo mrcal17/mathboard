@@ -33,7 +33,7 @@ export function install(api) { /* hooks, buttons, keyboard, ... */ }
 
 Language functions/types should be registered at module top level or in `install` (both run
 before the first evaluation). Features load in this order and failures are isolated:
-`plots, transform, fields, combos, systems, dual, lecture, present, bridge, drag`.
+`plots, transform, fields, combos, systems, dual, lecture, present, bridge, drag, presets`.
 
 ### Language (`lang.js`)
 - Values: numbers; `{type:'vec', v:[x,y,z]}`, `{type:'point', v}`, `{type:'mat', m: rows}`,
@@ -52,7 +52,12 @@ before the first evaluation). Features load in this order and failures are isola
   into closures, so sampling `at` thousands of times per frame is cheap. `features/plots.js` draws
   both kinds; `transform.js` carries them by adding the matrix as `item.M`. `parseLine(line, userFns)`
   takes the set of `f(x) = ...` names so `f(2)` parses as a call (without it, as `f * 2`).
-- A row is `[name =] expr [@ origin]`. `@` only moves where the value is drawn (`res.origin`).
+- **Restrictions.** `y = -ln(x) {0 < x <= 1}` or `z = x y {x > 0, |y| <= 2}`: comparisons
+  (`<`, `<=`, `>`, `>=`, `≤`, `≥`, chains like `0 < x < 1`) after the expression. The graph's `at`
+  throws outside, so samplers draw a gap there; an equation's own coordinate means its value
+  (`{|y| <= 2}` above). `parseLine` gives them as `where: [{items, ops}]` (`null` without one).
+- A row is `[name =] expr [{restriction}] [@ origin]`. `@` only moves where the value is drawn
+  (`res.origin`). Text after `#` or `//` is a comment; a slider keeps its comment as it moves.
 - A literal number row (`t = 0.5`) becomes a slider with a play button (ping-pong over its range;
   users can edit min/max). **Use slider variables for animation parameters and steps**, e.g.
   `transform(A, t)` or `eliminate(A, b, k)` (floor `k` for discrete steps).
@@ -89,8 +94,13 @@ Scene instance (via `api.scene` / `api.onSceneReady`): `getPose()`, `setPose(pos
 feature order), `addRowDecorator(fn(row, result, el))`, `onSceneReady(fn(scene))`,
 `onViewChange(fn(view))`, `addToolbarButton({label, title, onClick, group, icon, seg})` (see below),
 `addOverlay(el)` (absolute inside the 3D view), `addStyles(css)`, `setView`, `setCollapsed`,
-`toast(msg)`, `icon(name)` (an SVG string from `static/icons.js`, `''` for an unknown name),
-`panelEl`, `viewEl`.
+`toast(msg, ms)`, `icon(name)` (an SVG string from `static/icons.js`, `''` for an unknown name),
+`panelEl`, `viewEl`. Features add their own: `api.audience` (lecture.js) and
+`api.presets = {list, load(key), undo(), canUndo}` (presets.js: `load` replaces the rows and the
+camera and pushes what it replaced on the undo stack).
+
+**Popovers over the 3D view** go in `document.body` (z-index 20, as `presets.js` does): inside
+`#graph` the view's CSS2D labels get z-indexes up to their count, and would show through.
 
 **Toolbar buttons.** `addToolbarButton` returns the `<button>`: toggle it with `.on`, hide it with
 `hidden` (a group with nothing shown folds away), and keep a key in its `title`. Pick a `group` by
@@ -155,7 +165,8 @@ finally: srv.terminate()
 ```
 
 The `#graph=` hash preloads rows (newline-separated) without touching the saved list;
-`&view=top|front|side|iso` sets the camera. Look at your screenshots: check that things are
+`&view=top|front|side|iso` sets the camera. `mathboardGraph.presets.load(key)` loads a preset
+with its camera (the keys are in `features/presets.js`). Look at your screenshots: check that things are
 visible, sized sensibly at the default extent (E = 6), labelled, and readable in both themes
 (toggle with `document.documentElement.dataset.theme = 'light'`). 404s for other features'
 modules that don't exist yet are expected; any other console error is yours to fix.

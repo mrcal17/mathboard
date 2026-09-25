@@ -2417,20 +2417,53 @@ export function install(ctx) {
   function schedule() {
     if (queued) return;
     queued = true;
-    requestAnimationFrame(() => { queued = false; render(); });
+    requestAnimationFrame(() => { queued = false; render(true); });
   }
 
-  function render() {
+  // The panel is hidden (the divider, or a view that shows the matrices itself, as Flow does:
+  // nn.js's matrix-hidden on #nn-main). What schedule() brings (the net and its values: every frame
+  // while training) waits until it shows again, but a structural change still builds it (rarely),
+  // so showing it only updates in place. Direct renders (lens, step, the audience's toggles) go on.
+  const panelHidden = () => !!host.parentElement?.classList.contains('matrix-hidden');
+  let structStale = true;   // a structural change the hidden panel hasn't built yet
+  let held = false;         // a scheduled render put off while the panel was hidden
+  let quietT = 0;
+  const QUIET_MS = 300;
+  function buildIfChanged(d) {
+    const s = signature(d);
+    if (s === sig) return;
+    sig = s;
+    try { build(d); } catch (err) { console.error('[nn/matrix] build:', err); body.replaceChildren(h('p', 'nm-note', `Matrix view failed: ${err.message}`)); }
+  }
+  function render(tick = false) {
     if (ctx.el.root?.hidden) return;   // onShow re-schedules
     if (!animValid(store.state.anim)) { store.set('anim', null); return; }
     if (store.state.anim?.dir === 'bwd' && opt.mode !== 'bwd') opt.mode = 'bwd';
+    if (tick && panelHidden()) {   // the class observer below renders when it shows
+      held = true;
+      // quiet a while (training paused): catch up while hidden, so showing it has nothing left to do
+      clearTimeout(quietT);
+      quietT = setTimeout(() => { if (held && panelHidden() && !ctx.train?.running) render(); }, QUIET_MS);
+      if (!structStale) return;
+      structStale = false;
+      let hd;
+      try { hd = compute(); } catch (err) { console.error('[nn/matrix] compute:', err); return; }
+      buildIfChanged(hd);
+      lastD = hd;
+      return;
+    }
+    // This render catches up. On a shown panel it shows at once, as one kept up to date while hidden
+    // did: without nm-snap, every changed cell would start its transitions together.
+    if (held) {
+      held = false;
+      if (!panelHidden()) {
+        root.classList.add('nm-snap');
+        requestAnimationFrame(() => requestAnimationFrame(() => root.classList.remove('nm-snap')));
+      }
+    }
     let d;
     try { d = compute(); } catch (err) { console.error('[nn/matrix] compute:', err); return; }
-    const s = signature(d);
-    if (s !== sig) {
-      sig = s;
-      try { build(d); } catch (err) { console.error('[nn/matrix] build:', err); body.replaceChildren(h('p', 'nm-note', `Matrix view failed: ${err.message}`)); }
-    }
+    buildIfChanged(d);
     lastD = d;
     const lens = store.state.lens ? lensNow() : null;
     syncTrace(d, lens);   // before update(): the trace's cells read the followed token
@@ -2559,7 +2592,7 @@ export function install(ctx) {
     });
   }
 
-  store.on('net', schedule);
+  store.on('net', p => { if (p?.structural) structStale = true; schedule(); });
   store.on('values', schedule);
   store.on('anim', () => render());   // user-paced: answer the key press in the same frame
   store.on('lens', () => render());
@@ -2570,5 +2603,16 @@ export function install(ctx) {
   store.on('sel', paintState);
   ctx.onTheme?.(() => { for (const b of binds) b.el._c = undefined; schedule(); });
   ctx.onShow?.(v => { if (v) schedule(); });
+  // render() skips while the panel is hidden: catch up when it shows again, before the next frame
+  // draws (this runs as a microtask), so the panel never shows a stale frame.
+  if (host.parentElement && typeof MutationObserver === 'function') {
+    let was = panelHidden();
+    new MutationObserver(() => {
+      const now = panelHidden();
+      if (now === was) return;
+      was = now;
+      if (!now && held) render();
+    }).observe(host.parentElement, { attributes: true, attributeFilter: ['class'] });
+  }
   schedule();
 }

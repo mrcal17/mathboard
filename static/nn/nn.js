@@ -19,6 +19,7 @@ const MATRIX_MIN = 220, STAGE_MIN = 280;   // px (the CSS enforces the same limi
 const COLLAPSE_BELOW = 90;                 // px: dragging the matrix panel narrower than this hides it
 const LAYER_GAP = 170;                     // px: room "+ Layer" makes between two close columns
 const SNAP_MAX = 960, SNAP_QUALITY = 0.85; // "To board" image, as in graph/features/bridge.js
+const MIRROR_SHARE = 0.15;                 // while training, the share of the time the audience posts may take
 // The toolbar's rounded clusters, left to right ('tail' sits at the right end), and the sections
 // inside each, in order. An addButton group joins the section of the same name, or GROUP_SECTION's.
 const BAR = { build: ['new', 'net', 'edit'], show: ['view', 'panels', 'tour'], tail: ['file', 'tail'] };
@@ -535,11 +536,14 @@ async function start({ model, createStore }) {
 
   let historyQueued = false;
   function paintHistory() {
-    if (historyQueued) return;
+    if (historyQueued || audience) return;   // the audience never edits, and its toolbar is hidden
     historyQueued = true;
     requestAnimationFrame(() => {
       historyQueued = false;
-      undoBtn.disabled = !store.canUndo;
+      // canUndo compares the whole net's JSON when the undo stack is empty. A training tick always
+      // moves the net on (meta.train.steps at least), so once Undo is on it stays on until the
+      // pause's commit, which checks again.
+      if (!ctx.train?.running || undoBtn.disabled) undoBtn.disabled = !store.canUndo;
       redoBtn.disabled = !store.canRedo;
     });
   }
@@ -1014,8 +1018,25 @@ async function start({ model, createStore }) {
   // Audience: lecture.js passes what it receives to applyMirror (ignored outside audience windows).
   // The matrix panel's toggles (ctx.matrix.opt) and the view's weight labels are UI state with no
   // store event: a click in the toolbars or the matrix panel, or a key, re-posts after it has run.
-  function mirrorChanged() { for (const fn of mirrorFns) safe(fn); }
-  for (const evt of ['net', 'layout', 'sel', 'hover', 'anim', 'lens', 'viz', 'tour', 'v3d', 's3d', 'flow']) store.on(evt, mirrorChanged);
+  // Training changes the net every frame, and lecture.js posts all of it (a JSON compare, then a
+  // structured clone) at most once a frame. While training, those posts are spaced so they take at
+  // most MIRROR_SHARE of the time (a small net's still go every frame); the pause's commit and every
+  // other event post at once. mirrorState() times each post: its microtask runs as soon as the
+  // caller's callback, which stringifies and posts the state, returns.
+  let mirrorTimer = 0, mirrorNext = 0;
+  const mirrorCosts = [];   // the last posts' durations, ms
+  function mirrorChanged() {
+    clearTimeout(mirrorTimer);
+    mirrorTimer = 0;
+    for (const fn of mirrorFns) safe(fn);
+  }
+  function mirrorNet() {
+    const wait = ctx.train?.running ? mirrorNext - performance.now() : 0;
+    if (wait <= 0) mirrorChanged();
+    else if (!mirrorTimer) mirrorTimer = setTimeout(mirrorChanged, wait);
+  }
+  store.on('net', mirrorNet);
+  for (const evt of ['layout', 'sel', 'hover', 'anim', 'lens', 'viz', 'tour', 'v3d', 's3d', 'flow']) store.on(evt, mirrorChanged);
   if (!audience) {
     const later = () => { if (mirrorFns.size) requestAnimationFrame(mirrorChanged); };
     el.bar.addEventListener('click', later);
@@ -1026,18 +1047,29 @@ async function start({ model, createStore }) {
   const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
   const netApi = window.mathboardNet = {
     store, ctx, audience, ready: false,
-    mirrorState: () => ({
-      net: store.net, sel: store.state.sel, hover: store.state.hover, anim: store.state.anim, split, matrixHidden: matrixHidden || matrixAway,
-      lens: store.state.lens, viz: store.state.viz, tour: store.state.tour, v3d: store.state.v3d, s3d: store.state.s3d, flow: store.state.flow ?? null,
-      matrix: ctx.matrix?.opt ? { ...ctx.matrix.opt } : null, weights: !!ctx.view?.weights,
-    }),
+    mirrorState: () => {
+      const t0 = performance.now();
+      queueMicrotask(() => {   // the gap its cost earns (the median of the last few); one under a frame's is none
+        const t1 = performance.now();
+        mirrorCosts.push(t1 - t0);
+        if (mirrorCosts.length > 8) mirrorCosts.shift();
+        const s = [...mirrorCosts].sort((a, b) => a - b), gap = s[s.length >> 1] * (1 / MIRROR_SHARE - 1);
+        mirrorNext = gap > 1000 / 60 ? t1 + gap : 0;
+      });
+      return {
+        net: store.net, sel: store.state.sel, hover: store.state.hover, anim: store.state.anim, split, matrixHidden: matrixHidden || matrixAway,
+        lens: store.state.lens, viz: store.state.viz, tour: store.state.tour, v3d: store.state.v3d, s3d: store.state.s3d, flow: store.state.flow ?? null,
+        matrix: ctx.matrix?.opt ? { ...ctx.matrix.opt } : null, weights: !!ctx.view?.weights,
+      };
+    },
     applyMirror(m) {
       if (!audience || !m) return;
       if (m.net) {
         const json = JSON.stringify(m.net);
         if (json !== lastMirrorNet) {
           lastMirrorNet = json;
-          try { store.load(m.net, { history: false }); } catch (err) { console.error('[nn] mirror:', err); }
+          // the JSON, not m.net: load would stringify it again for its copy
+          try { store.load(json, { history: false }); } catch (err) { console.error('[nn] mirror:', err); }
         }
       }
       const opt = ctx.matrix?.opt;

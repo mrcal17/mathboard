@@ -45,6 +45,7 @@ const BUDGET_MS = 9;                // landscape grid work per frame
 const REFRESH_MS = 90;              // data refresh interval while training runs
 const CAM_MS = 120;                 // camera -> state.s3d.cam, at most this often
 const TRAIL_MS = 60, TRAIL_MAX = 400, PATH_MS = 150, PMAX = 5000;   // PMAX: the landscape's largest net
+const TRAIL_SHARE = 0.1;             // while training, the share of the time the trail's losses may take
 const LINES = 9, PER = 40;          // input grid lines carried into layer space
 const SPEED = 0.8;                  // morph: stages per second (slower near each stage)
 const EXTRA = ['#3ec27a', '#b07cff', '#ff6fa8', '#2ec4c4', '#c9a227'];   // classes 3+, as in train.js
@@ -424,7 +425,7 @@ export function makeEvaluator(net, model, data, nmax = LAND_NMAX) {
     const scratch = model.clone(net);
     evalAt = vec => {
       writeParams(scratch, params, vec);
-      const acts = forwardMany(scratch, model, Xs, ns);
+      const acts = forwardMany(scratch, model, Xs, ns, 0, undefined, true);   // the loss reads the outputs only
       return acts && acts[L - 1] ? lossOf(acts[L - 1]) : NaN;
     };
   } else {
@@ -746,7 +747,9 @@ export function install(ctx) {
   // ---------------------------------------------------------------- the training path
   // Recorded from the Train panel's 'train' events (presenter only), whatever the panel shows:
   // { steps, theta, loss }, at most every TRAIL_MS while running, TRAIL_MAX points (halved when full).
-  let trail = [], trailSig = '', trailVer = 0, lastRec = 0, basisStale = false;
+  // A point's loss is over the whole dataset: while running, a big net's points are spaced further
+  // (trailGap) so they take at most TRAIL_SHARE of the time. The point at a pause is always taken.
+  let trail = [], trailSig = '', trailVer = 0, lastRec = 0, basisStale = false, trailGap = TRAIL_MS;
   function recordTrail(p) {
     if (ro) return;
     const net = store.net, ev = evaluator();
@@ -770,9 +773,10 @@ export function install(ctx) {
       } else return;
     }
     const now = performance.now();
-    if (p?.running && trail.length && now - lastRec < TRAIL_MS) return;
+    if (p?.running && trail.length && now - lastRec < trailGap) return;
     trail.push({ steps, theta, loss: ev.evalAt(theta) });
     lastRec = now;
+    trailGap = Math.max(TRAIL_MS, (performance.now() - now) * (1 / TRAIL_SHARE - 1));
     if (trail.length > TRAIL_MAX) trail = trail.filter((_, i) => i % 2 === 0 || i === trail.length - 1);
     trailVer++;
     dataDirty = true;

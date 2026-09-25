@@ -7,8 +7,10 @@ const NAME_RE = new RegExp(NAME, 'y');
 const DEF_RE = new RegExp(`^(${NAME})\\s*=`);
 const FNDEF_RE = new RegExp(`^(${NAME})\\s*\\(\\s*(${NAME}(?:\\s*,\\s*${NAME})*)?\\s*\\)\\s*=`); // f(x) = ..., g(x, y) = ...
 const NUM_RE = /(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?/y;
-const OPS = "+-*/·×^()[],;|=@.'";
-const OP_ALIASES = { '−': '-', '⋅': '·', '∙': '·', '′': "'" };
+const OPS = "+-*/·×^()[],;|=@.'{}<>";
+const OP_ALIASES = { '−': '-', '⋅': '·', '∙': '·', '′': "'", '≤': '<=', '≥': '>=' };
+// Comparisons, only inside a restriction: y = -ln(x) {0 < x <= 1}
+const RELS = { '<': (a, b) => a < b, '>': (a, b) => a > b, '<=': (a, b) => a <= b, '>=': (a, b) => a >= b };
 // Coordinates: a row that uses x, y or z without defining them is a graph (y = x^2, z = x^2 - y^2).
 const COORDS = ['x', 'y', 'z'];
 
@@ -484,7 +486,8 @@ registerType('softmaxmap', {
       : `\\frac{e^{z_i / T}}{\\sum_j e^{z_j / T}},\\ T = ${formatNumber(v.T)}`,
   }),
 });
-// AST of one line: {name, params, body, at, literal, error}. Nodes: num{v} name{name, d?} vec{items}
+// AST of one line: {name, params, body, where, at, literal, error}; where (a restriction) is null or
+// [{items, ops}], a chain items[0] ops[0] items[1] ... Nodes: num{v} name{name, d?} vec{items}
 // mat{rows} neg{a} abs{a} comp{a,i} bin{op,a,b,implicit?} call{name,args,user?,d?} (d: derivative order)
 // userFns: names defined as f(x) = ... elsewhere, so f(2) parses as a call.
 export const parseLine = (line, userFns) => parseStatement(line, userFns);
@@ -536,6 +539,13 @@ function tokenize(src) {
       continue;
     }
     const op = OP_ALIASES[c] ?? c;
+    const wide = (op === '<' || op === '>') && src[i + 1] === '='; // <= and >= (≤ and ≥ are aliases)
+    if (wide || op === '<=' || op === '>=') {
+      toks.push({ t: 'op', v: wide ? `${op}=` : op, s: wide ? `${c}=` : c, sp });
+      sp = false;
+      i += wide ? 2 : 1;
+      continue;
+    }
     if (OPS.includes(op)) {
       toks.push({ t: 'op', v: op, s: c, sp });
       sp = false;
@@ -746,6 +756,28 @@ class Parser {
     if (rows.some((r) => r.length !== rows[0].length)) throw new Error('matrix rows must all be the same length');
     return { t: 'mat', rows };
   }
+
+  // {0 < x <= 1, y > 0}: comparisons (chains like a < x < b) that must all hold. -> [{items, ops}]
+  restriction() {
+    this.expect('{');
+    const saved = this.absDepth, savedRow = this.rowMode, conds = [];
+    this.absDepth = 0;
+    this.rowMode = 0;
+    do {
+      const items = [this.expr()], ops = [];
+      while (this.peek()?.t === 'op' && Object.hasOwn(RELS, this.peek().v)) {
+        ops.push(this.peek().v);
+        this.pos++;
+        items.push(this.expr());
+      }
+      if (!ops.length) throw new Error(this.isOp('=') ? "use < or <= in a restriction, not '='" : 'a restriction needs a comparison, like {x > 0}');
+      conds.push({ items, ops });
+    } while (this.eat(','));
+    this.absDepth = saved;
+    this.rowMode = savedRow;
+    if (!this.eat('}')) throw this.unexpected("'}'");
+    return conds;
+  }
 }
 
 function vectorNode(items) {
@@ -758,14 +790,14 @@ function stripComment(s) {
   return i < 0 ? s : s.slice(0, i);
 }
 
-// Parses one line into {name, params, body, at, literal, error}, or null for blank/comment lines.
-// params is set for a function definition, f(x) = x^2.
+// Parses one line into {name, params, body, where, at, literal, error}, or null for blank/comment
+// lines. params is set for a function definition, f(x) = x^2; where for a restriction, {x > 0}.
 function parseStatement(line, userFns) {
   const text = stripComment(String(line ?? '')).trim();
   if (!text) return null;
   const fdef = FNDEF_RE.exec(text);
   const def = fdef ?? DEF_RE.exec(text);
-  const st = { name: def ? def[1] : null, params: null, body: null, at: null, literal: false, error: null };
+  const st = { name: def ? def[1] : null, params: null, body: null, where: null, at: null, literal: false, error: null };
   try {
     if (st.name && isFunc(st.name)) throw new Error(`${st.name} is a built-in function; pick another name`);
     if (fdef) {
@@ -777,6 +809,7 @@ function parseStatement(line, userFns) {
     if (def && !toks.length) throw new Error("missing value after '='");
     const p = new Parser(toks, userFns);
     st.body = p.expr();
+    while (p.isOp('{')) (st.where ??= []).push(...p.restriction());
     if (p.eat('@')) {
       if (!p.peek()) throw new Error("missing origin after '@'");
       st.at = p.expr();
@@ -784,12 +817,13 @@ function parseStatement(line, userFns) {
     const rest = p.peek();
     if (rest) {
       if (rest.t === 'op' && rest.v === '=' && !def) throw new Error("only a single name can go left of '='");
+      if (rest.t === 'op' && Object.hasOwn(RELS, rest.v)) throw new Error('comparisons go in a restriction after the expression: y = x^2 {x > 0}');
       throw p.unexpected();
     }
     st.literal = !!def && !fdef && toks.at(-1).t === 'num' &&
       (toks.length === 1 || (toks.length === 2 && toks[0].t === 'op' && toks[0].v === '-'));
   } catch (e) {
-    st.body = st.at = null;
+    st.body = st.at = st.where = null;
     st.error = e.message;
   }
   return st;
@@ -804,6 +838,12 @@ function refs(n, out = []) {
   }
   return out;
 }
+// A row's names: its body and its restriction ({x > a} makes a row a graph of x that uses a).
+const stmtRefs = (s) => {
+  const out = s.body ? refs(s.body) : [];
+  for (const c of s.where ?? []) for (const n of c.items) refs(n, out);
+  return out;
+};
 
 // Shortest dependency path start → … → start, or null.
 function findCycle(start, deps) {
@@ -862,6 +902,28 @@ function derivative(g, d, name) {
     return f(args[0]);
   };
 }
+
+// A restriction compiles to a check that throws OUTSIDE where a comparison fails: a gap in the
+// graph. One shared error, since a surface may be sampled outside thousands of times per frame.
+const OUTSIDE = new Error('outside the restriction { }');
+function compileWhere(where, cx) {
+  const conds = where.map(({ items, ops }) => ({ fs: items.map((n) => compile(n, cx)), rel: ops.map((o) => RELS[o]) }));
+  return (e) => {
+    for (const { fs, rel } of conds) {
+      let a = toNum(fs[0](e), 'comparisons');
+      for (let i = 0; i < rel.length; i++) {
+        const b = toNum(fs[i + 1](e), 'comparisons');
+        if (!rel[i](a, b)) throw OUTSIDE;
+        a = b;
+      }
+    }
+  };
+}
+// A graph's samples cut down to a restriction; one of y = ... that may name y ({|y| <= 2}) checks
+// the value too.
+const guarded = (f, check, dep) => (dep
+  ? (e) => { const v = f(e); check({ ...e, [dep]: v }); return v; }
+  : (e) => { check(e); return f(e); });
 
 function compile(n, cx) {
   const C = (x) => compile(x, cx);
@@ -933,16 +995,36 @@ function compileCall(n, cx) {
   return (e) => g(args.map((a) => a(e)));
 }
 
-// What a graph's samples are: 'num' or 'vec'. 1/x fails at 0, so try a few points; null if all fail.
+// What a graph's samples are: 'num' or 'vec'. 1/x fails at 0, so try a few points; {error} if all
+// fail. A restriction can leave out all of them, so then search a grid; a graph that is outside
+// its restriction everywhere there draws nothing, which is not an error.
 function probe(at, ins) {
-  let err = null;
-  for (const t of [0.37, -0.61, 1.3, 2.9, -4.1, 5.3]) {
+  let err = null, outside = false;
+  const tryAt = (vals) => {
     try {
       const e = {};
-      ins.forEach((c, i) => { e[c] = t * (i ? -0.7 : 1); });
+      ins.forEach((c, i) => { e[c] = vals[i]; });
       const k = kindOf(at(e));
       return k === 'point' ? 'vec' : k;
-    } catch (e) { err = e; }
+    } catch (e) {
+      if (e === OUTSIDE) outside = true;
+      else err = e;
+      return null;
+    }
+  };
+  for (const t of [0.37, -0.61, 1.3, 2.9, -4.1, 5.3]) {
+    const k = tryAt(ins.map((_, i) => t * (i ? -0.7 : 1)));
+    if (k) return k;
+  }
+  if (outside) {
+    const G = [0.05, 0.2, 0.5, 0.8, 0.95, -0.5, 1.5, -1.5, 3, -3, 7, -7];
+    for (const a of G) {
+      for (const b of ins.length > 1 ? G : [0]) {
+        const k = tryAt([a, b]);
+        if (k) return k;
+      }
+    }
+    if (!err) return 'num';
   }
   return { error: err };
 }
@@ -983,7 +1065,7 @@ export function evaluate(lines) {
     grew = false;
     for (const s of stmts) {
       if (!s?.name || s.params || !COORDS.includes(s.name) || valueCoords.has(s.name)) continue;
-      const cs = s.body ? refs(s.body).filter((n) => COORDS.includes(n)) : [];
+      const cs = stmtRefs(s).filter((n) => COORDS.includes(n));
       if (cs.every((c) => c !== s.name && valueCoords.has(c))) { valueCoords.add(s.name); grew = true; }
     }
   }
@@ -997,7 +1079,7 @@ export function evaluate(lines) {
   const deps = new Map(); // uniquely defined name -> names its value refers to
   for (const [name, idx] of defs) {
     const s = stmts[idx[0]];
-    if (idx.length === 1 && s.body) deps.set(name, refs(s.body).filter((r) => !s.params?.includes(r)));
+    if (idx.length === 1 && s.body) deps.set(name, stmtRefs(s).filter((r) => !s.params?.includes(r)));
   }
 
   const staticError = (s) => {
@@ -1047,11 +1129,13 @@ export function evaluate(lines) {
   // f(x) = ...: callable from other rows; one or two parameters also draw it.
   const userFunction = (s) => {
     const params = s.params, cx = cxFor(params), body = compile(s.body, cx);
+    const check = s.where && compileWhere(s.where, cx);
     const extra = [...cx.free].filter((c) => !params.includes(c));
     if (extra.length) throw new Error(`${s.name} uses ${extra.join(' and ')}; add ${extra.length > 1 ? 'them' : 'it'} to ${s.name}(${params.join(', ')})`);
     const fcall = (vals) => {
       const e = {};
       for (let i = 0; i < params.length; i++) e[params[i]] = vals[i];
+      if (check) check(e);
       return body(e);
     };
     const g = { type: 'graph', callable: true, params, call: fcall, free: [], mode: null };
@@ -1090,13 +1174,29 @@ export function evaluate(lines) {
     return { type: 'graph', mode: 'curve', ins: ['x'], dep: 'y', free: ['x'], at: (e) => g([e.x]), fname: name, d };
   };
 
+  // sigmoid {x > 0}: a drawn function cut down to its restriction.
+  const restrictGraph = (g, check, free, dep) => {
+    if (g.type !== 'graph' || !g.mode) throw new Error('only a graph can have a restriction { }');
+    const extra = [...free].find((c) => !g.ins.includes(c));
+    if (extra) throw new Error(`this graph is drawn over ${g.ins.join(' and ')}, so its restriction can't use ${extra}`);
+    return { ...g, at: guarded(g.at, check, dep && g.dep) };
+  };
+
   const rowValue = (s) => {
     if (s.params) return userFunction(s);
+    // y = ... {|y| <= 2}: in the restriction of an equation, its own coordinate is the value
+    const dep = s.eq ? s.name : null, cx = cxFor(null), wx = dep ? cxFor([dep]) : cx;
+    const check = s.where && compileWhere(s.where, wx);
+    for (const c of wx.free) cx.free.add(c);
+    const own = dep && s.where?.some((c) => c.items.some((n) => refs(n).includes(dep))) ? dep : null;
     const bare = bareGraph(s.body);
-    if (bare) return bare;
-    const cx = cxFor(null), f = compile(s.body, cx);
-    if (!cx.free.size) return finite(f(NO_ENV));
-    return graphOf(f, cx.free, s.eq ? s.name : null);
+    if (bare) return check ? restrictGraph(bare, check, cx.free, own) : bare;
+    const f = compile(s.body, cx), at = check ? guarded(f, check, own) : f;
+    if (!cx.free.size) {
+      if (dep && check) throw new Error(`${dep} = ... needs x, y or z on the right to draw`);
+      return finite(at(NO_ENV));
+    }
+    return graphOf(at, cx.free, dep);
   };
 
   return stmts.map((s, i) => {

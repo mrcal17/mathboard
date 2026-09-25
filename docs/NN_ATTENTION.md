@@ -147,8 +147,9 @@ Differences from the spec above:
     word the grammar leaves open would need "don't care" targets (and so no backward pass for any
     sample), a softmax over the vocabulary doesn't fit the 40-node limit, and a grammar that fixes
     every next word has only a handful of sentences. The next-word task came later, with one-hot
-    words and a softmax over the vocabulary, as its own dataset `nl_next` and the `tiny_lm` preset
-    (174 nodes, the one preset over the limit, made for the Flow view): docs/NN_FLOW.md.
+    words and a softmax over the vocabulary, first as `nl_next` and now as `nl_lm` (five-word sentences
+    over 23 words), with the `tiny_lm` preset (670 nodes, the one preset over the limit, made for the
+    Flow view): docs/NN_FLOW.md.
 - **Presets** (group Attention, after Sequences): `words` (hand-set), `pronouns`, `agreement`,
   `attention`, `causal`, `causal_rot`, `multihead` and `transformer`.
   - The **transformer has 2 tokens**, because 3 tokens would need 54 nodes against the menu's

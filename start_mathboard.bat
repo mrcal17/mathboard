@@ -8,7 +8,8 @@ rem Uni-MuMER files: this script starts llama-server in this console and stops i
 rem Setup, paths and overrides: docs/BOARD_BACKENDS.md.
 setlocal
 cd /d "%~dp0"
-if exist mathboard.local.bat call mathboard.local.bat
+rem Full path: with NoDefaultCurrentDirectoryInExePath set, cmd won't run a script from the current folder.
+if exist "%~dp0mathboard.local.bat" call "%~dp0mathboard.local.bat"
 if not defined MATHBOARD_BACKEND set MATHBOARD_BACKEND=qwen
 set LLAMA_PID=
 if /i "%MATHBOARD_BACKEND%"=="qwen" goto run

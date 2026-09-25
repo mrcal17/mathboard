@@ -134,6 +134,43 @@ test('sampling errors do not fail a graph, but a row that fails everywhere does'
   assert.match(err('x + [1, 2, 3]'), /can't add/);
 });
 
+test('restrictions: a graph is drawn only where every comparison holds', () => {
+  const g = ok('y = -ln(x) {0 < x <= 1}');
+  assert.equal(g.mode, 'curve');
+  near(g.at({ x: 0.5 }), Math.log(2));
+  assert.throws(() => g.at({ x: 1.5 }), /outside/);
+  assert.throws(() => g.at({ x: -1 }), /outside/);
+  assert.equal(ok('y = 1 {0 < x < 1}').mode, 'curve'); // the restriction makes it a graph of x
+  const s = ok('a = 2', 'z = x y {x > 0, y >= a}');
+  assert.equal(s.mode, 'surface');
+  assert.equal(s.at({ x: 1, y: 3 }), 3);
+  assert.throws(() => s.at({ x: 1, y: 1 }), /outside/);
+  assert.throws(() => ok('y = x {x ≥ 0}').at({ x: -1 }), /outside/); // ≤ and ≥ work too
+  // the probe finds a point inside, and a graph that is never inside draws nothing without an error
+  assert.equal(ok('z = x + y {x > 0, y > 0, x + y < 1}').mode, 'surface');
+  assert.equal(ok('y = x {x > 99}').mode, 'curve');
+  // bare functions, f(x) = ..., and an equation's own coordinate
+  assert.throws(() => ok('sigmoid {x > 0}').at({ x: -1 }), /outside/);
+  const r = rows('f(x) = sqrt(x) {x < 4}', 'f(1)', 'f(9)');
+  assert.equal(r[1].value, 1);
+  assert.match(r[2].error, /outside/);
+  const b = ok('y = 2 x {|y| <= 2}');
+  assert.equal(b.at({ x: 0.5 }), 1);
+  assert.throws(() => b.at({ x: 1.5 }), /outside/);
+  // a restriction on a number, and mistakes
+  assert.equal(ok('2 {1 > 0}'), 2);
+  assert.match(err('2 {1 > 3}'), /outside/);
+  assert.match(err('softmax {x > 0}'), /only a graph/);
+  assert.match(err('y = x {x = 1}'), /not '='/);
+  assert.match(err('y = x {x}'), /needs a comparison/);
+  assert.match(err('x < 1'), /restriction/);
+  assert.match(err('y = x {x > (1, 2)}'), /numbers/);
+  assert.match(err('y = x {x > 0'), /missing '}'/);
+  assert.match(err('y = 3 {y > 0}'), /needs x, y or z/);
+  // rows without one are unchanged: y = 3 is still a slider
+  assert.equal(last('y = 3').slider, 3);
+});
+
 test('origins can still use values but not free coordinates', () => {
   assert.match(err('(1, 0, 0) @ x'), /x is not defined/);
   assert.deepEqual(last('p = (1, 2, 3)', '(1, 0, 0) @ p').origin, [1, 2, 3]);

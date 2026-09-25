@@ -77,6 +77,7 @@ z = x^2/6 - y^2/6      # a surface
 f(x) = x^3/6 - x       # a named function: drawn, and callable as f(2) or f'(x)
 sigmoid                # an activation on its own draws it; sigmoid' draws its derivative
 softmax                # the probability triangle, and where the grid of logits lands on it
+y = -ln(x) {x <= 1}    # a restriction: drawn only where it holds
 ```
 
 <p>
@@ -84,15 +85,16 @@ softmax                # the probability triangle, and where the grid of logits 
 <img src="docs/media/3d-softmax.png" width="49%" alt="3D tab: softmax squashing the logit grid onto the probability triangle, with softmax((2, 1, 0.5)) landing on it">
 </p>
 
-Ten feature modules build on the language. One draws those functions. Five add linear algebra:
+Eleven feature modules build on the language. One draws those functions. Five add linear algebra:
 linear combinations laid out tip-to-tail with projections and intersections, animated
 transformations (`transform(A, t)`), eigenlines and SVD, flows of dx/dt = Ax, row and column
 pictures, animated Gauss-Jordan elimination, the four fundamental subspaces, Gram-Schmidt, and a
-split domain/codomain view for non-square maps. The other four are for lecturing: saved
+split domain/codomain view for non-square maps. The other five are for lecturing: saved
 camera steps and a UI-free audience window, typeset rows with PNG snapshots and video recording,
-a bridge that sends the view to the board and board maths to the 3D tab, and draggable vectors.
-The left image above is `transform(A, t)` with `eigen(A)`; the right one is
-`subspaces([[1,2,3],[2,4,6]])`.
+a bridge that sends the view to the board and board maths to the 3D tab, draggable vectors, and
+**Presets**, a menu of ready-made scenes for ML and linear-algebra lectures (listed in the
+[reference](#3d-tab-reference)). The left image above is `transform(A, t)` with `eigen(A)`; the
+right one is `subspaces([[1,2,3],[2,4,6]])`.
 
 ### Net tab
 
@@ -183,20 +185,29 @@ the bug, "head 1" is just the first 8 numbers, pieces of tokens 1 and 2.
 
 #### Flow view
 
-![The Flow view on the tiny language model after training, reading ". dog chases": 14 stages left to right, from the one-hot words through X = O W_E + P, Q, K and V per head, the causal scores and attention weights, A V, the concat, Z W_O and the residual, the FFN, F W_2 and the residual, to the logits and a bar per word at each position; the prediction reads cats 100%. The pointer is on A₁[3,2], so its row of scores is framed and the tip does the softmax](docs/media/net-flow.png)
+![The Flow view on the tiny language model after 1000 training steps, reading "the cat sat on the" as five numbered words with the prediction mat 100%, and a line on why the residual stream keeps one width. 14 stages run left to right, every matrix row named by its position and word: the one-hot words, X = O W_E + P, Q, K and V per head, the causal scores and attention weights, A V, the concat, Z W_O and the residual, the FFN (visibly four times as wide, 4 d_model = 32), F W_2 and the residual, the last position's logits and the next word as one bar chart over the 23 words, where mat is the tall bar and the true next word. Brackets under the tiles give their widths. The pointer is on A₂[5,2], so its row of scores is framed and the tip does the softmax](docs/media/net-flow.png)
 
 **Flow** (G) draws the whole forward pass in place of the canvas, left to right, as live matrices
 with their shapes: the words, the embedding plus position, Q, K and V per head, the scores, the
-softmax, A V, the concat, W_O and the residual, the FFN and its residual, the logits and, at each
-position, a bar per word for the next one. ◀ ▶ (← →) step through the stages and ▶ plays them,
+softmax, A V, the concat, W_O and the residual, the FFN and its residual, the logits and the next
+word. The sentence heads it in order as numbered words (① the ② cat ③ sat ④ on ⑤ the → ⑥ ?), and
+every matrix names its rows by position and word. One cell width for the whole flow makes each
+tile as wide as its columns, and brackets under them say what sets the width: d_model for the
+residual stream (the residual additions X + attention and H + FFN add cell by cell, so it keeps one
+width), 4 d_model for the FFN, the vocabulary for the words and the logits. The ending shows what
+generating reads, the last position: its logits and the next word's distribution as one bar chart
+over the vocabulary, the most likely word solid and the true next word ringed. **every position
+(how it's trained)** shows instead each position's guess for its own next word ("after the cat →
+sat"), since training scores them all at once. ◀ ▶ (← →) step through the stages and ▶ plays them,
 lighting one and filling its cells in. Hovering a cell frames what it was computed from and does
 the sum in a tip; clicking a stage focuses its layer in the lens. The matrix panel steps aside
 while the flow is open, since the flow shows the same matrices (dragging the divider brings it
 back). The head chips knock a head out and recompute everything after it. It follows the Train panel live. The
-**Tiny language model** preset is made for it: one-hot words, 2 causal heads, a d → 4d → d FFN and
-a softmax over 7 words at each position, trained with cross-entropy on "dog chases cats"
-sentences read after a start token. Above, after training: after ". dog chases" it gives cats
-0.998, while the first word stays a one-in-four guess among the nouns.
+**Tiny language model** preset is made for it: five one-hot words, d_model 8, 2 causal heads, a
+d → 4d → d FFN and a softmax over 23 words at each position, trained with cross-entropy on
+sentences like "the cat sat on the mat", "the dog ran to the park" and "the bird flew over the
+tree", where the last word depends on the subject three words back. Above, after 1000 steps: after
+"the cat sat on the" it gives mat 0.999, while the first three words stay guesses.
 
 #### 3D plots
 
@@ -276,6 +287,22 @@ measurements and the API are in [docs/BOARD_BACKENDS.md](docs/BOARD_BACKENDS.md)
 | `--backend NAME` | `qwen` (or `$MATHBOARD_BACKEND`) | `qwen`, `unimumer` or `ensemble` |
 | `--unimumer URL` | `http://127.0.0.1:8792` when needed | the llama-server running Uni-MuMER |
 | `--no-normalize` | | send crops as drawn; by default they are scaled so symbols reach the model at about 64 px |
+
+**Remote access.** To use the board from another machine (the GPU stays at home), run a second
+instance with an access token and put a tunnel in front of it, for example a
+[Cloudflare quick tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/):
+
+```bat
+set MATHBOARD_TOKEN=<a long random string>
+start_mathboard.bat --port 8795 --no-browser
+cloudflared tunnel --url http://127.0.0.1:8795
+```
+
+Open `https://<tunnel address>/?token=<the token>` once; the server swaps it for a cookie and drops
+it from the address bar. With `MATHBOARD_TOKEN` set, any request that comes through a proxy or tunnel
+without the token gets a 401, while requests made on the machine itself never need it. Anyone
+holding both the link and the token can use your GPU for recognition, so treat the link as a password
+and stop the tunnel when you're done.
 
 **Only want the 3D and Net tabs?** They don't use the model. Without Ollama running,
 `python server.py` still serves everything; the status chip stays red and handwriting stays as ink.
@@ -470,6 +497,11 @@ you say otherwise with `@` (see the example in the [tour](#3d-tab)).
   one or two parameters it is drawn too, and a vector value draws a curve through space
   (`c(t) = (cos(t), sin(t), t/4)`). Primes take derivatives: `f'(x)`, `f''(2)`. Graphs follow
   sliders (`y = a sin(x)`), `transform(A, t)` carries them, and they are clipped to the axes box.
+- **Restrictions:** comparisons in braces after an expression draw it only where they hold:
+  `y = -ln(x) {0 < x <= 1}`, `z = x y {x > 0, |y| <= 2}`, `f(x) = sqrt(x) {x < 4}`. They take
+  `<`, `<=`, `>`, `>=` (or `≤`, `≥`) and chains like `0 < x < 1`; in `y = ...` the `y` of a
+  restriction is the value (`{|y| <= 2}`). A number row like `y = 3` stays a slider, so a constant
+  level is `z = 0.5 {|x| <= 2, |y| <= 2}` (a patch) or `plane(k) @ (0, 0, 0.5)`.
 - **Activations:** `sigmoid` (or `σ`), `tanh`, `relu`, `leakyrelu(x, a)` (a = 0.01 unless given),
   `elu(x, a)`, `gelu`, `softplus`, `silu` (or `swish`), `mish`, `heaviside`. A row that is only a
   function's name draws it and shows its formula; add `'` for the derivative (`sigmoid'` shows
@@ -484,8 +516,8 @@ you say otherwise with `@` (see the example in the [tour](#3d-tab)).
   and powers `A^n` including `A^-1`. `[1 2 3]` is a 1×3 row (`[1, 2, 3]` with commas is a vector),
   and a 2-3 entry column like `[1; 2; 3]` is a vector. `u^T` turns a vector into a row, so `u^T v`
   is a number, `u^T A u` is a number for a 3×3 `A`, and `u v^T` is an outer product.
-- **Rows** can be referenced in any order. Comments start with `#` or `//`. The `?` button shows
-  the cheat sheet.
+- **Rows** can be referenced in any order. Comments start with `#` or `//` (a slider keeps its
+  comment while it moves). The `?` button shows the cheat sheet.
 - **Sliders:** a row that names a number (`a = 1.5`) becomes a slider with min/max boxes and a play
   button. The speed button cycles 1×, φ×, 2×, ½× and ¼×. Two sliders playing at 1× and φ× never
   repeat, so `trail(a u + b v)` gradually paints the patch of the span that the slider ranges cover
@@ -516,6 +548,45 @@ Anything animated is driven by a slider variable: type `t = 0` and press its pla
 | Subspaces / bases | `subspaces(A[, t])` four fundamental subspaces · `gramschmidt(u, v[, w][, k])` · `basis(b1, b2[, b3])` or `basis(M)` skewed grid · `coords(v, B)` | `subspaces([[1,2,3],[2,4,6]])` |
 | Readouts | `rref` `rank` `nullspace` `colspace` `rowspace` `leftnull` `eig` `svd` `qr` `lu` `charpoly` `tr`. The four spaces are also drawn when they fit in 3D | `eig(A)` |
 | Domain / codomain | `map(A)` splits the view into ℝⁿ and ℝᵐ, maps the grid and every vector, shows kernel, image and rank-nullity. With a 3×3 map, **Link cameras** ties the two views together | `map([[1,0],[0,1],[1,2]])` |
+
+</details>
+
+<details>
+<summary>Presets: ready-made scenes for ML and linear-algebra lectures</summary>
+
+**Presets** in the header opens a menu of scenes in sections, with a search field (it matches the
+label, the description and the rows) and keys: ↑/↓ (or Tab) move, ←/→ change column, Enter loads,
+Esc closes. A preset replaces the rows and sets the camera: 2D for curves, a framed 3D view for
+surfaces, and an axis extent that fits the demo. Its rows carry `#` comments that say what each
+line is, and some start hidden (a ring on the dot) for a second step. The toast after loading has
+**Undo**, and **Back to your rows** at the foot of the menu goes back one preset at a time (the
+last 12 are kept, also across a reload).
+
+| Section | Preset | Shows |
+|---|---|---|
+| ML: losses | NLL vs 0/1 error by probability | `-ln(x)` against the 0/1 error on 0 < p ≤ 1, with a slider p |
+| | NLL vs error by margin | the logistic loss in bits above the 0/1 error, and its gradient σ(m) − 1 |
+| | Cross-entropy surface | `-ln(softmax((x, y, 0)).x)` over two logits, with one prediction at the height of its loss |
+| | Surrogate losses by margin | squared error, hinge and logistic loss next to the 0/1 error |
+| | Cross-entropy, entropy and KL | a coin's cross-entropy is lowest at the true q, where it equals the entropy H(q) |
+| ML: softmax and attention | Softmax temperature | `softmax(T)` with a T slider, and `softmax((2, 1, 0.5), T)` landing on the triangle |
+| | Attention weights on the simplex | a query turning past three keys; softmax of the scores traces a path on the triangle |
+| | Smooth max: logsumexp | `T logsumexp((x, y, 0) / T)` over `max(x, y, 0)`, with their gap as a hidden row |
+| ML: activations and gradients | Activation gallery | sigmoid, tanh, relu, gelu and silu, each with its formula |
+| | Vanishing gradients | `sigmoid'`, `tanh'`, `relu'` and `sigmoid'(x)^n` for a depth slider n |
+| | A ReLU network is piecewise linear | three ReLU ridges summed into a creased surface |
+| ML: optimization and models | Gradient descent and the learning rate | gradient descent on a bowl in closed form: play k, and a large η zigzags or diverges |
+| | Linear regression: the MSE surface | the loss over (w, b) for three data points, with the least-squares minimum |
+| | Logistic regression | `sigmoid(w1 x + w2 y + b)` with its decision boundary on the surface and in the floor |
+| | L1 vs L2 regularization | the L1 pyramid, with its corners on the axes, and the round L2 bowl |
+| | Gaussian | the 2D bump and the 1D density on the back wall, with a slider s |
+| Linear algebra | Span and linear combinations | `a u + b v` tip to tail inside `span(u, v)` |
+| | Transformation and eigenvectors | `transform(A, t)` with `eigen(A)` |
+| | The four fundamental subspaces | `subspaces(A)` of a rank-1 2×3 matrix |
+| | Gauss-Jordan elimination | `eliminate(A, b, k)` on a 3×3 system |
+| | SVD: sphere to ellipsoid | `svdview(A, t)` in three moves |
+| | Gram-Schmidt | `gramschmidt(u, v, w, k)` step by step |
+| | Least squares is a projection | `lstsq(A, b)` for a line through three points |
 
 </details>
 
@@ -693,9 +764,9 @@ epoch, the loss and a play button); the ? icon beside it says how to use it.
 
 - **Data:** XOR, circles, spiral, two blobs, moons (2 inputs → 1 class), three classes (2 → 3,
   one-hot), line and sine (1 → 1, regression), a flat 3-D cloud (3 → 3, for the PCA preset),
-  four token sequences, two datasets of three-word sentences for the attention presets and a
-  next-word dataset for the tiny language model (their **points**, **noise** and **seed** are under
-  Settings). A
+  four token sequences, two datasets of three-word sentences for the attention presets and two
+  next-word datasets, the tiny language model's and its first version's (their **points**,
+  **noise** and **seed** are under Settings). A
   preset picks the dataset that suits it (and, for the word presets, noise 0). If the net's
   inputs and outputs don't match the dataset, **Adapt network** resizes the input and output
   layers (hidden layers are kept; a token
@@ -777,14 +848,17 @@ The Attention presets add three things to the plain `z = W a + b` layers. The fu
   Reset keeps that recipe, since from a fully random start many runs settle on a wrong,
   swapped pattern. These two have no next-word task: with a squared-error loss on word vectors,
   the positions where the grammar allows several next words would need "don't care" targets.
-- **Next word.** **Next word: dog chases cats** does it the language-model way instead: the words
-  come in one-hot over a 7-word vocabulary (`.` and the six words it uses), and each position's
-  target is the next word, scored by a softmax over the vocabulary with cross-entropy, so a
-  position whose next word is open can spread its probability. The inputs are `. subject verb`
-  and the targets `subject verb object`; the verb agrees with its subject and the object is the
-  other animal in the other number (dog chases cats), so the last position must look back at the
-  subject. The first word is a guess (1/4 on each noun), so word accuracy tops out near 75%. The
-  Tiny language model preset trains on it; the [Flow view](#flow-view) shows it best.
+- **Next word.** **Next word: the cat sat on the mat** does it the language-model way instead:
+  the words come in one-hot over a 23-word vocabulary, and each position's target is the next
+  word, scored by a softmax over the vocabulary with cross-entropy, so a position whose next word
+  is open can spread its probability. The sentences are "the SUBJECT VERB PREPOSITION the OBJECT"
+  from a small grammar (20 of them, such as "the cat sat on the mat", "the dog ran to the park" and
+  "the bird flew over the tree"); the inputs are the first five words and the targets the last
+  five. The subject picks its verbs and, with the preposition, the object ("sat on the" ends in mat,
+  rug or branch), so the last position, which reads "the", must look back at the subject. The first
+  three words are guesses, so word accuracy tops out near 64%. The Tiny language model preset trains
+  on it; the [Flow view](#flow-view) shows it best. **Next word: dog chases cats**, three words
+  after a start token over 7 words, is the first version's dataset, kept for nets saved with it.
 
 </details>
 
@@ -962,7 +1036,7 @@ what its caption says, and the end puts all three back as they were.
 | Previous token by rotation (hand-set) (`causal_rot`) | 3×3 → 3×2 Q, K, V → 3×2 causal attention → 3×1 | Previous token, causal (3 tokens, c + position) | Hand-set causal attention. Positions come in as (cos θ, sin θ) and W_Q turns them back by 120°, so q_i points at k_(i−1) and token i copies c_(i−1). The loss starts near 0. |
 | Two heads: max and min (`multihead`) | 3×2 → 3×2 Q, K, V → 3×2 attention, 2 heads | Max and min of x₁ (3 tokens × 2) | heads = 2 splits Q, K and V by column: head 1 uses column 1 of each, head 2 column 2, and each head has its own A. Train: one head learns to find the largest x₁, the other the smallest. |
 | Transformer block (2 tokens) (`transformer`) | 2×2 → 2×2 Q, K, V → 2×2 attention → 2×2 → 2×4 ReLU → 2×2 | ReLU(own + max token) (2 tokens × 2) | One block, all weights tied: Z = softmax(QKᵀ/√2)V, H = X + ZW_O, Y = H + ReLU(HW₁)W₂, the + X and + H being fixed residual edges. No LayerNorm: with d = 2 it sends every token to (±1, ∓1). |
-| Tiny language model: next word (train it) (`tiny_lm`) | 3×7 → 3×4 → 3×4 Q, K, V → 3×4 causal attention, 2 heads → 3×4 → 3×16 ReLU → 3×4 → 3×7 Softmax | Next word: dog chases cats (3 positions × 7 words) | Words in, a softmax over 7 words out at each position: embedding + position, 2 causal heads, W_O, a ReLU FFN. Open Flow (G) and train: after dog chases, cats wins; the first word stays a 1-in-4 guess. |
+| Tiny language model: next word (train it) (`tiny_lm`) | 5×23 → 5×8 → 5×8 Q, K, V → 5×8 causal attention, 2 heads → 5×8 → 5×32 ReLU → 5×8 → 5×23 Softmax | Next word: the cat sat on the mat (5 positions × 23 words) | Five words in, a softmax over 23 words out at each position: embedding + position, 2 causal heads, W_O, a ReLU FFN. Open Flow (G) and train: after the cat sat on the, mat wins. |
 
 **Embeddings & autoencoders**
 
@@ -1073,7 +1147,7 @@ static/
   icons.js             the line icons every tab uses
   board/               the board's pure logic: geom.js (grouping, scratch-out, lasso), tex.js (tap-a-symbol, look-alikes, locks, replies)
   graph/               3D tab: lang.js, linalg.js, scene.js, grapher.js
-    features/          plots, transform, fields, combos, systems, dual, lecture, present, bridge, drag
+    features/          plots, transform, fields, combos, systems, dual, lecture, present, bridge, drag, presets
   nn/                  Net tab: model.js, store.js, nn.js, view.js, inspector.js, matrix.js, train.js,
                        lens.js, focus.js, attnviz.js, tour.js, view3d.js, surf3d.js, flow.js
   vendor/              KaTeX 0.16.47 and three.js r186, with their licenses
@@ -1088,7 +1162,7 @@ docs/
   NN_CONTRACT.md       interfaces between the Net tab modules
   NN_ATTENTION.md      tokens, shared weights and attention in the Net tab
   NN_LENS.md           the lens, the Attention panel, Explain and token names
-  NN_FLOW.md           the Flow view, the tiny language model and its next-word dataset
+  NN_FLOW.md           the Flow view, the tiny language model and its next-word datasets
   media/               the images in this README
 ```
 

@@ -31,6 +31,8 @@
   --nnv-dot: rgba(0, 0, 0, 0.06);
   --nnv-tok: rgba(0, 0, 0, 0.035);
 }
+/* view.js catching up after the Flow or 3D view covered the canvas: show that state at once */
+.nnv.nnv-snap { --dur-1: 0s; --dur-2: 0s; }
 .nnv.panning { cursor: grabbing; }
 .nnv.wiring, .nnv.wiring * { cursor: crosshair !important; }
 .nnv.dragging, .nnv.dragging * { cursor: grabbing !important; }

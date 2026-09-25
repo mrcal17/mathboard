@@ -24,13 +24,13 @@ describe('cleanFlow', () => {
   test('null and junk', () => {
     assert.equal(cleanFlow(null), null);
     assert.equal(cleanFlow('on'), null);
-    assert.deepEqual(cleanFlow({}), { stage: null, play: false, off: [], nums: true, hover: null });
-    assert.deepEqual(cleanFlow({ stage: -1, play: true, off: [1, 'x', 1, -2, 0.5], nums: 0, hover: { t: 3, i: 0, j: 0 } }),
-      { stage: null, play: false, off: [1], nums: true, hover: null });
+    assert.deepEqual(cleanFlow({}), { stage: null, play: false, off: [], nums: true, every: false, hover: null });
+    assert.deepEqual(cleanFlow({ stage: -1, play: true, off: [1, 'x', 1, -2, 0.5], nums: 0, every: 1, hover: { t: 3, i: 0, j: 0 } }),
+      { stage: null, play: false, off: [1], nums: true, every: false, hover: null });
   });
   test('good fields are kept; play needs a stage', () => {
-    assert.deepEqual(cleanFlow({ stage: 4, play: true, off: [2, 0], nums: false, hover: { t: 'a3.0', i: 2, j: 1, x: 9 } }),
-      { stage: 4, play: true, off: [0, 2], nums: false, hover: { t: 'a3.0', i: 2, j: 1 } });
+    assert.deepEqual(cleanFlow({ stage: 4, play: true, off: [2, 0], nums: false, every: true, hover: { t: 'a3.0', i: 2, j: 1, x: 9 } }),
+      { stage: 4, play: true, off: [0, 2], nums: false, every: true, hover: { t: 'a3.0', i: 2, j: 1 } });
     assert.equal(cleanFlow({ stage: null, play: true }).play, false);
   });
 });
@@ -109,22 +109,25 @@ describe('buildFlow', () => {
     const net = lm();
     assert.deepEqual(F.stages.map(s => s.layer), [0, 1, 2, 3, 3, 3, 3, 4, 4, 5, 6, 6, 7, 7].map(l => net.layers[l].id));
     const shape = id => [F.tiles[id].rows, F.tiles[id].cols];
-    assert.deepEqual(shape('in'), [3, 7]);
+    assert.deepEqual(shape('in'), [5, 23]);
     assert.ok(F.tiles.in.onehot);
-    assert.deepEqual(F.tiles.in.colLab, ['.', 'dog', 'cat', 'dogs', 'cats', 'chases', 'chase']);
-    for (const id of ['P1.0', 'B1', 'L1', 'L3', 'P4.0', 'L4', 'P6.0', 'L6']) assert.deepEqual(shape(id), [3, 4], id);
-    for (const id of ['q2.0', 'k2.0', 'v2.0', 'q2.1', 'k2.1', 'v2.1', 'z3.0', 'z3.1']) assert.deepEqual(shape(id), [3, 2], id);
-    for (const id of ['s3.0', 'a3.0', 's3.1', 'a3.1']) assert.deepEqual(shape(id), [3, 3], id);
-    assert.deepEqual(shape('L5'), [3, 16]);
-    assert.deepEqual(shape('G7'), [3, 7]);
-    assert.deepEqual(shape('L7'), [3, 7]);
-    assert.equal(F.tiles.L7.kind, 'bars');
-    assert.deepEqual(F.tiles['s3.0'].mask, [[false, true, true], [false, false, true], [false, false, false]], 'causal');
-    assert.deepEqual(F.words, ['.', 'dogs', 'chase'], 'the first sample of nl_next');
+    assert.deepEqual(F.tiles.in.colLab, net.meta.vocab);
+    for (const id of ['P1.0', 'B1', 'L1', 'L3', 'P4.0', 'L4', 'P6.0', 'L6']) assert.deepEqual(shape(id), [5, 8], id);
+    for (const id of ['q2.0', 'k2.0', 'v2.0', 'q2.1', 'k2.1', 'v2.1', 'z3.0', 'z3.1']) assert.deepEqual(shape(id), [5, 4], id);
+    for (const id of ['s3.0', 'a3.0', 's3.1', 'a3.1']) assert.deepEqual(shape(id), [5, 5], id);
+    assert.deepEqual(shape('L5'), [5, 32]);
+    // the ending: only the last position's logits and next-word distribution
+    assert.ok(F.lm && !F.every);
+    assert.deepEqual(shape('G7'), [1, 23]);
+    assert.deepEqual(shape('L7'), [1, 23]);
+    assert.equal(F.tiles.L7.kind, 'dist');
+    assert.deepEqual([F.tiles.G7.pos, F.tiles.L7.pos], [[4], [4]]);
+    assert.deepEqual(F.tiles['s3.0'].mask, [0, 1, 2, 3, 4].map(i => [0, 1, 2, 3, 4].map(j => j > i)), 'causal');
+    assert.deepEqual(F.words, ['the', 'cat', 'sat', 'on', 'the'], 'the headline sentence');
   });
 
   test('tiles hold the forward pass, and each sum adds up', () => {
-    const net = trained(lm()), f = M.forward(net), F = buildFlow(net, { fwd: f });
+    const net = trained(lm()), f = M.forward(net), F = buildFlow(net, { fwd: f, every: true });
     const R = l => M.reshape(net, l, f.a[l]);
     const T = id => F.tiles[id].v;
     assert.deepEqual(T('L1'), R(1).X);
@@ -141,7 +144,7 @@ describe('buildFlow', () => {
       assert.deepEqual(T(`q2.${h}`), f.attn[3].heads[h].Q);
     }
     const bias = (l, j) => M.nodesIn(net, l)[j].bias;
-    for (let t = 0; t < 3; t++) for (let j = 0; j < 4; j++) {
+    for (let t = 0; t < 5; t++) for (let j = 0; j < 8; j++) {
       near(T('P1.0')[t][j] + T('B1')[t][j], T('L1')[t][j], 1e-12, 'X = O W_E + P');
       near(T('L1')[t][j] + T('P4.0')[t][j] + bias(4, j), T('L4')[t][j], 1e-12, 'H = X + Z W_O + b_O');
       near(T('L4')[t][j] + T('P6.0')[t][j] + bias(6, j), T('L6')[t][j], 1e-12, 'Y = H + F W_2 + b_2');
@@ -150,13 +153,18 @@ describe('buildFlow', () => {
     const WE = M.tiedMatrices(net, 1).find(m => m.name === 'W_E').W, vocab = net.meta.vocab;
     F.words.forEach((w, t) => assert.deepEqual(T('P1.0')[t], WE[vocab.indexOf(w)]));
     // the prediction: the last position's most likely word
-    const p = T('L7')[2], k = p.indexOf(Math.max(...p));
-    assert.deepEqual(F.next, { word: vocab[k], p: p[k], target: 'cat', t: 2 });
+    const p = T('L7')[4], k = p.indexOf(Math.max(...p));
+    assert.deepEqual(F.next, { word: vocab[k], p: p[k], target: 'mat', t: 4 });
+    // the default ending holds the same numbers, for the last position alone
+    const L = buildFlow(net, { fwd: f });
+    assert.deepEqual(L.tiles.L7.v, [T('L7')[4]]);
+    assert.deepEqual(L.tiles.G7.v, [T('G7')[4]]);
+    assert.deepEqual(L.next, F.next);
   });
 
   test('every neuron is drawn once, where its value is; every source is a cell that exists', () => {
     for (const k of Object.keys(M.PRESETS)) {
-      const net = M.PRESETS[k].build(1), f = M.forward(net), F = buildFlow(net, { fwd: f });
+      const net = M.PRESETS[k].build(1), f = M.forward(net), F = buildFlow(net, { fwd: f, every: true });
       for (const n of net.nodes) {
         const c = F.nodeCell[n.id];
         assert.ok(c, `${k}: ${n.id} is drawn`);
@@ -177,34 +185,95 @@ describe('buildFlow', () => {
   test('sources trace one step back', () => {
     const F = buildFlow(lm()), src = (id, i, j) => F.tiles[id].src(i, j).map(c => c.join(':')).sort();
     // a score: the query row and the key row of its head
-    assert.deepEqual(src('s3.1', 2, 1), ['k2.1:1:0', 'k2.1:1:1', 'q2.1:2:0', 'q2.1:2:1']);
+    const row = (id, i, n) => Array.from({ length: n }, (_, j) => `${id}:${i}:${j}`);
+    assert.deepEqual(src('s3.1', 2, 1), [...row('k2.1', 1, 4), ...row('q2.1', 2, 4)]);
     assert.deepEqual(src('s3.0', 0, 2), [], 'a masked score has no sources');
     // a weight: the scores it may see; a mix: its row of A and the value column
     assert.deepEqual(src('a3.0', 1, 0), ['s3.0:1:0', 's3.0:1:1']);
     assert.deepEqual(src('z3.0', 1, 1), ['a3.0:1:0', 'a3.0:1:1', 'v2.0:0:1', 'v2.0:1:1']);
     // concat: the head's cell; the residual sum: its three parts
-    assert.deepEqual(src('L3', 2, 3), ['z3.1:2:1']);
+    assert.deepEqual(src('L3', 2, 5), ['z3.1:2:1']);
     assert.deepEqual(src('L4', 0, 2), ['L1:0:2', 'P4.0:0:2']);
     assert.deepEqual(src('L1', 1, 3), ['B1:1:3', 'P1.0:1:3']);
-    // the FFN and the logits read the whole row of the layer before
-    assert.deepEqual(src('L5', 2, 7), ['L4:2:0', 'L4:2:1', 'L4:2:2', 'L4:2:3']);
-    assert.deepEqual(src('L7', 0, 4), ['G7:0:0', 'G7:0:1', 'G7:0:2', 'G7:0:3', 'G7:0:4', 'G7:0:5', 'G7:0:6']);
+    // the FFN and the logits read the whole row of the layer before; the last position's logits its row of Y
+    assert.deepEqual(src('L5', 2, 7), row('L4', 2, 8));
+    assert.deepEqual(src('G7', 0, 3), row('L6', 4, 8));
+    assert.deepEqual(src('L7', 0, 4), row('G7', 0, 23).sort());
   });
 
   test('a head knocked out: its tiles are marked, its concat columns are 0, the rest follows', () => {
     const net = trained(lm()), F0 = buildFlow(net), F = buildFlow(net, { off: [0] });
     assert.ok(F.tiles['z3.0'].off && F.tiles['s3.0'].off && !F.tiles['z3.1'].off);
-    assert.deepEqual(F.tiles.L3.offCols, [true, true, false, false]);
+    assert.deepEqual(F.tiles.L3.offCols, [true, true, true, true, false, false, false, false]);
     assert.ok(F.tiles.L3.v.every(row => row[0] === 0 && row[1] === 0));
     assert.notDeepEqual(F.tiles.L7.v, F0.tiles.L7.v);
     assert.notEqual(flowKey(F), flowKey(F0), 'the view rebuilds');
     assert.match(F.stages.find(s => s.key === 'concat3').text, /Heads 1 knocked out/);
   });
 
+  test('the ending: only the last position by default, every position when asked', () => {
+    const net = trained(lm()), f = M.forward(net), F = buildFlow(net, { fwd: f }), E = buildFlow(net, { fwd: f, every: true });
+    const nodes = M.nodesIn(net, 7), V = 23;
+    // by default only position 5's outputs are drawn, in the chart; every position draws them all
+    nodes.forEach((n, k) => {
+      if (Math.floor(k / V) === 4) assert.deepEqual(F.nodeCell[n.id], ['L7', 0, k % V]);
+      else assert.equal(F.nodeCell[n.id], undefined, 'an earlier position is not drawn');
+      assert.deepEqual(E.nodeCell[n.id], ['L7', Math.floor(k / V), k % V]);
+    });
+    // only Y's last row goes on: the other rows fade
+    assert.deepEqual(F.tiles.L6.dimRows, [0, 1, 2, 3]);
+    assert.equal(E.tiles.L6.dimRows, null);
+    // the chart: its context, the true next word and no note; every position: a row each, with the note
+    assert.deepEqual(F.tiles.L7.rowLab, ['the cat sat on the']);
+    assert.deepEqual(F.tiles.L7.target, [net.meta.vocab.indexOf('mat')]);
+    assert.equal(F.tiles.L7.note, null);
+    assert.deepEqual(E.tiles.L7.rowLab, ['the', 'the cat', 'the cat sat', 'the cat sat on', 'the cat sat on the']);
+    assert.deepEqual(E.tiles.L7.target, ['cat', 'sat', 'on', 'the', 'mat'].map(w => net.meta.vocab.indexOf(w)));
+    assert.match(E.tiles.L7.note, /Training scores every position .* generating reads only the last/);
+    const probs = X => X.stages.find(s => s.key === 'probs7');
+    assert.deepEqual([probs(F).title, probs(F).mode, probs(E).title], ['Next word', true, 'Next word, every position']);
+    assert.equal(F.stages.find(s => s.key === 'logits7').tex, '\\ell_{5} = y_{5}\\,W_U + b_U');
+    // the tip names the word, its context and the true next word
+    const tip = F.tiles.L7.tip(0, net.meta.vocab.indexOf('mat'));
+    assert.match(tip, /p\(mat \| the cat sat on the\)/);
+    assert.match(tip, /the true next word/);
+  });
+
+  test('the order is on every matrix: rows named by position and word, keys by position', () => {
+    const net = lm(), F = buildFlow(net), words = ['the', 'cat', 'sat', 'on', 'the'];
+    assert.ok(F.numbered);
+    for (const s of F.stages) for (const r of s.rows) {
+      const t = F.tiles[r.tiles[0]];
+      if (t.kind !== 'mat') continue;
+      const pos = t.pos || [0, 1, 2, 3, 4];
+      assert.deepEqual(t.rowLab, pos.map(p => words[p]), `${t.id}: its rows by word`);
+      assert.deepEqual(t.rowNo, pos.map(p => p + 1), `${t.id}: and by position`);
+    }
+    assert.deepEqual(F.tiles['s3.0'].colLab, ['1', '2', '3', '4', '5'], 'the keys by position');
+    assert.deepEqual(F.tiles['a3.1'].colLab, ['1', '2', '3', '4', '5']);
+    assert.match(F.tiles['s3.0'].tip(1, 3), /2 “cat” can't see the later 4 “on”/);
+  });
+
+  test('the widths: d_model for the residual stream, 4 d_model for the FFN, the vocabulary for the words', () => {
+    const F = buildFlow(lm());
+    assert.deepEqual(F.dims, { model: 8, ffn: 32, vocab: 23 });
+    const kind = id => F.tiles[id].dim?.kind ?? null;
+    for (const id of ['L1', 'P4.0', 'L4', 'P6.0', 'L6']) assert.equal(kind(id), 'model', id);
+    assert.equal(kind('L5'), 'ffn');
+    for (const id of ['in', 'G7', 'L7']) assert.equal(kind(id), 'vocab', id);
+    for (const id of ['q2.0', 's3.0', 'a3.0', 'z3.1', 'B1']) assert.equal(kind(id), null, id);
+    assert.equal(F.tiles.L1.dim.html, 'd<sub>model</sub> = 8');
+    assert.equal(F.tiles.L5.dim.html, '4 d<sub>model</sub> = 32');
+    assert.deepEqual(F.residual.map(r => [r.sym, r.from, r.branch]), [['H', ['X'], ['attention']], ['Y', ['H'], ['FFN']]]);
+    assert.match(F.dimsText, /Residual additions \(X \+ attention, H \+ FFN\) .* residual stream X, H and Y keeps one width/);
+    assert.match(F.dimsText, /FFN widens to 32 .* one column per word, 23/);
+  });
+
   test('the structure key ignores new values', () => {
     const net = lm(), k0 = flowKey(buildFlow(net));
     trained(net, 20);
     assert.equal(flowKey(buildFlow(net)), k0);
+    assert.notEqual(flowKey(buildFlow(net, { every: true })), k0, 'every position rebuilds the ending');
   });
 
   test('a net without attention: one stage per layer, and a note', () => {
@@ -220,6 +289,13 @@ describe('buildFlow', () => {
     assert.deepEqual(F.stages.map(s => s.key), ['in', 'qkv1', 'scores2', 'softmax2', 'mix2', 'proj3', 'sum3', 'layer4', 'proj5', 'sum5']);
     assert.equal(F.stages.find(s => s.key === 'sum3').tex, 'H = X + Z\\,W_O + b_O');
     assert.equal(F.stages.find(s => s.key === 'layer4').title, 'FFN');
+    // not a language model, so its ending is every position as before; rows by token, widths d_model 2, FFN 4
+    assert.ok(!F.lm);
+    assert.deepEqual(F.tiles.in.rowLab, ['t1', 't2']);
+    assert.equal(F.tiles.in.rowNo, null);
+    assert.deepEqual(F.dims, { model: 2, ffn: 4, vocab: null });
+    assert.deepEqual(['in', 'L3', 'L4', 'L5'].map(id => F.tiles[id].dim?.kind), ['model', 'model', 'ffn', 'model']);
+    assert.equal(F.tiles.L4.dim.html, 'd<sub>ff</sub> = 4');
   });
 });
 

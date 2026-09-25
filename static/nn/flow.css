@@ -25,14 +25,30 @@
   font-size: var(--fs-xl, 16px); font-weight: var(--fw-strong, 600); color: var(--text-1, var(--fg)); cursor: default;
 }
 .nnf-w.tok { box-shadow: inset 0 0 0 1.5px var(--hi, #ffd54a); }
+/* a position's number: in the sentence's chips and before every matrix row's word */
+.nnf-pn {
+  display: inline-grid; place-items: center; min-width: 15px; height: 15px; margin-right: 5px; padding: 0 3px; box-sizing: border-box;
+  border-radius: var(--r-pill, 999px); box-shadow: inset 0 0 0 1px var(--line-3, rgba(127, 127, 127, 0.4));
+  font-size: 10px; font-weight: var(--fw-strong, 600); line-height: 1; color: var(--text-3, var(--ui-muted));
+  font-variant-numeric: tabular-nums; vertical-align: 2px;
+}
 .nnf-to { font-size: var(--fs-xl, 16px); color: var(--text-3, var(--ui-muted)); margin: 0 2px; }
 .nnf-next {
   display: inline-flex; align-items: baseline; gap: 6px; padding: 3px 10px; border-radius: var(--r-sm, 6px);
   font-size: var(--fs-2xl, 20px); font-weight: 650; color: var(--text-1, var(--fg));
   background: color-mix(in srgb, var(--pos, #4aa3ff) 18%, transparent);
 }
+.nnf-next .nnf-pn { align-self: center; margin-right: 0; }
+.nnf-next.q { background: none; box-shadow: inset 0 0 0 1.5px var(--line-3, rgba(127, 127, 127, 0.4)); color: var(--text-3, var(--ui-muted)); }   /* not computed yet */
 .nnf-next small { font-size: var(--fs-md, 13px); font-weight: var(--fw-medium, 500); color: var(--text-2, var(--fg)); font-variant-numeric: tabular-nums; }
 .nnf-tgt { font-size: var(--fs-sm, 12px); color: var(--text-3, var(--ui-muted)); }
+/* the widths: why the residual stream keeps d_model columns */
+.nnf-dims {
+  max-width: 1100px; margin: calc(-1 * var(--sp-8, 8px)) auto var(--sp-16, 16px); text-align: center;
+  font-size: var(--fs-sm, 12px); line-height: var(--lh, 1.4); color: var(--text-3, var(--ui-muted));
+}
+.nnf-dims[hidden] { display: none; }
+.nnf-dims sub, .nnf-dim sub { font-size: 0.8em; line-height: 0; }
 .nnf-offn {
   font-size: var(--fs-sm, 12px); color: var(--text-2, var(--fg)); padding: 2px 8px; border-radius: var(--r-pill, 999px);
   background: var(--well, rgba(127, 127, 127, 0.12));
@@ -104,33 +120,68 @@
   background: repeating-linear-gradient(135deg, transparent 0 3px, var(--line-2, rgba(127, 127, 127, 0.3)) 3px 4px) !important;
   color: var(--text-4, var(--ui-muted));
 }
+.nn-flow.cmp { --nnf-cell: 18px; }   /* narrow square cells, with short numbers (.12), 1 px apart as a heatmap */
+.nn-flow.cmp .nnf-c { font-size: 9px; letter-spacing: -0.3px; border-radius: 3px; }
+.nn-flow.cmp .nnf-g, .nn-flow.cmp .nnf-bg { gap: 1px; }
+.nn-flow.cmp .nnf-st { padding: 4px 6px 6px; }
+.nn-flow.cmp .nnf-arrow, .nn-flow.cmp .nnf-arrow svg { width: 12px; }
+.nnf-c.dimr { opacity: 0.35; }   /* rows the next stage does not read (only the last position goes on) */
 .nnf-ch { font-size: 10.5px; line-height: 1.1; color: var(--text-3, var(--ui-muted)); text-align: center; white-space: nowrap; overflow: hidden; }
 .nnf-ch.vert { writing-mode: vertical-rl; transform: rotate(180deg); justify-self: center; align-self: end; max-height: 48px; text-align: left; padding: 0 0 2px; }
+.nnf-ch.vert.bot { align-self: start; max-height: 60px; text-align: right; padding: 3px 0 0; }   /* under the bars, read upwards */
+.nnf-ch.top { color: var(--text-1, var(--fg)); font-weight: var(--fw-strong, 600); }
+.nnf-ch.tgt { color: var(--hi-text, #ffd54a); font-weight: var(--fw-strong, 600); }
 .nnf-ch.hc { height: 3px; border-radius: 2px; background: var(--hc); align-self: end; }
 .nnf-rh {
   max-width: 76px; padding-right: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: var(--fs-xs, 11px); line-height: var(--nnf-cell); color: var(--text-3, var(--ui-muted)); text-align: right;
 }
-.nnf-rh.bar { max-width: 104px; padding-right: 6px; line-height: 1.2; color: var(--text-2, var(--fg)); }
+.nnf-rh:not(.bar) { display: flex; align-items: center; justify-content: flex-end; }
+.nnf-rh .nnf-pn { min-width: 13px; height: 13px; margin-right: 4px; font-size: 9px; vertical-align: 0; }
+.nnf-rh.dimr { opacity: 0.5; }
+.nnf-rh.bar { max-width: 150px; padding-right: 8px; font-size: var(--fs-xs, 11px); line-height: 1.15; color: var(--text-2, var(--fg)); }
 .nnf-rh.bar small { display: block; font-size: 10px; color: var(--text-3, var(--ui-muted)); }
+.nnf-ctxw { display: block; overflow: hidden; text-overflow: ellipsis; }
+.nnf-pred { display: block; color: var(--text-2, var(--fg)); font-variant-numeric: tabular-nums; }
+.nnf-pred b { color: var(--text-1, var(--fg)); font-weight: var(--fw-strong, 600); }
 
-/* the next-word softmax: a bar per word, at each position */
+/* a tile's width, as a bracket under it: d_model for the residual stream, the FFN's, the vocabulary's */
+.nnf-dim { position: relative; height: 13px; margin-top: 2px; border-top: 1px solid var(--line-3, rgba(127, 127, 127, 0.4)); text-align: center; white-space: nowrap; }
+.nnf-dim::before, .nnf-dim::after { content: ''; position: absolute; top: -5px; width: 1px; height: 5px; background: var(--line-3, rgba(127, 127, 127, 0.4)); }
+.nnf-dim::before { left: 0; }
+.nnf-dim::after { right: 0; }
+.nnf-dim span { font-size: 10.5px; line-height: 12px; color: var(--text-3, var(--ui-muted)); }
+.nnf-dim.model { border-top-color: var(--text-3, var(--ui-muted)); }   /* the residual stream: one width throughout */
+.nnf-dim.model::before, .nnf-dim.model::after { background: var(--text-3, var(--ui-muted)); }
+.nnf-dim.model span { color: var(--text-2, var(--fg)); }
+.nnf-note { width: 0; min-width: 100%; margin-top: 4px; white-space: normal; font-size: var(--fs-sm, 12px); line-height: var(--lh, 1.4); color: var(--text-2, var(--fg)); }
+
+/* the next word: a bar per word; one position's chart (dist), or a row per position (bars) */
 .nnf-b {
-  position: relative; display: flex; align-items: flex-end; height: 44px; border-radius: var(--r-xs, 4px);
+  position: relative; display: flex; flex-direction: column; justify-content: flex-end; height: 40px; border-radius: var(--r-xs, 4px);
   background: var(--well, rgba(127, 127, 127, 0.12)); overflow: hidden; cursor: default;
 }
+.nnf-bg.dist .nnf-b { height: 84px; border-radius: 0; background: none; box-shadow: inset 0 -1px 0 var(--line-2, rgba(127, 127, 127, 0.3)); }
+.nnf-bg.dist .nnf-ch { font-size: var(--fs-xs, 11px); }
 .nnf-b i {
-  display: block; width: 100%; height: 0; border-radius: 3px 3px 0 0;
+  display: block; flex: none; width: 100%; height: calc(var(--p, 0) * (100% - 14px)); border-radius: 3px 3px 0 0;
   background: color-mix(in srgb, var(--pos, #4aa3ff) 42%, transparent);
   transition: height var(--dur-2, 160ms) var(--ease, ease);
 }
 .nnf-b.top i { background: color-mix(in srgb, var(--pos, #4aa3ff) 72%, transparent); }   /* the cells' alpha cap: the digits stay --text-1 */
 .nnf-b span {
-  position: absolute; left: 0; right: 0; top: 3px; text-align: center; pointer-events: none;
-  font: var(--fw-medium, 500) 11px/1 var(--font-ui, system-ui, sans-serif); font-variant-numeric: tabular-nums; color: var(--text-2, var(--fg));
+  flex: none; height: 14px; text-align: center; pointer-events: none; white-space: nowrap;
+  font: var(--fw-medium, 500) 10.5px/14px var(--font-ui, system-ui, sans-serif); font-variant-numeric: tabular-nums; color: var(--text-2, var(--fg));
 }
 .nnf-b.top span { color: var(--text-1, var(--fg)); font-weight: var(--fw-strong, 600); }
-.nnf-b.tgt { box-shadow: inset 0 0 0 1.5px var(--hi, #ffd54a); }
+.nnf-b.tgt, .nnf-bg.dist .nnf-b.tgt { box-shadow: inset 0 0 0 1.5px var(--hi, #ffd54a); }
+.nnf-ctx { font-size: var(--fs-sm, 12px); color: var(--text-2, var(--fg)); }
+.nnf-key { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; font-size: var(--fs-xs, 11px); color: var(--text-3, var(--ui-muted)); }
+.nnf-key i { display: inline-block; width: 9px; height: 9px; margin-left: 6px; border-radius: 2px; }
+.nnf-key i.k-top { background: color-mix(in srgb, var(--pos, #4aa3ff) 72%, transparent); }
+.nnf-key i.k-tgt { box-shadow: inset 0 0 0 1.5px var(--hi, #ffd54a); }
+.nnf-mode { align-self: flex-start; }
+.nnf-mode > button { padding: 0 9px; white-space: nowrap; }
 
 /* ---------------------------------------------------------------- trace, token rows, selection */
 .nn-flow.tracing .nnf-c:not(.hov):not(.src), .nn-flow.tracing .nnf-b:not(.hov):not(.src) { opacity: 0.32; }

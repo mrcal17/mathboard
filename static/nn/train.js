@@ -2,6 +2,10 @@
 //
 // Settings live in net.meta.train. While playing, each animation frame runs up to `speed`
 // model.trainStep calls inside a small time budget, then one store.touch(); pausing commits once.
+// A tick's full redraw (the loss over the whole dataset, the readout, the chart and the plot) is
+// spaced so it takes at most FULL_SHARE of the time: a big net's frames go to training, a small
+// net's still redraw every frame. Pause, a step and any other change redraw at once and exactly.
+// The audience window spaces the presenter's nets the same way and always draws the last one.
 // Plots: the input space (decision boundary for 2-input nets, fitted curve for 1-input nets),
 // a hidden 2-neuron layer's activation space, and per-neuron heatmaps drawn into the nodes
 // through ctx.view.setNodeImage (throttled).
@@ -26,6 +30,8 @@ const CURVE = 120;        // samples along a 1-D input
 const LINES = 9;          // input grid lines carried into layer space (per direction)
 const MAP_MS = 150;       // per-neuron heatmap throttle
 const BUDGET_MS = 7;      // training time per frame
+const FULL_SHARE = 0.2;   // while playing, the share of the time a training tick's full redraw may take
+const FRAME_MS = 1000 / 60;
 const HIST_MAX = 400;
 const EXTRA = ['#3ec27a', '#b07cff', '#ff6fa8', '#2ec4c4', '#c9a227'];   // classes 3+ (0/1 use NEG/POS)
 const BOUNDED = { sigmoid: [0, 1], softmax: [0, 1], tanh: [-1, 1] };
@@ -111,11 +117,12 @@ export function readSettings(net, model) {
 // Activations of every layer for n inputs at once, straight from model.matrices (the heatmaps
 // need thousands of forward passes per frame). X is row-major n x size(layer `from`).
 // Returns acts[l] (Float64Array n x size_l, null below `from`), or null when a skip edge
-// bypasses layer `from` (then later layers are not a function of it alone).
-export function forwardMany(net, model, X, n, from = 0, M = model.matrices(net)) {
+// bypasses layer `from` (then later layers are not a function of it alone). outOnly: the caller
+// reads only the output layer (a loss); a net with attention then leaves the hidden layers null.
+export function forwardMany(net, model, X, n, from = 0, M = model.matrices(net), outOnly = false) {
   // Attention multiplies activations together, which the matrices can't express: the model's own
   // forward pass then does every sample (only from the inputs).
-  if (M.some(m => m.kind === 'attention')) return from === 0 ? predictMany(net, model, X, n) : null;
+  if (M.some(m => m.kind === 'attention')) return from === 0 ? predictMany(net, model, X, n, outOnly) : null;
   const L = net.layers.length;
   const sizes = [], pos = Object.create(null);
   for (let l = 0; l < L; l++) {
@@ -176,11 +183,25 @@ function softmaxBlock(ly, R) {
   return k > 1 && R % k === 0 ? R / k : R;
 }
 
-// forwardMany through model.predict: acts[l] = Float64Array n x size_l, acts[0] = X.
-function predictMany(net, model, X, n) {
+// forwardMany through model.predict: acts[l] = Float64Array n x size_l, acts[0] = X. outOnly: only
+// the output layer (the same numbers, without copying every hidden layer out of every sample).
+function predictMany(net, model, X, n, outOnly = false) {
   const sizes = net.layers.map((_, l) => model.nodesIn(net, l).length), d0 = sizes[0];
   const rows = new Array(n);
   for (let s = 0; s < n; s++) rows[s] = X.subarray ? X.subarray(s * d0, (s + 1) * d0) : X.slice(s * d0, (s + 1) * d0);
+  if (outOnly) {
+    const L = sizes.length, K = sizes[L - 1], out = new Float64Array(n * K);
+    const per = model.predict(net, rows);
+    for (let s = 0; s < n; s++) {
+      const a = per[s];
+      if (!a) return null;
+      for (let i = 0; i < K; i++) out[s * K + i] = a[i];
+    }
+    const acts = new Array(L).fill(null);
+    acts[0] = X;
+    acts[L - 1] = out;
+    return acts;
+  }
   const per = model.predict(net, rows, { layer: 'all' });
   const acts = sizes.map(sz => new Float64Array(n * sz));
   for (let s = 0; s < n; s++) {
@@ -423,6 +444,7 @@ function resizeLayer(net, model, l, size, rand) {
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const round4 = v => +v.toPrecision(4);
+const median = a => { const s = [...a].sort((x, y) => x - y), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
 const fmtLoss = v => (Number.isNaN(v) ? 'NaN' : !Number.isFinite(v) ? '∞' : v === 0 ? '0' : v < 0.001 ? v.toExponential(2) : v.toFixed(4));
 // A line icon from static/icons.js (docs/DESIGN.md, Icons), else the glyph it replaced.
 const icon = (name, alt = '') => globalThis.mathboardIcons?.svg(name) || alt;
@@ -572,6 +594,8 @@ export function install(ctx) {
 
   let running = false, trained = false, inTick = false;
   let raf = 0, dirty = true, mapsDirty = true, lastMaps = -1e9, mapTimer = 0;
+  let tickDirty = false, nextFull = 0, tailT = 0;   // a training tick's values, redrawn when performance.now() >= nextFull
+  const fullCosts = [];   // the last full redraws' durations, ms
   let data = null, order = null, P = null, lastEval = null;
   let pts = null, spaceSig = null, axesKey = '', lsBox = null, chartKey = '';
   const mapUrls = new Map();
@@ -697,7 +721,7 @@ export function install(ctx) {
   // Loss (and accuracy for classification) over the whole dataset at the current weights.
   function evaluate(net, d, A) {
     const L = net.layers.length;
-    const acts = A || forwardMany(net, model, d.Xf, d.n);
+    const acts = A || forwardMany(net, model, d.Xf, d.n, 0, undefined, true);
     const out = acts && acts[L - 1];
     if (!out) return null;
     const lastL = net.layers[L - 1];
@@ -1088,7 +1112,10 @@ export function install(ctx) {
     if (payload && payload.structural) { mapUrls.clear(); lsBox = null; }
     if (!inTick) syncControls();
   });
-  store.on('values', () => { dirty = true; mapsDirty = true; kick(); });
+  // A training tick's values wait for render's time share; anything else redraws at once. In the
+  // audience window every net comes from the presenter's posts (many a second while it trains): they
+  // wait too, with a trailing redraw (render), so the last one always shows.
+  store.on('values', () => { if (inTick || ro) tickDirty = true; else dirty = true; mapsDirty = true; kick(); });
   ctx.onTheme?.(() => { P = null; mapUrls.clear(); dirty = true; mapsDirty = true; kick(); });
   ctx.onShow?.(v => { if (v) { dirty = true; mapsDirty = true; kick(); fitSum(); } });
   const sizer = new ResizeObserver(() => {
@@ -1110,38 +1137,61 @@ export function install(ctx) {
     raf = 0;
     const ticking = running;
     if (running) { trainFrame(); if (running) kick(); }
-    if (dirty || mapsDirty) render();
+    if (dirty || tickDirty || mapsDirty) render();
     if (ticking && running) emitTrain();   // after render, so it carries this frame's loss
   }
 
   function render() {
     if (!shown()) return;
+    // While playing, a tick's full redraw waits until the last one has had its FULL_SHARE of the time
+    // since, and a closed panel skips it. Pause and step commit (dirty), which redraws at once.
+    const busy = running || ro;
+    const full = dirty || (tickDirty && (!busy || (ui.open && performance.now() >= nextFull)));
+    if (!full && tickDirty && ro && ui.open && !tailT) {
+      tailT = setTimeout(() => { tailT = 0; kick(); }, Math.max(0, nextFull - performance.now()) + 1);
+    }
+    if (!full && !mapsDirty) return;
     const net = store.net, t = readSettings(net, model), sh = netShape(net, model);
     const ds = model.DATASETS[t.dataset];
     const d = ds ? getData(t) : null;
     const inOk = !!d && ds.inputs === sh.inputs && sh.outputs > 0;
     const ok = inOk && ds.outputs === sh.outputs;
-    let M = null;
-    if (inOk) try { M = model.matrices(net); } catch (err) { console.warn('[nn/train] matrices:', err); }
-    const A = M ? forwardMany(net, model, d.Xf, d.n, 0, M) : null;
+    let M;
+    const mats = () => {
+      if (M === undefined) {
+        M = null;
+        if (inOk) try { M = model.matrices(net); } catch (err) { console.warn('[nn/train] matrices:', err); }
+      }
+      return M;
+    };
     let gridActs;
     const grid = () => (gridActs !== undefined ? gridActs
-      : (gridActs = M && d.grid ? forwardMany(net, model, d.grid, GRID * GRID, 0, M) : null));
-    if (dirty) {
-      dirty = false;
+      : (gridActs = mats() && d.grid ? forwardMany(net, model, d.grid, GRID * GRID, 0, M) : null));
+    if (full) {
+      dirty = tickDirty = false;
+      const t0 = performance.now();
+      // the whole dataset (a sequence plot shows the live sample, so the loss only needs the outputs)
+      const A = mats() ? forwardMany(net, model, d.Xf, d.n, 0, M, d.kind === 'seq') : null;
       lastEval = ok && A ? evaluate(net, d, A) : null;
       status(net, t, sh, ds, d, ok);
       if (ui.open && !ui.fold) {
         drawChart(t);
         drawPlot(net, t, d, sh, M, A, ok, inOk, grid);
       }
+      // the gap its cost earns (the median of the last few: a GC pause is not the net's cost); one
+      // under a frame's leaves every frame redrawn, as before
+      const t1 = performance.now();
+      fullCosts.push(t1 - t0);
+      if (fullCosts.length > 8) fullCosts.shift();
+      const gap = median(fullCosts) * (1 / FULL_SHARE - 1);
+      nextFull = gap > FRAME_MS ? t1 + gap : 0;
     }
     if (mapsDirty) {
       const now = performance.now(), wait = MAP_MS - (now - lastMaps);
       if (wait <= 0) {
         mapsDirty = false;
         lastMaps = now;
-        drawMaps(net, t, d, inOk && M ? M : null, grid);
+        drawMaps(net, t, d, inOk ? mats() : null, grid);
       } else if (!mapTimer) {
         mapTimer = setTimeout(() => { mapTimer = 0; kick(); }, wait + 1);
       }

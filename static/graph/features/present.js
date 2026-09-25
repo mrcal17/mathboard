@@ -133,7 +133,8 @@ function tex(n, c) {
         const { base, sub } = nameParts(n.a.name);
         return { s: `${baseLatex(base)}_{${sub ? `${subLatex(sub)},` : ''}${xyz}}`, l: ATOM };
       }
-      return { s: `${paren(tex(n.a, c).s)}_{${xyz}}`, l: ATOM };
+      const a = tex(n.a, c); // softmax(z).x -> softmax(z)_x, a call already has its brackets
+      return { s: `${n.a.t === 'call' && a.l === ATOM && /\)$/.test(a.s) ? a.s : paren(a.s)}_{${xyz}}`, l: ATOM };
     }
     case 'bin': return binTex(n, c);
     case 'call': return callTex(n, c);
@@ -169,8 +170,10 @@ function binTex(n, c) {
   } else {
     sep = { '*': ' \\cdot ', '·': ' \\cdot ', '×': ' \\times ', '/': ' / ' }[op];
   }
+  const left = wrapA ? paren(a.s) : a.s, right = wrapB ? paren(b.s) : b.s;
+  if (!sep && /\\[A-Za-z]+$/.test(left) && /^[A-Za-z]/.test(right)) sep = ' '; // eta a -> \eta a, not \etaa
   return {
-    s: `${wrapA ? paren(a.s) : a.s}${sep}${wrapB ? paren(b.s) : b.s}`,
+    s: `${left}${sep}${right}`,
     l: PROD, imp: !!n.implicit, lead: wrapA ? null : a.lead, wl: !wrapA && a.wl, wr: !wrapB && b.wr,
   };
 }
@@ -227,12 +230,13 @@ function context(opts = {}, self = null) {
 export function exprLatex(node, opts = {}) { return tex(node, context(opts)).s; }
 
 // LaTeX for one editor line: { tex, at, note } (at = origin after @, note = trailing comment),
-// or null for blank lines and parse errors (those rows stay raw).
+// or null for blank lines and parse errors (those rows stay raw). opts.fns: the names defined as
+// f(x) = ... on other rows, so f(2) and f' parse as the evaluator reads them.
 export function rowLatex(src, opts = {}) {
   const text = String(src ?? '');
   const ci = text.search(/#|\/\//);
   const note = ci < 0 ? '' : text.slice(ci).replace(/^(?:#|\/\/)\s*/, '').trim();
-  const st = parseLine(text);
+  const st = parseLine(text, opts.fns);
   if (!st) return note ? { tex: '', at: '', note } : null;
   if (st.error) return null;
   const c = context(opts, st.name);
@@ -240,7 +244,16 @@ export function rowLatex(src, opts = {}) {
   let lhs = '';
   if (st.params) lhs = `${nameLatex(st.name, false)}${paren(st.params.map(q => nameLatex(q, false)).join(', '))} = `; // f(x) = ...
   else if (st.name) lhs = `${nameLatex(st.name, (c.kinds.get(st.name) ?? inferKind(st.body, c)) === 'vec')} = `;
-  return { tex: lhs + tex(st.body, c).s, at: st.at ? tex(st.at, { ...c, inline: true }).s : '', note };
+  return { tex: lhs + tex(st.body, c).s + whereLatex(st.where, c), at: st.at ? tex(st.at, { ...c, inline: true }).s : '', note };
+}
+
+// A restriction, {0 < x <= 1}, after the expression as Desmos writes it.
+const REL_TEX = { '<': '<', '>': '>', '<=': '\\le', '>=': '\\ge' };
+function whereLatex(where, c) {
+  if (!where?.length) return '';
+  const ic = { ...c, inline: true };
+  const conds = where.map(({ items, ops }) => items.map((n, i) => (i ? ` ${REL_TEX[ops[i - 1]]} ` : '') + tex(n, ic).s).join(''));
+  return `\\ \\{${conds.join(',\\ ')}\\}`;
 }
 
 // ================================================================ label compositing
@@ -503,17 +516,20 @@ const MIMES = ['video/mp4;codecs=avc1.640028', 'video/mp4;codecs=avc1', 'video/m
 const CSS = `
 .pp-tex { display: none; }
 #g-panel.pp-on .g-row.pp-ok:not(.pp-edit) .pp-tex {
-  display: block; min-height: 30px; padding: 4px 2px; cursor: text;
-  font-size: 17px; line-height: 1.3; white-space: nowrap; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin;
+  display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 0.6em;
+  min-height: 30px; padding: 4px 2px; cursor: text;
+  font-size: 17px; line-height: 1.3; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin;
 }
+/* a comment that doesn't fit beside the maths wraps onto its own line under it */
+.pp-math, .pp-at { flex: none; white-space: nowrap; }
+.pp-math:empty { display: none; }
 #g-panel.pp-on .g-row.pp-ok:not(.pp-edit) .g-src {
   position: absolute; width: 1px; height: 1px; padding: 0; opacity: 0; pointer-events: none;
 }
 .pp-tex .katex { font-size: 1.08em; }
-.pp-at { margin-left: 0.7em; color: var(--text-3); font-size: 0.72em; }
+.pp-at { color: var(--text-3); font-size: 0.72em; }
 .pp-at .katex { font-size: 1.15em; }
-.pp-note { margin-left: 0.8em; color: var(--text-3); font: var(--fs-md) var(--font-ui); }
-.pp-math:empty + .pp-at, .pp-math:empty + .pp-at + .pp-note, .pp-math:empty + .pp-note { margin-left: 0; }
+.pp-note { color: var(--text-3); font: var(--fs-md) var(--font-ui); }
 #g-tools .ui-btn.pp-recording, #g-tools .ui-btn.pp-recording:hover { color: var(--danger); background: var(--danger-soft); }
 .pp-rec {
   position: absolute; top: 12px; right: 12px; z-index: 4; pointer-events: none;
@@ -561,9 +577,10 @@ export function install(api) {
     const defined = new Set(res.map(r => r?.name).filter(Boolean));
     const kinds = new Map([...sticky].filter(([n]) => defined.has(n)));
     for (const r of res) if (r?.name && !r.error && r.value != null) kinds.set(r.name, api.lang.values.kindOf(r.value));
+    const fns = new Set(api.rows.map(r => parseLine(r.src)).filter(st => st?.params && st.name).map(st => st.name));
     sticky = kinds;
     kindsFor = res;
-    kindsInfo = { kinds, defined };
+    kindsInfo = { kinds, defined, fns };
     return kindsInfo;
   }
 

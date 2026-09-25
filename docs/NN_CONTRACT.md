@@ -164,10 +164,11 @@ PRESETS         // { key: { label, group, note, dataset: DATASETS key | null, lr
                 //     attention (3 tokens x 2 -> tied QKV -> Z, seq_max, lr 0.3), causal (seq_prev, lr 0.3), causal_rot
                 //     (hand-set solution of causal's task: W_Q turns the positions back 120°; seq_prev), multihead
                 //     (2 heads, seq_minmax, lr 1), transformer (2 tokens: QKV, Z, H = X + Z W_O, ReLU FFN d -> 2d,
-                //     Y = H + FFN; seq_addmax, lr 0.3), tiny_lm (the tiny language model: one-hot words -> X = O W_E + P
-                //     -> Q, K, V -> 2 causal heads -> H = X + Z W_O -> ReLU FFN d -> 4d -> Y = H + F W_2 -> softmax over 7
-                //     words per position, xent; nl_next, lr 0.1, noise 0; sets meta.vocab and meta.flow; 174 nodes, the one
-                //     preset over the menu's 40, docs/NN_FLOW.md). The 3-token presets
+                //     Y = H + FFN; seq_addmax, lr 0.3), tiny_lm (the tiny language model: 5 one-hot words -> X = O W_E + P
+                //     -> Q, K, V -> 2 causal heads -> H = X + Z W_O -> ReLU FFN d -> 4d (8 -> 32) -> Y = H + F W_2 -> softmax
+                //     over 23 words per position, xent; nl_lm, lr 0.2, noise 0, 300 points; its inputs are "the cat sat on
+                //     the"; sets meta.vocab and meta.flow; 670 nodes, the one preset over the menu's 40, docs/NN_FLOW.md).
+                //     The 3-token presets
                 //     lay X and Q, K, V out as tokens x d grids (a row per token, a column per feature, groups stacked,
                 //     X between the Q and K blocks), so they fit a 1600 x 900 window at 0.63 to 0.73 zoom; later layers are columns
                 //   Embeddings & autoencoders: autoencoder, embedding (one-hot lookup), pca_ae (linear, on cloud)
@@ -264,11 +265,15 @@ DATASETS        // { key: { label, inputs, outputs, kind: 'class' | 'reg' | 'seq
                 //       Targets: the noun, the verb, the noun (the reflexive outputs the noun it refers to)
                 //     nl_agree: "dog chases cats": subject, verb agreeing with it, an object of the other number
                 //       (16 sentences). Targets: the subject, the subject (the verb outputs its subject), the object
-                //   nl_next (kind 'seq', 3 tokens x 7 -> 3 x 7, xent): the next word, one-hot over '.', dog, cat, dogs,
-                //     cats, chases, chase. Inputs '. subject verb', targets 'subject verb object' (the verb agrees, the
-                //     object is the other animal in the other number: 4 sentences). vocab: { word: slot }; decode names
-                //     each token by its most likely word; make() returns words and targetWords; noise on the inputs only
-                //     (docs/NN_FLOW.md)
+                //   Next-word tasks (kind 'seq', xent, docs/NN_FLOW.md): one-hot words in, the next word at each
+                //     position out. vocab: { word: slot }; decode names each token by its most likely word; make()
+                //     returns words and targetWords; noise on the inputs only.
+                //     nl_lm (5 tokens x 23 -> 5 x 23): "the SUBJECT VERB PREPOSITION the OBJECT" from a small grammar
+                //       (20 sentences, "the cat sat on the mat"); the object is fixed by the subject and the
+                //       preposition together. Inputs the first 5 words, targets the last 5 (the tiny language model's)
+                //     nl_next (3 tokens x 7 -> 3 x 7): one-hot over '.', dog, cat, dogs, cats, chases, chase. Inputs
+                //       '. subject verb', targets 'subject verb object' (the verb agrees, the object is the other
+                //       animal in the other number: 4 sentences). Kept for nets saved with the first tiny language model
 WORDS           // frozen { word: [x, y] }: dog (1.2, 0.6), cat (0.6, 0.6), itself (0, 0.6), sees (-0.6, 0.6),
                 //   chases (-1.2, 0.6), and the plurals dogs, cats, themselves, see, chase at y = -0.6.
                 //   x is the kind of word (nouns right, verbs left), y the number
@@ -339,8 +344,9 @@ store.load(net | json, { history = true })   // swap in a whole net (normalized)
   token (docs/NN_LENS.md).
 - `anim`: see below.
 - `train`: `{ epoch, loss, running }`, emitted by `train.js` on play, pause, step, reset and every
-  frame while training. `loss` is the full-dataset loss, or null. The inspector listens to
-  `running` (it brings every card up to date on pause).
+  frame while training. `loss` is the full-dataset loss, or null (while playing, the last one the
+  panel worked out: see Performance). The inspector listens to `running` (it brings every card up
+  to date on pause).
 - `lens`, `viz`, `tour`: see docs/NN_LENS.md.
 
 **`state.anim`** (step-through, owned by `matrix.js`)
@@ -376,6 +382,22 @@ store.load(net | json, { history = true })   // swap in a whole net (normalized)
 - `net` / `values` can fire every animation frame while training.
 - On non-structural changes, update attributes and text in place. Rebuild DOM only on
   `structural` (matrix.js also rebuilds when its toggles, labels or loss case change).
+- Work over the whole dataset gets a share of the time while training, measured as it runs (the
+  median of the last few costs), so a big net's frames go to training and a small net's are as
+  before: the Train panel's full redraw (the dataset's loss, the readout, the chart, the plot) waits
+  until it would take at most 20% of the time; one that costs under a frame's share (about 4 ms) is
+  still done every frame. Pause, a step and any other change redraw at once, so what shows after
+  them is exact. The audience window spaces the presenter's nets the same way and always draws the
+  last one. surf3d.js spaces its trail's points (docs/NN_3D_PLOTS.md) and nn.js the mirror posts
+  (Audience mirror) by the same rule.
+- What nobody can see waits. The matrix panel, hidden (`#nn-main.matrix-hidden`: the divider, or
+  the Flow view's `matrixAway`), skips its scheduled renders (net, values, toggles) but still
+  builds after a structural change and answers `lens` and `anim` at once. The canvas, covered
+  (the Flow or 3D view sets the SVG's `visibility: hidden`), puts off its value paint and meta
+  check; hover, lens, layout, structure and fits go on. Both catch up in a microtask when shown
+  again, before the next frame draws, with their transitions off for two frames (`.nm-snap`,
+  `.nnv-snap` zero `--dur-1` and `--dur-2`), or in the background once 300 ms pass without
+  training. The canvas's `contentBox()` (fit, outOfView, contentRect, png) flushes in full.
 
 **Colours**
 - `colorFor(v, max = 1, theme = 'dark')` gives a diverging `rgba()`: `POS` blue for v >= 0,
@@ -508,9 +530,11 @@ ctx.matrix = { step(±1), toggle(key), opt, render(), update(), reveal(layer, pa
   and the 3D view's bar when they are under it (nn.js sets `--nn-toast-*` on body; the rule is
   `body[data-view="nn"] #toast` in nn.css).
 - train.js sets `ctx.train` (its test handle, below). Its named exports are
-  `readSettings(net, model)`, `netShape`, `defaultDataset`, `forwardMany(net, model, X, n, from, M)`,
+  `readSettings(net, model)`, `netShape`, `defaultDataset`, `forwardMany(net, model, X, n, from, M, outOnly)`,
   `datasetLoss(P, Y, n, K, loss, outAct, segments = 1)`, `wordAccuracy(P, targetWords, n, K, ds)` and
   `adaptNet(net, model, ds, { seed })`; matrix.js and inspector.js import `readSettings`.
+  `forwardMany`'s `outOnly` (default false) is for a caller that reads only the output layer (a
+  loss): a net with attention then fills only that layer (and layer 0), with the same numbers.
   `wordAccuracy` is the share of output tokens whose nearest word (`ds.decode`) is the target word;
   the readout shows it as **words** (classification shows **acc**). `datasetLoss`'s `segments` is the number of
   softmax blocks of a token output layer (tokens × groups): its cross-entropy is their mean, as in
@@ -581,7 +605,9 @@ every module has installed.
   presenter points at.
 - `onMirror(fn)` fires on the store's `net`, `layout`, `sel`, `hover`, `anim`, `lens`, `viz`, `tour`, `v3d`, `s3d` and `flow` events, when
   the split changes, and one frame after any click in the toolbar or the matrix panel or a key
-  up in the tab (the matrix toggles and W have no store event).
+  up in the tab (the matrix toggles and W have no store event). While training, the `net` events'
+  calls are spaced so the posts they cause take at most 15% of the time (mirrorState() times each
+  post; a small net's still go every frame); the pause's commit and every other event call at once.
 - `applyMirror(m)` does nothing outside an audience window. It loads `m.net` with
   `{ history: false }` when its JSON changed, copies `m.matrix` into `ctx.matrix.opt` and
   re-renders the panel when a toggle differs, sets W, sets `sel` / `hover` / `anim` / `lens` /

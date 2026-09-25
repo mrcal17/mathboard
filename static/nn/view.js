@@ -1313,13 +1313,34 @@ export function install(ctx) {
   }
 
   // ---------------------------------------------------------------- frame scheduling
+  // Covered: the Flow or 3D view hides the SVG (visibility: hidden), so nothing on it can be seen.
+  // What training brings every frame (HOLD: the values' paint and the meta check) waits until it
+  // shows again (the style observer below). Structure, layout, hover, the lens and a fit go on as
+  // before, and contentBox() (fit, outOfView, contentRect, png) flushes in full: they measure or
+  // copy the SVG.
+  const covered = () => svg.style.visibility === 'hidden';
+  const HOLD = ['paint', 'meta'], QUIET_MS = 300;
+  let held = null, quietT = 0;   // HOLD flags put off under the cover
   function schedule() {
     if (!raf && shown) raf = requestAnimationFrame(() => { raf = 0; flush(); });
   }
-  function flush() {
+  function flush(force = false) {
     if (raf) { cancelAnimationFrame(raf); raf = 0; }
-    const d = dirty;
+    let d = dirty;
     dirty = {};
+    if (!force && covered()) {
+      for (const k of HOLD) if (d[k]) { (held ||= {})[k] = true; delete d[k]; }
+      if (held) {   // quiet a while (training paused): catch up under the cover, so it goes at once
+        clearTimeout(quietT);
+        quietT = setTimeout(() => { if (held && shown && covered() && !ctx.train?.running) flush(true); }, QUIET_MS);
+      }
+    } else if (held) {
+      // The catch-up shows at once, as the canvas painted under the cover did: without nnv-snap every
+      // edge and neuron would start its fill and stroke transitions together.
+      d = { ...held, ...d };
+      held = null;
+      snap();
+    }
     if (d.build) rebuild();
     const reshaped = (d.build || d.meta) && syncTokens();
     const retitled = (d.build || d.meta) && syncMeta();
@@ -1332,6 +1353,11 @@ export function install(ctx) {
     if (needFit !== false && shown && stage.clientWidth && stage.clientHeight) fit(everFit ? needFit : 0);
   }
   const invalidate = (...keys) => { for (const k of keys) dirty[k] = true; schedule(); };
+  // No transitions (view.css zeroes --dur-1 and --dur-2 under .nnv-snap) until two frames have drawn.
+  function snap() {
+    svg.classList.add('nnv-snap');
+    requestAnimationFrame(() => requestAnimationFrame(() => svg.classList.remove('nnv-snap')));
+  }
 
   store.on('net', p => { stale = true; invalidate(p?.structural ? 'build' : 'meta'); });
   store.on('values', () => invalidate('paint'));
@@ -1345,6 +1371,12 @@ export function install(ctx) {
     for (const r of layers.values()) r.measured = false;
     invalidate('layout', 'paint', 'hl');
   });
+  // Uncovered (the Flow or 3D view closed): catch up on what piled up meanwhile, before the next
+  // frame draws (this runs as a microtask), so the canvas never shows a stale frame.
+  if (typeof MutationObserver === 'function') {
+    new MutationObserver(() => { if (held && shown && !covered()) flush(); })
+      .observe(svg, { attributes: true, attributeFilter: ['style'] });
+  }
   if (typeof ResizeObserver === 'function') {
     new ResizeObserver(() => {
       if (!stage.clientWidth || !stage.clientHeight) return;
@@ -1409,7 +1441,7 @@ export function install(ctx) {
 
   // Content bounds in world px: measured when rendered, estimated from the net otherwise.
   function contentBox() {
-    flush();
+    flush(true);
     try {
       const b = content.getBBox();
       if (b.width > 0 && b.height > 0) return { x: b.x, y: b.y, w: b.width, h: b.height };
